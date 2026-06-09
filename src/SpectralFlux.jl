@@ -1,0 +1,125 @@
+module SpectralFlux
+
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend
+using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
+using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords
+using ..NonlinearTerm: compute_nonlinear_term!
+using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
+
+export calculate_spectral_flux, calculate_spectral_flux!
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_spectral_flux(velocity_hat, ks; binning, dealiasing=true) -> SpectralFluxResult
+
+Compute the spectral energy transfer spectrum T(k) and the cumulative energy
+flux Π(K) from Fourier-space velocity data.
+
+# Arguments
+- `velocity_hat`: Complex array of size `(ns..., D)` — Fourier coefficients of
+  the D velocity components on an N-point periodic grid.
+- `ks`: Tuple of 1D physical-wavenumber vectors (matching FFTW fftfreq convention).
+
+# Keyword Arguments
+- `binning::AbstractShellBinning`: Shell binning strategy; default `LinearBinning(1.0)`.
+- `dealiasing::Bool=true`: Apply 2/3 dealiasing rule when computing (u·∇)u.
+- `backend::AbstractExecutionBackend`: `SerialBackend()` (default) or `FFTBackend()` (requires FFTW extension).
+
+# Returns
+`SpectralFluxResult` with fields:
+- `k_shells`: Representative wavenumber per shell.
+- `transfer_spectrum`: T(k_n) — energy input to shell n per unit time.
+- `flux`: Π(K_n) — cumulative upscale flux (energy transferred to k > K_n).
+
+# Physics
+  T(k_n) = Σ_{|k| ∈ shell_n} Re{ û*(k) · N̂(k) }
+  Π(K_n) = −Σ_{m ≤ n} T(k_m)
+
+Positive Π: forward (downscale) cascade; negative Π: inverse (upscale) cascade.
+
+# References
+- Verma et al. (2002) [arXiv:nlin/0204027]
+- Alexakis, Mininni & Pouquet (2005)
+"""
+function calculate_spectral_flux(
+    velocity_hat,
+    ks::Tuple;
+    binning::AbstractShellBinning = _default_binning(ks),
+    dealiasing::Bool = true,
+    backend::AbstractExecutionBackend = SerialBackend(),
+)
+    ws        = SpectralFluxWorkspace(velocity_hat, ks, binning)
+    k_mag     = wavenumber_magnitude_grid(ks)
+    edges     = shell_edges(binning, maximum(k_mag))
+    centers   = shell_centers(binning, maximum(k_mag))
+    shell_idx = assign_shells(k_mag, edges)
+    result    = SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
+    calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
+                              dealiasing=dealiasing, backend=backend)
+    return result
+end
+
+"""
+    calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx; dealiasing, backend)
+
+In-place version of `calculate_spectral_flux`. Writes into `result` using
+preallocated buffers from `ws` and a precomputed `shell_idx` array (from `assign_shells`).
+Zero heap allocations in the hot path.
+"""
+function calculate_spectral_flux!(
+    result::SpectralFluxResult,
+    ws::SpectralFluxWorkspace,
+    velocity_hat,
+    ks::Tuple,
+    shell_idx::AbstractArray{Int};
+    dealiasing::Bool = true,
+    backend::AbstractExecutionBackend = SerialBackend(),
+)
+    nd = length(ks)
+    ns = size(velocity_hat)[1:nd]
+    D  = size(velocity_hat, nd+1)
+    FT = real(eltype(velocity_hat))
+
+    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks;
+                            dealiasing=dealiasing, backend=backend)
+    N̂ = ws.nonlinear.N̂
+
+    fill!(ws.T_spec, zero(FT))
+    for I in CartesianIndices(ns)
+        n = shell_idx[I]
+        n == 0 && continue
+        s = zero(FT)
+        for comp in 1:D
+            s += real(conj(velocity_hat[I, comp]) * N̂[I, comp])
+        end
+        ws.T_spec[n] += s
+    end
+
+    copyto!(result.transfer_spectrum, ws.T_spec)
+    cumsum!(ws.flux, ws.T_spec)
+    result.flux .= .-ws.flux
+
+    return result
+end
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+function _default_binning(ks)
+    # Default linear binning with spacing = minimum non-zero wavenumber increment
+    min_dk = Inf
+    for k_vec in ks
+        for k in k_vec
+            ak = abs(k)
+            ak > 0 && (min_dk = min(min_dk, ak))
+        end
+    end
+    min_dk = isfinite(min_dk) ? min_dk : 1.0
+    return LinearBinning(min_dk)
+end
+
+end # module SpectralFlux
