@@ -4,7 +4,7 @@ using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, Se
 using ..ShellBinning: shell_edges, assign_shells
 using ..Utils: wavenumber_magnitude_grid
 
-export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
+export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, ScaleToScaleWorkspace
 
 # ---------------------------------------------------------------------------
 # NonlinearTermWorkspace
@@ -56,19 +56,21 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    SpectralFluxWorkspace{NW, V}
+    SpectralFluxWorkspace{NW, V, A}
 
 Preallocated buffers for `calculate_spectral_flux!`.
 
 # Fields
-- `nonlinear::NW`: `NonlinearTermWorkspace` for computing N̂(k).
-- `T_spec::V`:     Shell transfer spectrum buffer (length N_sh).
-- `flux::V`:       Cumulative flux buffer (length N_sh).
+- `nonlinear::NW`:        `NonlinearTermWorkspace` for computing N̂(k).
+- `T_spec::V`:            Shell transfer spectrum buffer (length N_sh).
+- `flux::V`:              Cumulative flux buffer (length N_sh).
+- `transfer_density::A`:  Per-mode transfer density buffer.
 """
-struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector}
+struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector, A<:AbstractArray}
     nonlinear::NW
     T_spec::V
     flux::V
+    transfer_density::A
 end
 
 """
@@ -81,10 +83,12 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
     edges  = shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
+    ns     = size(velocity_hat)[1:length(ks)]
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
         Vector{FT}(undef, N_sh),
         Vector{FT}(undef, N_sh),
+        Array{FT}(undef, ns...),
     )
 end
 
@@ -108,12 +112,14 @@ struct ShellToShellWorkspace{NW<:NonlinearTermWorkspace,
                               CA<:AbstractArray,
                               M<:AbstractMatrix,
                               V<:AbstractVector,
-                              IA<:AbstractArray{Int}}
+                              IA<:AbstractArray{Int},
+                              A<:AbstractArray}
     nonlinear::NW
     û_m::CA
     T_mat::M
     net_transfer::V
     shell_idx::IA
+    transfer_density::A
 end
 
 """
@@ -127,13 +133,60 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
     edges     = shell_edges(binning, maximum(k_mag))
     N_sh      = length(edges) - 1
     shell_idx = assign_shells(k_mag, edges)
+    ns        = size(velocity_hat)[1:length(ks)]
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
         similar(velocity_hat),                   # û_m
         Matrix{FT}(undef, N_sh, N_sh),           # T_mat
         Vector{FT}(undef, N_sh),                 # net_transfer
         shell_idx,
+        Array{FT}(undef, ns...),
     )
+end
+
+# ---------------------------------------------------------------------------
+# ScaleToScaleWorkspace
+# ---------------------------------------------------------------------------
+
+"""
+    ScaleToScaleWorkspace{M, V, IA}
+
+Preallocated buffers for `calculate_mode_to_mode_transfer!`.
+
+# Fields
+- `T_mat::M`:        Output transfer matrix (N_sh × N_sh), written in-place.
+- `net_transfer::V`: Net per-mode transfer buffer.
+- `shell_idx::IA`:   Integer shell-index array.
+"""
+struct ScaleToScaleWorkspace{M<:AbstractMatrix, V<:AbstractArray, IA<:AbstractArray{Int}}
+    T_mat::M
+    net_transfer::V
+    shell_idx::IA
+end
+
+"""
+    ScaleToScaleWorkspace(velocity_hat, ks, binning)
+
+Construct a `ScaleToScaleWorkspace` for the given input and binning.
+"""
+function ScaleToScaleWorkspace(velocity_hat, ks, binning)
+    FT        = real(eltype(velocity_hat))
+    nd        = length(ks)
+    ns        = size(velocity_hat)[1:nd]
+    k_mag     = wavenumber_magnitude_grid(ks)
+
+    if !isnothing(binning)
+        edges     = shell_edges(binning, maximum(k_mag))
+        N_sh      = length(edges) - 1
+        shell_idx = assign_shells(k_mag, edges)
+        T_mat     = Matrix{FT}(undef, N_sh, N_sh)
+    else
+        shell_idx = zeros(Int, ns...)
+        T_mat     = Matrix{FT}(undef, 0, 0)
+    end
+
+    net_transfer = Array{FT}(undef, ns...)
+    return ScaleToScaleWorkspace(T_mat, net_transfer, shell_idx)
 end
 
 end # module Workspaces

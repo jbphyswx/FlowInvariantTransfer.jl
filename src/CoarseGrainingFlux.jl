@@ -1,11 +1,12 @@
 module CoarseGrainingFlux
 
-using ..Types: CoarseGrainingFluxMethod, CoarseGrainingFluxResult, AbstractFilter
+using ..Types: CoarseGrainingFluxMethod, CoarseGrainingFluxResult, AbstractFilter, AbstractFieldDecomposition, NoDecomposition
+using ..Decomposition: decompose_field
 
 export calculate_coarse_graining_flux
 
 # ---------------------------------------------------------------------------
-# Internal stub — overridden by FlowEnergyTransferCGEFExt when
+# Internal stub — overridden by FlowInvariantTransferCGEFExt when
 # CoarseGrainingEnergyFluxes is loaded.
 # ---------------------------------------------------------------------------
 
@@ -27,7 +28,7 @@ end
 
 """
     calculate_coarse_graining_flux(velocity_fields, coords_vecs, ℓ, filter;
-                                   return_diagnostics=false, kwargs...)
+                                   decomposition=NoDecomposition(), return_diagnostics=false, kwargs...)
                                    -> CoarseGrainingFluxResult
 
 Compute the pointwise cross-scale kinetic energy flux Π_ℓ(x) = −τ̄ᵢⱼ S̄ᵢⱼ at filter
@@ -47,30 +48,51 @@ result = calculate_coarse_graining_flux((u, v), (x, y), ℓ, GaussianFilter())
 - `filter::AbstractFilter`: `GaussianFilter()`, `SharpSpectralFilter()`, or `TopHatFilter()`.
 
 # Keyword Arguments
+- `decomposition::AbstractFieldDecomposition`: `NoDecomposition()` (default), `HelmholtzDecomposition()`, `RotationalDecomposition()`, or `DivergentDecomposition()`.
 - `return_diagnostics::Bool=false`: Also return τ̄ᵢⱼ and S̄ᵢⱼ fields.
 - `mask::Union{Nothing,AbstractMatrix{Bool}}=nothing`: Wet/dry mask (`true` = wet).
   If `nothing`, all points treated as wet.
 - Any additional kwargs are forwarded to `CoarseGrainingEnergyFluxes.compute_Π!`.
 
 # Returns
-`CoarseGrainingFluxResult` with:
-- `flux_field`: Π_ℓ(x) array (same shape as input velocity).
-- `mean_flux`: Area-weighted spatial mean.
-- `stress_tensor`: τ̄ᵢⱼ (only when `return_diagnostics=true`).
-- `strain_rate`: S̄ᵢⱼ (only when `return_diagnostics=true`).
-
-# References
-- Aluie, Hecht & Vallis (2018), https://doi.org/10.1175/JPO-D-17-0100.1
-- Aluie (2019), https://doi.org/10.1007/s13137-019-0123-9
+`CoarseGrainingFluxResult` or NamedTuple of `CoarseGrainingFluxResult` depending on decomposition.
 """
 function calculate_coarse_graining_flux(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,
     filter::AbstractFilter;
+    decomposition::AbstractFieldDecomposition = NoDecomposition(),
     kwargs...,
 )
-    return _cg_flux_cgef(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
+    decomposed = decompose_field(decomposition, velocity_fields, coords_vecs; kwargs...)
+    return _calculate_coarse_graining_flux_decomposed(
+        decomposed, velocity_fields, coords_vecs, ℓ, filter; kwargs...
+    )
+end
+
+function _calculate_coarse_graining_flux_decomposed(
+    decomp_fields::Tuple,
+    velocity_fields::Tuple,
+    coords_vecs::Tuple,
+    ℓ::Real,
+    filter::AbstractFilter;
+    kwargs...,
+)
+    return _cg_flux_cgef(decomp_fields, coords_vecs, ℓ, filter; kwargs...)
+end
+
+function _calculate_coarse_graining_flux_decomposed(
+    decomposed::NamedTuple,
+    velocity_fields::Tuple,
+    coords_vecs::Tuple,
+    ℓ::Real,
+    filter::AbstractFilter;
+    kwargs...,
+)
+    return map(decomposed) do fields
+        return _cg_flux_cgef(fields, coords_vecs, ℓ, filter; kwargs...)
+    end
 end
 
 end # module CoarseGrainingFlux

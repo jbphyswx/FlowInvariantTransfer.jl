@@ -1,10 +1,10 @@
-module FlowEnergyTransferFINUFFTExt
+module FlowInvariantTransferFINUFFTExt
 
 using FINUFFT: FINUFFT
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
-using FlowEnergyTransfer.Types: AbstractFilter, CoarseGrainingFluxResult
-using FlowEnergyTransfer.Filters: filter_response
-using FlowEnergyTransfer.Utils: wavenumber_magnitude_grid
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
+using FlowInvariantTransfer.Filters: filter_response
+using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
 
 export nufft_coarse_graining_flux
 
@@ -142,9 +142,9 @@ function nufft_coarse_graining_flux(
             τ_arr[:, i, j] .= τ_scattered[key]
             S_arr[:, i, j] .= S̄_scattered[key]
         end
-        return CoarseGrainingFluxResult{FT, 1}(FT(ℓ), Π, mean_Π, τ_arr, S_arr)
+        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π, mean_Π, τ_arr, S_arr)
     else
-        return CoarseGrainingFluxResult{FT, 1}(FT(ℓ), Π, mean_Π, nothing, nothing)
+        return CoarseGrainingFluxResult(FT(ℓ), Π, mean_Π)
     end
 end
 
@@ -213,4 +213,4 @@ function _build_k_component_nufft(ks_1d::Tuple, d::Int, ms::Tuple)
     return kc
 end
 
-end # module FlowEnergyTransferFINUFFTExt
+end # module FlowInvariantTransferFINUFFTExt

@@ -1,27 +1,29 @@
 using Documenter: Documenter
-using FlowEnergyTransfer: FlowEnergyTransfer
-using FlowEnergyTransfer
+using FlowInvariantTransfer: FlowInvariantTransfer
+using FlowInvariantTransfer
 using FFTW: FFTW
 
 Documenter.makedocs(;
-    modules  = [FlowEnergyTransfer],
-    sitename = "FlowEnergyTransfer.jl",
+    modules  = [FlowInvariantTransfer],
+    sitename = "FlowInvariantTransfer.jl",
     authors  = "Jordan Benjamin",
     format   = Documenter.HTML(;
         prettyurls = get(ENV, "CI", "false") == "true",
-        canonical  = "https://jbphyswx.github.io/FlowEnergyTransfer.jl",
+        canonical  = "https://jbphyswx.github.io/FlowInvariantTransfer.jl",
         edit_link  = "main",
     ),
     pages = [
-        "Home"             => "index.md",
-        "Methods & Theory" => "methods.md",
-        "API Reference"    => "api.md",
+        "Home"                 => "index.md",
+        "Methods & Theory"     => "methods.md",
+        "Architecture"         => "architecture.md",
+        "Backends & Extensions" => "backends.md",
+        "API Reference"        => "api.md",
     ],
     warnonly = [:missing_docs, :docs_block],
 )
 
 Documenter.deploydocs(;
-    repo      = "github.com/jbphyswx/FlowEnergyTransfer.jl",
+    repo      = "github.com/jbphyswx/FlowInvariantTransfer.jl",
     target    = "build",
     branch    = "gh-pages",
     devbranch = "main",

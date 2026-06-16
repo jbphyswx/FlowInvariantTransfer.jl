@@ -1,4 +1,4 @@
-# FlowEnergyTransfer.jl — Performance Refactor Plan
+# FlowInvariantTransfer.jl — Performance Refactor Plan
 
 ## Guiding principles
 
@@ -280,8 +280,8 @@ The FFTW ext overrides similarly receive a workspace and use pre-planned transfo
 | `src/NonlinearTerm.jl` | Thread workspace through, remove internal allocs (Step 6) |
 | `src/SpectralFlux.jl` | `!`-variant, use workspace + `assign_shells` (Step 5) |
 | `src/ShellToShellTransfer.jl` | `!`-variant, use workspace + `assign_shells` (Step 5) |
-| `src/FlowEnergyTransfer.jl` | Export new workspace types and `!`-variants |
-| `ext/FlowEnergyTransferFFTWExt.jl` | Update FFTW path to accept workspace |
+| `src/FlowInvariantTransfer.jl` | Export new workspace types and `!`-variants |
+| `ext/FlowInvariantTransferFFTWExt.jl` | Update FFTW path to accept workspace |
 | `test/runtests.jl` | Update tests for new API (both `!` and allocating variants) |
 
 ---

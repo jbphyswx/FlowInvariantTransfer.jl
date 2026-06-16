@@ -20,6 +20,13 @@ calculate_shell_to_shell_transfer
 calculate_shell_to_shell_transfer!
 ```
 
+## Mode-to-Mode Triad Transfer
+
+```@docs
+calculate_mode_to_mode_transfer
+calculate_mode_to_mode_transfer!
+```
+
 ## Coarse-Graining Flux
 
 ```@docs
@@ -30,8 +37,6 @@ calculate_coarse_graining_flux
 
 ```@docs
 triadic_orthogonal_decomposition
-TriadicOrthogonalDecompositionMethod
-TriadicOrthogonalDecompositionResult
 ```
 
 ## Nonlinear Term
@@ -41,21 +46,68 @@ compute_nonlinear_term
 compute_nonlinear_term!
 ```
 
-## Workspace Structs
+## Invariant Transfer Density
+
+```@docs
+transfer_density
+transfer_density!
+```
+
+## Field Decomposition
+
+```@docs
+decompose_field
+helmholtz_project_spectral!
+```
+
+## Method Types
+
+```@docs
+AbstractEnergyTransferMethod
+SpectralFluxMethod
+ShellToShellTransferMethod
+ModeToModeTransferMethod
+CoarseGrainingFluxMethod
+TriadicOrthogonalDecompositionMethod
+```
+
+## Invariant Types
+
+```@docs
+AbstractInvariant
+KineticEnergy
+Helicity
+Enstrophy
+```
+
+## Decomposition Types
+
+```@docs
+AbstractFieldDecomposition
+NoDecomposition
+HelmholtzDecomposition
+RotationalDecomposition
+DivergentDecomposition
+```
+
+## Result Types
+
+```@docs
+SpectralFluxResult
+ShellToShellResult
+ModeToModeTriadResult
+CoarseGrainingFluxResult
+CoarseGrainingFluxResultWithDiagnostics
+TriadicOrthogonalDecompositionResult
+```
+
+## Workspace Types
 
 ```@docs
 NonlinearTermWorkspace
 SpectralFluxWorkspace
 ShellToShellWorkspace
-```
-
-## Result Structs
-
-```@docs
-SpectralFluxResult
-ShellToShellResult
-CoarseGrainingFluxResult
-CoarseGrainingFluxResultWithDiagnostics
+ScaleToScaleWorkspace
 ```
 
 ## Wavenumber Utilities
@@ -94,7 +146,12 @@ AbstractExecutionBackend
 SerialBackend
 FFTBackend
 ThreadedBackend
+DistributedBackend
+GPUBackend
+AutoBackend
 NUFFTBackend
+SHTBackend
+NUFSHTBackend
 ```
 
 ## Filter Types

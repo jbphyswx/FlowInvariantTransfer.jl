@@ -1,15 +1,15 @@
 [deps]
-FlowEnergyTransfer = "cfd29f76-e501-4398-93b1-d62a8bcdc83e"
+FlowInvariantTransfer = "cfd29f76-e501-4398-93b1-d62a8bcdc83e"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
 [compat]
-FlowEnergyTransfer = "0.1"
+FlowInvariantTransfer = "0.1"
 CairoMakie = "0.15"
 FFTW = "1"
 julia = "1.9"
 
 [sources]
-FlowEnergyTransfer = { path = "../.." }
+FlowInvariantTransfer = { path = "../.." }

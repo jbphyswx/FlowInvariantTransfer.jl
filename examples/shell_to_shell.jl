@@ -1,5 +1,5 @@
 """
-Shell-to-Shell Transfer Example — FlowEnergyTransfer.jl
+Shell-to-Shell Transfer Example — FlowInvariantTransfer.jl
 
 Demonstrates `calculate_shell_to_shell_transfer` on a 2D incompressible flow,
 verifying antisymmetry of T(n,m) and showing the transfer matrix heat map.
@@ -9,7 +9,7 @@ Run from the repo root:
     julia --project=examples examples/shell_to_shell.jl
 """
 
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 using Random: Random

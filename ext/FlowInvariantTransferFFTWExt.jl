@@ -1,11 +1,12 @@
-module FlowEnergyTransferFFTWExt
+module FlowInvariantTransferFFTWExt
 
 using FFTW: FFTW
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
-using FlowEnergyTransfer.Types: AbstractShellBinning, LinearBinning, ShellToShellResult
-using FlowEnergyTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
-using FlowEnergyTransfer.Utils: wavenumber_magnitude_grid
-using FlowEnergyTransfer.Workspaces: ShellToShellWorkspace
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer.Types: AbstractShellBinning, LinearBinning, ShellToShellResult, AbstractInvariant, KineticEnergy
+using FlowInvariantTransfer.Invariants: transfer_density!
+using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
+using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
+using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
 # Override NonlinearTerm._nonlinear_term_fft
@@ -81,6 +82,7 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     ks::Tuple;
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
+    invariant::AbstractInvariant = KineticEnergy(),
 )
     nd    = length(ks)
     ns    = size(velocity_hat)[1:nd]
@@ -123,7 +125,13 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
         end
     end
 
-    # Antisymmetric T(n,m) = ½[Σ_{S_n} Re(û* N̂_m) - Σ_{S_m} Re(û* N̂_n)]
+    # Precompute transfer density for all shells
+    T_density_all = [similar(ws.transfer_density) for _ in 1:N_sh]
+    for m in 1:N_sh
+        transfer_density!(T_density_all[m], invariant, velocity_hat, N̂_all[m], ks)
+    end
+
+    # Antisymmetric T(n,m) = ½[Σ_{S_n} T_density_m - Σ_{S_m} T_density_n]
     fill!(result.transfer_matrix, zero(FT))
     for n in 1:N_sh
         for m in 1:N_sh
@@ -133,12 +141,8 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
             for I in CartesianIndices(ns)
                 c_n = ws.shell_idx[I] == n
                 c_m = ws.shell_idx[I] == m
-                (c_n || c_m) || continue
-                for c in 1:D
-                    uc = conj(velocity_hat[I, c])
-                    c_n && (s_nm += real(uc * N̂_all[m][I, c]))
-                    c_m && (s_mn += real(uc * N̂_all[n][I, c]))
-                end
+                c_n && (s_nm += T_density_all[m][I])
+                c_m && (s_mn += T_density_all[n][I])
             end
             result.transfer_matrix[n, m] = FT(0.5) * (s_nm - s_mn)
         end
@@ -203,4 +207,4 @@ function FET.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     return dft_col
 end
 
-end # module FlowEnergyTransferFFTWExt
+end # module FlowInvariantTransferFFTWExt

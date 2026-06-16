@@ -1,8 +1,8 @@
-module FlowEnergyTransferCairoMakieExt
+module FlowInvariantTransferCairoMakieExt
 
 using CairoMakie: CairoMakie
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
-using FlowEnergyTransfer.Types: SpectralFluxResult, CoarseGrainingFluxResult, ShellToShellResult
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer.Types: SpectralFluxResult, CoarseGrainingFluxResult, ShellToShellResult
 
 # ---------------------------------------------------------------------------
 # Override stub
@@ -144,4 +144,4 @@ function _plot_shell_transfer_matrix(r::ShellToShellResult{FT};
     return fig
 end
 
-end # module FlowEnergyTransferCairoMakieExt
+end # module FlowInvariantTransferCairoMakieExt

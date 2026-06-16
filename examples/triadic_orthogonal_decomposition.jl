@@ -1,5 +1,5 @@
 """
-Triadic Orthogonal Decomposition Example — FlowEnergyTransfer.jl
+Triadic Orthogonal Decomposition Example — FlowInvariantTransfer.jl
 
 Demonstrates `triadic_orthogonal_decomposition` on a simulated multi-modal signal
 with a known triadic interaction (resonance condition f_k + f_l = f_n).
@@ -8,7 +8,7 @@ Run from the repo root:
     julia --project=examples examples/triadic_orthogonal_decomposition.jl
 """
 
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 using Random: Random

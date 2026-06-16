@@ -1,4 +1,4 @@
-module FlowEnergyTransfer
+module FlowInvariantTransfer
 
 using PrecompileTools: PrecompileTools
 
@@ -8,6 +8,8 @@ using PrecompileTools: PrecompileTools
 
 include("types.jl")
 include("utils.jl")
+include("Invariants.jl")
+include("Decomposition.jl")
 include("ShellToShell/ShellBinning.jl")
 include("Filters.jl")
 include("Workspaces.jl")
@@ -16,6 +18,7 @@ include("SpectralFlux.jl")
 include("CoarseGrainingFlux.jl")
 include("ShellToShell/ShellToShellTransfer.jl")
 include("ScaleToScale/TriadicOrthogonalDecomposition/TriadicOrthogonalDecomposition.jl")
+include("ScaleToScale/ScaleToScaleTransfer.jl")
 
 # ---------------------------------------------------------------------------
 # Re-exports
@@ -26,7 +29,17 @@ using .Types:
     SpectralFluxMethod,
     CoarseGrainingFluxMethod,
     ShellToShellTransferMethod,
+    ModeToModeTransferMethod,
     TriadicOrthogonalDecompositionMethod,
+    AbstractInvariant,
+    KineticEnergy,
+    Helicity,
+    Enstrophy,
+    AbstractFieldDecomposition,
+    NoDecomposition,
+    HelmholtzDecomposition,
+    RotationalDecomposition,
+    DivergentDecomposition,
     AbstractFilter,
     SharpSpectralFilter,
     GaussianFilter,
@@ -39,19 +52,27 @@ using .Types:
     AbstractExecutionBackend,
     SerialBackend,
     ThreadedBackend,
+    DistributedBackend,
+    GPUBackend,
+    AutoBackend,
     FFTBackend,
     NUFFTBackend,
+    SHTBackend,
+    NUFSHTBackend,
     SpectralFluxResult,
     CoarseGrainingFluxResult,
     CoarseGrainingFluxResultWithDiagnostics,
     ShellToShellResult,
+    ModeToModeTriadResult,
     TriadicOrthogonalDecompositionResult
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, FFTBackend, NUFFTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, TriadicOrthogonalDecompositionResult
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
+export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
 using .Utils:
     wavenumber_grid,
@@ -68,6 +89,12 @@ export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 using .ShellBinning: shell_edges, shell_centers, n_shells, shell_mask, assign_shells
 export shell_edges, shell_centers, n_shells, shell_mask, assign_shells
 
+using .Invariants: transfer_density, transfer_density!
+export transfer_density, transfer_density!
+
+using .Decomposition: decompose_field, helmholtz_project_spectral!
+export decompose_field, helmholtz_project_spectral!
+
 using .Filters: filter_response, apply_filter_spectral, apply_filter_spectral!
 export filter_response, apply_filter_spectral, apply_filter_spectral!
 
@@ -80,11 +107,13 @@ export compute_nonlinear_term, compute_nonlinear_term!
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
+using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition
 
 export calculate_spectral_flux, calculate_spectral_flux!
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
+export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!
 export triadic_orthogonal_decomposition
 export calculate_energy_transfer
 
@@ -129,7 +158,7 @@ or `ShellToShellResult`.
 
 # Examples
 ```julia
-using FlowEnergyTransfer, FFTW
+using FlowInvariantTransfer, FFTW
 
 # Spectral flux on a 32×32 periodic domain
 N = 32; L = 2π
@@ -172,6 +201,16 @@ function calculate_energy_transfer(
 end
 
 function calculate_energy_transfer(
+    method::ModeToModeTransferMethod,
+    velocity_hat::AbstractArray{<:Complex},
+    ks::Tuple;
+    kwargs...,
+)
+    return calculate_mode_to_mode_transfer(velocity_hat, ks;
+        binning=method.binning, invariant=method.invariant, kwargs...)
+end
+
+function calculate_energy_transfer(
     method::TriadicOrthogonalDecompositionMethod,
     X::AbstractArray;
     kwargs...,
@@ -203,4 +242,4 @@ PrecompileTools.@setup_workload begin
     end
 end
 
-end # module FlowEnergyTransfer
+end # module FlowInvariantTransfer

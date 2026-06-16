@@ -1,6 +1,8 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, AbstractInvariant, KineticEnergy, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+using ..Invariants: transfer_density!
+using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -49,7 +51,24 @@ function calculate_spectral_flux(
     ks::Tuple;
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::Bool = true,
+    invariant::AbstractInvariant = KineticEnergy(),
+    decomposition::AbstractFieldDecomposition = NoDecomposition(),
     backend::AbstractExecutionBackend = SerialBackend(),
+)
+    decomposed = decompose_field(decomposition, velocity_hat, ks)
+    return _calculate_spectral_flux_decomposed(
+        decomposed, velocity_hat, ks, binning, dealiasing, invariant, backend
+    )
+end
+
+function _calculate_spectral_flux_decomposed(
+    û_decomp::AbstractArray{<:Complex},
+    velocity_hat,
+    ks::Tuple,
+    binning::AbstractShellBinning,
+    dealiasing::Bool,
+    invariant::AbstractInvariant,
+    backend::AbstractExecutionBackend,
 )
     ws        = SpectralFluxWorkspace(velocity_hat, ks, binning)
     k_mag     = wavenumber_magnitude_grid(ks)
@@ -57,13 +76,44 @@ function calculate_spectral_flux(
     centers   = shell_centers(binning, maximum(k_mag))
     shell_idx = assign_shells(k_mag, edges)
     result    = SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
-    calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
-                              dealiasing=dealiasing, backend=backend)
+    
+    if û_decomp === velocity_hat
+        calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
+                                  dealiasing=dealiasing, invariant=invariant, backend=backend)
+    else
+        compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing, backend=backend)
+        _calculate_spectral_flux_with_N̂!(result, ws, û_decomp, ws.nonlinear.N̂, ks, shell_idx; invariant=invariant)
+    end
     return result
 end
 
+function _calculate_spectral_flux_decomposed(
+    decomposed::NamedTuple,
+    velocity_hat,
+    ks::Tuple,
+    binning::AbstractShellBinning,
+    dealiasing::Bool,
+    invariant::AbstractInvariant,
+    backend::AbstractExecutionBackend,
+)
+    ws = SpectralFluxWorkspace(velocity_hat, ks, binning)
+    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing, backend=backend)
+    N̂ = ws.nonlinear.N̂
+
+    k_mag     = wavenumber_magnitude_grid(ks)
+    edges     = shell_edges(binning, maximum(k_mag))
+    centers   = shell_centers(binning, maximum(k_mag))
+    shell_idx = assign_shells(k_mag, edges)
+
+    return map(decomposed) do û_comp
+        res = SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
+        _calculate_spectral_flux_with_N̂!(res, ws, û_comp, N̂, ks, shell_idx; invariant=invariant)
+        return res
+    end
+end
+
 """
-    calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx; dealiasing, backend)
+    calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx; dealiasing, invariant, backend)
 
 In-place version of `calculate_spectral_flux`. Writes into `result` using
 preallocated buffers from `ws` and a precomputed `shell_idx` array (from `assign_shells`).
@@ -76,26 +126,36 @@ function calculate_spectral_flux!(
     ks::Tuple,
     shell_idx::AbstractArray{Int};
     dealiasing::Bool = true,
+    invariant::AbstractInvariant = KineticEnergy(),
     backend::AbstractExecutionBackend = SerialBackend(),
+)
+    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks;
+                            dealiasing=dealiasing, backend=backend)
+    _calculate_spectral_flux_with_N̂!(result, ws, velocity_hat, ws.nonlinear.N̂, ks, shell_idx; invariant=invariant)
+    return result
+end
+
+function _calculate_spectral_flux_with_N̂!(
+    result::SpectralFluxResult,
+    ws::SpectralFluxWorkspace,
+    velocity_hat,
+    N̂,
+    ks::Tuple,
+    shell_idx::AbstractArray{Int};
+    invariant::AbstractInvariant = KineticEnergy(),
 )
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd+1)
     FT = real(eltype(velocity_hat))
 
-    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks;
-                            dealiasing=dealiasing, backend=backend)
-    N̂ = ws.nonlinear.N̂
+    # Write per-mode transfer density into ws.transfer_density
+    transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
 
     fill!(ws.T_spec, zero(FT))
     for I in CartesianIndices(ns)
         n = shell_idx[I]
         n == 0 && continue
-        s = zero(FT)
-        for comp in 1:D
-            s += real(conj(velocity_hat[I, comp]) * N̂[I, comp])
-        end
-        ws.T_spec[n] += s
+        ws.T_spec[n] += ws.transfer_density[I]
     end
 
     copyto!(result.transfer_spectrum, ws.T_spec)

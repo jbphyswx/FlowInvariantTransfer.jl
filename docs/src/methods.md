@@ -59,6 +59,106 @@ The net energy gain of shell n is ``\sum_m T(n,m)``.
 
 ---
 
+## Mode-to-Mode Triad Transfer S(k|p|q)
+
+The mode-to-mode triad transfer is the **most fundamental** scale-to-scale diagnostic.
+It gives the energy transferred *to* receiver mode ``\mathbf{k}`` *from* giver ``\mathbf{p}``,
+mediated by ``\mathbf{q}``, with the triad closure constraint ``\mathbf{k} = \mathbf{p} + \mathbf{q}``:
+
+```math
+S(\mathbf{k}|\mathbf{p}|\mathbf{q}) = -\text{Im}\bigl\{
+    [\mathbf{k} \cdot \hat{\mathbf{u}}(\mathbf{q})] \,
+    [\hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{\mathbf{u}}(\mathbf{p})]
+\bigr\}
+```
+
+### Properties
+- **Giver/receiver antisymmetry:** ``S(\mathbf{k}|\mathbf{p}|\mathbf{q}) = -S(\mathbf{p}|\mathbf{k}|\mathbf{q})``
+- **Net transfer:** ``T(\mathbf{k}) = \sum_{\mathbf{p}} S(\mathbf{k}|\mathbf{p}|\mathbf{q}=\mathbf{k}-\mathbf{p})``
+- **Conservation:** ``\sum_{\mathbf{k}} T(\mathbf{k}) = 0``
+
+### Reduction Hierarchy
+
+All other diagnostics are reductions of the mode-to-mode tensor:
+
+```
+S(k|p|q)   delta in vector k   most fundamental, O(N^{2D})
+   │  sum over directions on |k|=K, |p|=Q
+   ▼
+T(K,Q)     delta in |k|        magnitude-to-magnitude
+   │  finite shell width
+   ▼
+T(n,m)     sharp Fourier shells (shell-to-shell)
+   │  sum over givers
+   ▼
+T(k), Π(K) spectral flux
+```
+
+### Computational Cost
+
+The full tensor requires ``O(N^{2D})`` operations — exact but expensive. With a binning
+strategy, the code also computes the shell-reduced matrix ``T(K,Q)`` simultaneously.
+
+**References:** Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book).
+
+---
+
+## Multi-Invariant Generalization
+
+The same nonlinear-term machinery applies to any quadratic inviscid invariant. Only the
+**per-mode transfer density** — the inner product weighting — changes. This is controlled
+by the `invariant` keyword argument.
+
+| Invariant | Definition | Transfer density ``t(\mathbf{k})`` | Cascade |
+|-----------|------------|----------------------------------|---------|
+| `KineticEnergy()` | ``E = \tfrac{1}{2}\int |\mathbf{u}|^2`` | ``\sum_c \text{Re}[\hat{u}_c^* \hat{N}_c]`` | Forward (3D), inverse (2D) |
+| `Helicity()` | ``H = \int \mathbf{u}\cdot\boldsymbol{\omega}`` (3D) | ``\sum_c \text{Re}[\hat{\omega}_c^* \hat{N}_c]``, ``\hat{\boldsymbol{\omega}} = i\mathbf{k}\times\hat{\mathbf{u}}`` | Forward, co-directional with ``E`` |
+| `Enstrophy()` | ``\Omega = \tfrac{1}{2}\int \omega^2`` (2D) | ``\text{Re}[\hat{\omega}^* \hat{N}_\omega]``, scalar vorticity | Forward, counter-directional to ``E`` |
+
+In 2D turbulence, kinetic energy cascades *inversely* (upscale) while enstrophy cascades
+*forward* (downscale) — the Kraichnan–Batchelor dual cascade. In 3D, energy and helicity
+both cascade forward (co-directional).
+
+**References:** Kraichnan (1967); Alexakis & Biferale (2018), §3.5–3.6.
+
+---
+
+## Partial-Flux Decompositions (Helmholtz)
+
+The total energy flux can be decomposed into contributions from physically distinct
+velocity components. The **Helmholtz decomposition** splits the velocity field into
+rotational (solenoidal, ``\nabla\times\boldsymbol{\psi}``) and divergent (irrotational,
+``\nabla\phi``) parts:
+
+```math
+\mathbf{u} = \mathbf{u}_{\text{rot}} + \mathbf{u}_{\text{div}}, \qquad
+\nabla\cdot\mathbf{u}_{\text{rot}} = 0, \quad
+\nabla\times\mathbf{u}_{\text{div}} = \mathbf{0}
+```
+
+The flux then decomposes as ``\Pi = \Pi_{\text{rot}} + \Pi_{\text{div}} + \text{cross terms}``,
+enabling separation of rotational (vortical) and divergent (wave/compressible) contributions
+to the energy cascade.
+
+This is implemented via the `decomposition` keyword:
+
+- `NoDecomposition()` — full velocity (default)
+- `RotationalDecomposition()` — rotational component only
+- `DivergentDecomposition()` — divergent component only
+- `HelmholtzDecomposition()` — both, returned as a `NamedTuple`
+
+The decomposition is backed by `HelmholtzDecomposition.jl` and supports both physical-space
+(Poisson solve) and spectral-space (projection) paths.
+
+!!! note "Helmholtz ≠ helical ≠ toroidal/poloidal"
+    Helmholtz separates divergent from rotational flow. The **helical ±** decomposition
+    splits the rotational part into curl-eigenmode chiralities. **Toroidal/poloidal**
+    splits the solenoidal part by geometry. These are distinct decompositions.
+
+**References:** Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023).
+
+---
+
 ## Nonlinear Term N̂(k)
 
 Both methods above require the nonlinear advection term

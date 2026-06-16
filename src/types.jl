@@ -1,10 +1,12 @@
 module Types
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, FFTBackend, NUFFTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, TriadicOrthogonalDecompositionResult
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
+export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -21,6 +23,90 @@ abstract type AbstractEnergyTransferMethod end
 # Declare abstract types needed as type parameters before the structs that use them
 abstract type AbstractShellBinning end
 abstract type AbstractFilter end
+
+# ---------------------------------------------------------------------------
+# Quadratic-invariant trait
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractInvariant
+
+Trait supertype selecting *which quadratic inviscid invariant* a transfer
+diagnostic accumulates. The same nonlinear-term machinery serves every
+invariant; only the per-mode transfer-density weighting changes (see
+`Invariants.transfer_density!`).
+
+Concrete subtypes: [`KineticEnergy`](@ref) (default), [`Helicity`](@ref) (3D),
+[`Enstrophy`](@ref) (2D).
+"""
+abstract type AbstractInvariant end
+
+"""
+    KineticEnergy <: AbstractInvariant
+
+Kinetic energy `E = ½∫|u|²`. The default invariant; transfer density is
+`Re{ û*(k) · N̂(k) }`. Forward cascade in 3D, inverse in 2D.
+"""
+struct KineticEnergy <: AbstractInvariant end
+
+"""
+    Helicity <: AbstractInvariant
+
+Helicity `H = ∫ u·ω`, `ω = ∇×u` (3D only). Transfer density is
+`Re{ ω̂*(k) · N̂(k) }` with `ω̂ = i k × û`. Co-directional (forward) with energy.
+"""
+struct Helicity <: AbstractInvariant end
+
+"""
+    Enstrophy <: AbstractInvariant
+
+Enstrophy `Ω = ½∫ ω²` (2D only), `ω = ∂_x v − ∂_y u`. Transfer density is
+`Re{ ω̂*(k) · N̂_ω(k) }` with scalar vorticity `ω̂ = i(k_x û_y − k_y û_x)` and
+its nonlinear term `N̂_ω = i(k_x N̂_y − k_y N̂_x)`. Counter-directional (forward)
+to the inverse energy cascade (Kraichnan–Batchelor).
+"""
+struct Enstrophy <: AbstractInvariant end
+
+# ---------------------------------------------------------------------------
+# Field decomposition / projection traits
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractFieldDecomposition
+
+Abstract supertype specifying the field decomposition/projection strategy
+(e.g., Helmholtz rotational/divergent decomposition).
+"""
+abstract type AbstractFieldDecomposition end
+
+"""
+    NoDecomposition <: AbstractFieldDecomposition
+
+No decomposition or projection is applied; use the full velocity field.
+"""
+struct NoDecomposition <: AbstractFieldDecomposition end
+
+"""
+    HelmholtzDecomposition <: AbstractFieldDecomposition
+
+Decompose the velocity field into rotational (solenoidal) and divergent (dilatational)
+components, computing transfer results for both.
+"""
+struct HelmholtzDecomposition <: AbstractFieldDecomposition end
+
+"""
+    RotationalDecomposition <: AbstractFieldDecomposition
+
+Only compute or retain the rotational (solenoidal/divergence-free) component.
+"""
+struct RotationalDecomposition <: AbstractFieldDecomposition end
+
+"""
+    DivergentDecomposition <: AbstractFieldDecomposition
+
+Only compute or retain the divergent (dilatational/curl-free) component.
+"""
+struct DivergentDecomposition <: AbstractFieldDecomposition end
 
 """
     SpectralFluxMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod
@@ -74,6 +160,39 @@ the full field u (Verma et al. 2002). This is automatically verified by default.
 struct ShellToShellTransferMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod
     binning::B
 end
+
+"""
+    ModeToModeTransferMethod{B, I<:AbstractInvariant} <: AbstractEnergyTransferMethod
+
+Compute the exact **mode-to-mode triad transfer** `S(k|p|q)` — energy (or other
+invariant) given *to* receiver mode `k` *from* giver `p`, mediated by `q`, with
+triad closure `k = p + q`:
+
+    S(k|p|q) = −Im{ [k · û(q)] [û*(k) · û(p)] }.
+
+This is the most fundamental (delta-in-`k`) scale-to-scale object; it reduces to
+the shell-to-shell matrix and the spectral transfer `T(k)` under summation.
+
+# Fields
+- `binning::B`: Optional shell binning for reductions to the magnitude-to-magnitude
+  transfer `T(K,Q)`. Use `nothing` to return the raw per-receiver transfer only.
+- `invariant::I`: Which quadratic invariant to accumulate (default `KineticEnergy()`).
+
+# Cost
+`O(N^D)` per receiver mode; `O(N^{2D})` for the full tensor — exact but slow.
+Guard with a mode-count limit unless `force=true`.
+
+# References
+- Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book).
+"""
+struct ModeToModeTransferMethod{B, I<:AbstractInvariant} <: AbstractEnergyTransferMethod
+    binning::B
+    invariant::I
+end
+ModeToModeTransferMethod(; binning=nothing, invariant=KineticEnergy()) =
+    ModeToModeTransferMethod(binning, invariant)
+ModeToModeTransferMethod(binning::AbstractShellBinning; invariant=KineticEnergy()) =
+    ModeToModeTransferMethod(binning, invariant)
 
 """
     TriadicOrthogonalDecompositionMethod{N, O, M} <: AbstractEnergyTransferMethod
@@ -232,6 +351,52 @@ Requires `using FINUFFT` to load the FINUFFT extension.
 """
 struct NUFFTBackend <: AbstractExecutionBackend end
 
+"""
+    DistributedBackend <: AbstractExecutionBackend
+
+Multi-process execution using the `Distributed` standard library (with
+`SharedArrays`). Parallelises the outer loop over receiver shells/modes across
+worker processes. Requires `using Distributed, SharedArrays` to load the extension.
+"""
+struct DistributedBackend <: AbstractExecutionBackend end
+
+"""
+    GPUBackend{B} <: AbstractExecutionBackend
+
+GPU execution via `KernelAbstractions`. Holds the concrete KA backend object
+`backend::B` (e.g. `GPUBackend(CUDA.CUDABackend())`), so the same kernels run on
+any KA-supported device. Requires `using KernelAbstractions` (and a vendor package
+such as `CUDA`) to load the extension.
+"""
+struct GPUBackend{B} <: AbstractExecutionBackend
+    backend::B
+end
+
+"""
+    AutoBackend <: AbstractExecutionBackend
+
+Automatically select the best available execution backend at call time, in the
+order distributed → threaded → serial (transform fast-paths such as FFT are
+chosen independently when their extensions are loaded).
+"""
+struct AutoBackend <: AbstractExecutionBackend end
+
+"""
+    SHTBackend <: AbstractExecutionBackend
+
+Spherical-harmonic-transform front-end for regular spherical grids, backed by
+`FastSphericalHarmonics`. Requires the FastSphericalHarmonics extension.
+"""
+struct SHTBackend <: AbstractExecutionBackend end
+
+"""
+    NUFSHTBackend <: AbstractExecutionBackend
+
+Non-uniform spherical-harmonic-transform front-end for scattered spherical data,
+backed by `NUFSHT`. Requires the NUFSHT extension.
+"""
+struct NUFSHTBackend <: AbstractExecutionBackend end
+
 # ---------------------------------------------------------------------------
 # Result containers
 # ---------------------------------------------------------------------------
@@ -323,6 +488,31 @@ struct ShellToShellResult{V<:AbstractVector, M<:AbstractMatrix, E}
 end
 ShellToShellResult(c, e, T, n, a) =
     ShellToShellResult{typeof(c), typeof(T), eltype(T)}(c, e, T, n, a)
+
+"""
+    ModeToModeTriadResult{I, KS, A, NT}
+
+Result of a mode-to-mode triad transfer computation `S(k|p|q)`.
+
+# Fields
+- `invariant::I`: The invariant that was accumulated (e.g. `KineticEnergy()`).
+- `ks::KS`: The wavenumber vectors `(kx, ky[, kz])` defining the spectral grid.
+- `net_transfer::A`: `T(k) = Σ_p S(k|p|q=k−p)` — net per-mode transfer, same
+  spatial shape as one velocity component.
+- `reductions::NT`: A `NamedTuple` of optional reductions, e.g.
+  `(; K, Q, TKQ)` for the magnitude-to-magnitude matrix `T(K,Q)` when a binning
+  was supplied, or an empty `NamedTuple` otherwise.
+
+Parametric on all array/field types — GPU-array friendly.
+"""
+struct ModeToModeTriadResult{I, KS, A, NT}
+    invariant::I
+    ks::KS
+    net_transfer::A
+    reductions::NT
+end
+ModeToModeTriadResult(invariant, ks, net_transfer) =
+    ModeToModeTriadResult(invariant, ks, net_transfer, NamedTuple())
 
 """
     TriadicOrthogonalDecompositionResult{V, A3, PM}

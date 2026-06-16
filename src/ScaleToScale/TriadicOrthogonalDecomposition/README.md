@@ -49,10 +49,10 @@ The implementation is split into a core module and package extensions for optima
    - Implements the serial SVD loop over all triads.
    - Implements rank-truncated `sirovich_svd` and `lowrank_svd` to ensure correct dimensions when the system rank is less than the number of blocks.
 
-2. **FFTW Extension (`FlowEnergyTransferFFTWExt.jl`):**
+2. **FFTW Extension (`FlowInvariantTransferFFTWExt.jl`):**
    - Overrides `_temporal_block_dft_fft!` using `FFTW.fft` for O(N log N) temporal transforms. This is highly recommended for any production run.
 
-3. **OhMyThreads Extension (`FlowEnergyTransferOhMyThreadsExt.jl`):**
+3. **OhMyThreads Extension (`FlowInvariantTransferOhMyThreadsExt.jl`):**
    - Overrides the triad loop using `OhMyThreads.@tasks` to parallelize SVD computations across all CPU cores.
 
 ---
@@ -60,7 +60,7 @@ The implementation is split into a core module and package extensions for optima
 ## Usage Example
 
 ```julia
-using FlowEnergyTransfer
+using FlowInvariantTransfer
 using FFTW # activates FFTW extension for fast DFTs
 
 # Data: 512 time snapshots, 1 variable, 64 spatial points

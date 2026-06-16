@@ -1,8 +1,8 @@
-module FlowEnergyTransferCGEFExt
+module FlowInvariantTransferCGEFExt
 
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes as CGEF
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
-using FlowEnergyTransfer.Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter, CoarseGrainingFluxResult
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer.Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 
 # ---------------------------------------------------------------------------
 # Filter type mapping: FET.AbstractFilter → CGEF.AbstractFilterKernel
@@ -40,7 +40,7 @@ function FET.CoarseGrainingFlux._cg_flux_cgef(
     D == nd || throw(ArgumentError(
         "Number of velocity components ($D) must equal number of spatial dimensions ($nd)"))
     nd == 2 || throw(ArgumentError(
-        "FlowEnergyTransferCGEFExt currently supports 2D Cartesian grids only (nd=$nd). " *
+        "FlowInvariantTransferCGEFExt currently supports 2D Cartesian grids only (nd=$nd). " *
         "For 3D or spherical, call CoarseGrainingEnergyFluxes directly."))
 
     FT  = eltype(velocity_fields[1])
@@ -70,7 +70,7 @@ function FET.CoarseGrainingFlux._cg_flux_cgef(
 
     CGEF.Diagnostics.compute_Π!(
         Π_out,
-        u, v,
+        u, v, nothing,
         grid,
         cgef_kernel,
         FT(ℓ);
@@ -93,10 +93,10 @@ function FET.CoarseGrainingFlux._cg_flux_cgef(
         S_arr[:, :, 1, 2] .= workspace.S_xy
         S_arr[:, :, 2, 1] .= workspace.S_xy
         S_arr[:, :, 2, 2] .= workspace.S_yy
-        return CoarseGrainingFluxResult{FT, 2}(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
+        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
     else
-        return CoarseGrainingFluxResult{FT, 2}(FT(ℓ), Π_out, FT(mean_Π), nothing, nothing)
+        return CoarseGrainingFluxResult(FT(ℓ), Π_out, FT(mean_Π))
     end
 end
 
-end # module FlowEnergyTransferCGEFExt
+end # module FlowInvariantTransferCGEFExt

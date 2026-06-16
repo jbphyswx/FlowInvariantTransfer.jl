@@ -1,5 +1,5 @@
 """
-Spectral Flux Example — FlowEnergyTransfer.jl
+Spectral Flux Example — FlowInvariantTransfer.jl
 
 Demonstrates `calculate_spectral_flux` on a 2D incompressible flow field
 constructed from a random streamfunction.
@@ -8,7 +8,7 @@ Run from the repo root:
     julia --project=examples examples/spectral_flux.jl
 """
 
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 using Random: Random

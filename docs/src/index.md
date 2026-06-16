@@ -1,12 +1,22 @@
-# FlowEnergyTransfer.jl
+# FlowInvariantTransfer.jl
 
-`FlowEnergyTransfer.jl` provides fast, minimally-allocating Julia implementations of the
-standard methods for computing kinetic energy transfer across scales in turbulent flow:
+`FlowInvariantTransfer.jl` provides fast, minimally-allocating Julia implementations of
+cross-scale transfer diagnostics for turbulent flow, supporting **multiple quadratic inviscid
+invariants** (kinetic energy, helicity, enstrophy) and **partial-flux decompositions**
+(Helmholtz rotational/divergent).
 
-- **Spectral flux** Π(K) — cumulative energy crossing wavenumber threshold K
-- **Shell-to-shell transfer** T(n, m) — directed energy from mediator shell m to receiver shell n
-- **Coarse-graining flux** Π_ℓ(x) — pointwise scale-to-scale flux at filter scale ℓ
-- **Triadic Orthogonal Decomposition** — frequency-domain modal decomposition of triadic nonlinear interactions
+## Diagnostic Methods
+
+| Method | Function | Output |
+|--------|----------|--------|
+| **Spectral flux** | [`calculate_spectral_flux`](@ref) | Π(K) — cumulative energy crossing wavenumber K |
+| **Shell-to-shell** | [`calculate_shell_to_shell_transfer`](@ref) | T(n,m) — directed transfer from shell m to n |
+| **Mode-to-mode triads** | [`calculate_mode_to_mode_transfer`](@ref) | S(k\|p\|q) — exact triad transfer |
+| **Coarse-graining** | [`calculate_coarse_graining_flux`](@ref) | Π_ℓ(x) — pointwise flux at filter scale ℓ |
+| **TOD** | [`triadic_orthogonal_decomposition`](@ref) | Mode bispectrum from temporal snapshots |
+
+All methods support an allocating convenience API and a zero-allocation `!`-variant
+with preallocated workspace structs.
 
 ---
 
@@ -14,7 +24,7 @@ standard methods for computing kinetic energy transfer across scales in turbulen
 
 ```julia
 using Pkg
-Pkg.add("FlowEnergyTransfer")
+Pkg.add("FlowInvariantTransfer")
 ```
 
 ---
@@ -22,21 +32,38 @@ Pkg.add("FlowEnergyTransfer")
 ## Extension Architecture
 
 The core package ships with a pure-Julia O(N²) direct-sum baseline requiring no compiled
-dependencies. Load `FFTW` to activate the O(N log N) FFT fast path automatically:
+dependencies. Load optional packages to activate fast paths and additional features:
 
-| Method | Baseline | Fast Path | Required |
-|--------|----------|-----------|----------|
-| Spectral flux | `SerialBackend()` | `FFTBackend()` | `using FFTW` |
-| Shell-to-shell | `SerialBackend()` | `FFTBackend()` | `using FFTW` |
-| Coarse-graining | — | — | `using CoarseGrainingEnergyFluxes` |
-| Triadic Orthogonal Decomposition | `SerialBackend()` | `FFTBackend()` / `ThreadedBackend()` | `using FFTW` / `using OhMyThreads` |
+| Extension | Trigger | Provides |
+|-----------|---------|----------|
+| FFTWExt | `using FFTW` | O(N log N) FFT fast path |
+| OhMyThreadsExt | `using OhMyThreads` | Multi-threaded backends |
+| DistributedExt | `using Distributed, SharedArrays` | Multi-process parallelism |
+| KernelAbstractionsExt | `using KernelAbstractions` | GPU kernels (CUDA) |
+| CGEFExt | `using CoarseGrainingEnergyFluxes` | Coarse-graining flux |
+| HelmholtzDecompositionExt | `using HelmholtzDecomposition` | Rot/div partial fluxes |
+| FINUFFTExt | `using FINUFFT` | Non-uniform FFT path |
+| NUFSHTExt | `using NUFSHT` | Scattered spherical grids |
+| FSHExt | `using FastSphericalHarmonics` | Regular spherical grids |
+| FlowFieldSpectraExt | `using FlowFieldSpectra` | Spectral analysis integration |
+| CairoMakieExt | `using CairoMakie` | Plotting recipes |
+
+### Backend Support Matrix
+
+| Diagnostic | Serial | FFT | Threaded | Distributed | GPU |
+|-----------|--------|-----|----------|-------------|-----|
+| Spectral flux | ✓ | ✓ | ✓ | — | — |
+| Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mode-to-mode triads | ✓ | — | ✓ | ✓ | ✓ |
+| Coarse-graining | — | — | — | — | — |
+| TOD | ✓ | ✓ | ✓ | — | — |
 
 ---
 
 ## Quickstart: Spectral Flux Π(K)
 
 ```julia
-using FlowEnergyTransfer
+using FlowInvariantTransfer
 using FFTW   # activates FFTBackend
 
 N = 64; L = 2π
@@ -74,10 +101,52 @@ result.net_transfer           # Σ_m T(n,m) per receiver shell
 result.max_antisymmetry_error # max|T(n,m)+T(m,n)| — should be ≈ 0
 ```
 
+## Quickstart: Mode-to-Mode Triads
+
+```julia
+# Exact triad transfer S(k|p|q) with shell reduction T(K,Q)
+result = calculate_mode_to_mode_transfer(û, ks;
+    binning   = LinearBinning(2π / L),
+    invariant = KineticEnergy(),
+    dealiasing = true)
+
+result.net_transfer       # T(k) per mode
+result.reductions.TKQ     # T(K,Q) — shell-reduced matrix
+result.reductions.K       # shell-centre wavenumbers
+```
+
+## Quickstart: Multi-Invariant (Enstrophy)
+
+```julia
+# Compare kinetic energy vs enstrophy transfer on a 2D field
+result_E = calculate_spectral_flux(û, ks;
+    binning = LinearBinning(2π / L), invariant = KineticEnergy())
+
+result_Ω = calculate_spectral_flux(û, ks;
+    binning = LinearBinning(2π / L), invariant = Enstrophy())
+# result_E.flux and result_Ω.flux show opposite cascade directions
+```
+
+## Quickstart: Helmholtz Partial Fluxes
+
+```julia
+using HelmholtzDecomposition  # loads the extension
+
+# Rotational component only
+result_rot = calculate_spectral_flux(û, ks;
+    binning = LinearBinning(2π / L),
+    decomposition = RotationalDecomposition())
+
+# Full Helmholtz: returns NamedTuple with :rotational and :divergent
+result_helm = calculate_spectral_flux(û, ks;
+    binning = LinearBinning(2π / L),
+    decomposition = HelmholtzDecomposition())
+```
+
 ## Quickstart: Triadic Orthogonal Decomposition
 
 ```julia
-using FlowEnergyTransfer
+using FlowInvariantTransfer
 using FFTW  # activates FFTBackend for fast temporal DFTs
 
 # 3D data array: (nt, nvar, nx)
@@ -117,4 +186,6 @@ calculate_shell_to_shell_transfer!(result, ws, û_new, ks)
 ## See Also
 
 - [Methods & Theory](@ref) — mathematical background for each method
+- [Architecture](@ref) — internal design and dispatch patterns
+- [Backends & Extensions](@ref) — when to use each backend
 - [API Reference](@ref) — full docstring index

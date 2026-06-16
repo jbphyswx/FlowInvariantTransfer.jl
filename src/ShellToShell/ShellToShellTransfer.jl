@@ -1,6 +1,7 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, AbstractInvariant, KineticEnergy
+using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_magnitude_grid
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -9,7 +10,7 @@ using ..Workspaces: NonlinearTermWorkspace, ShellToShellWorkspace
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
 
 # ---------------------------------------------------------------------------
-# Internal FFTW-path stub (overridden by FlowEnergyTransferFFTWExt)
+# Internal FFTW-path stub (overridden by FlowInvariantTransferFFTWExt)
 # ---------------------------------------------------------------------------
 
 """
@@ -76,6 +77,7 @@ function calculate_shell_to_shell_transfer(
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
+    invariant::AbstractInvariant = KineticEnergy(),
     backend::AbstractExecutionBackend = SerialBackend(),
 )
     ws      = ShellToShellWorkspace(velocity_hat, ks, binning)
@@ -89,7 +91,7 @@ function calculate_shell_to_shell_transfer(
     # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
     max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, backend;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry)
+        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
     return ShellToShellResult(centers, edges, T_mat, net, max_asym)
 end
 
@@ -106,10 +108,11 @@ function calculate_shell_to_shell_transfer!(
     ks::Tuple;
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
+    invariant::AbstractInvariant = KineticEnergy(),
     backend::AbstractExecutionBackend = SerialBackend(),
 )
     _calculate_shell_to_shell!(result, ws, velocity_hat, ks, backend;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry)
+        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
     return result
 end
 
@@ -127,7 +130,7 @@ _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend; kwar
 # ---------------------------------------------------------------------------
 
 """
-    _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; dealiasing, verify_antisymmetry)
+    _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; dealiasing, verify_antisymmetry, invariant)
 
 Direct-sum (SerialBackend) shell-to-shell transfer. Writes into `result` using
 workspace buffers from `ws` — no heap allocation in the hot path.
@@ -144,6 +147,7 @@ function _calculate_shell_to_shell_direct!(
     ks::Tuple;
     dealiasing::Bool,
     verify_antisymmetry::Bool,
+    invariant::AbstractInvariant = KineticEnergy(),
 )
     nd    = length(ks)
     ns    = size(velocity_hat)[1:nd]
@@ -168,14 +172,15 @@ function _calculate_shell_to_shell_direct!(
                                 dealiasing=dealiasing, backend=SerialBackend())
         N̂_m = ws.nonlinear.N̂
 
+        # Write per-mode transfer density into ws.transfer_density
+        transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂_m, ks)
+
         # Accumulate T(n,m) for all receiver shells n
         for n in 1:N_sh
             s = zero(FT)
             for I in CartesianIndices(ns)
                 ws.shell_idx[I] == n || continue
-                for comp in 1:D
-                    s += real(conj(velocity_hat[I, comp]) * N̂_m[I, comp])
-                end
+                s += ws.transfer_density[I]
             end
             result.transfer_matrix[n, m] = s
         end

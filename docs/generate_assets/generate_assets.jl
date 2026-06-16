@@ -1,11 +1,11 @@
 """
-Generate static figure assets for FlowEnergyTransfer.jl docs and README.md.
+Generate static figure assets for FlowInvariantTransfer.jl docs and README.md.
 
 Run from the repo root:
     julia --project=docs/generate_assets docs/generate_assets/generate_assets.jl
 """
 
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 using Statistics: Statistics

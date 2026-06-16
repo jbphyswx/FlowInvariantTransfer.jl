@@ -4,10 +4,12 @@ using Statistics: Statistics
 using Aqua: Aqua
 using FFTW: FFTW
 using LinearAlgebra: LinearAlgebra
+using Distributed: Distributed
+using SharedArrays: SharedArrays
 
-using FlowEnergyTransfer: FlowEnergyTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FET
 
-Test.@testset "FlowEnergyTransfer.jl Test Suite" begin
+Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
     # -----------------------------------------------------------------------
     Test.@testset "Aqua Code Quality" begin
@@ -417,6 +419,96 @@ Test.@testset "FlowEnergyTransfer.jl Test Suite" begin
         res_aux = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, return_coefficients=true, return_auxiliary_modes=true)
         Test.@test res_aux.expansion_coefficients isa Dict
         Test.@test res_aux.auxiliary_modes isa Dict
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
+        using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
+        using HelmholtzDecomposition: HelmholtzDecomposition
+
+        # 1. Spectral flux decomposition test
+        N = 8; L = 2π
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        û = zeros(ComplexF64, N, N, 2)
+        û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5   # k=(1,0) in u
+        û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5   # k=(0,1) in v
+
+        res_none = FET.calculate_spectral_flux(û, ks; decomposition=FET.NoDecomposition(), dealiasing=false)
+        res_helm = FET.calculate_spectral_flux(û, ks; decomposition=FET.HelmholtzDecomposition(), dealiasing=false)
+        res_rot  = FET.calculate_spectral_flux(û, ks; decomposition=FET.RotationalDecomposition(), dealiasing=false)
+        res_div  = FET.calculate_spectral_flux(û, ks; decomposition=FET.DivergentDecomposition(), dealiasing=false)
+
+        Test.@test res_none isa FET.SpectralFluxResult
+        Test.@test res_helm isa NamedTuple
+        Test.@test haskey(res_helm, :rotational) && haskey(res_helm, :divergent)
+        Test.@test res_rot isa FET.SpectralFluxResult
+        Test.@test res_div isa FET.SpectralFluxResult
+
+        # For these divergence-free/rotational modes, verify consistency:
+        # T_none ≈ T_rot + T_div
+        Test.@test isapprox(res_none.transfer_spectrum, res_rot.transfer_spectrum + res_div.transfer_spectrum; atol=1e-12)
+
+        # 2. Coarse-graining flux decomposition test
+        x = range(0, L; length=N+1)[1:N]
+        y = range(0, L; length=N+1)[1:N]
+        u = [cos(x) for x in x, y in y]
+        v = [sin(y) for x in x, y in y]
+
+        cg_none = FET.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FET.GaussianFilter(); decomposition=FET.NoDecomposition())
+        cg_helm = FET.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FET.GaussianFilter(); decomposition=FET.HelmholtzDecomposition())
+        cg_rot  = FET.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FET.GaussianFilter(); decomposition=FET.RotationalDecomposition())
+        cg_div  = FET.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FET.GaussianFilter(); decomposition=FET.DivergentDecomposition())
+
+        Test.@test cg_none isa FET.CoarseGrainingFluxResult
+        Test.@test cg_helm isa NamedTuple
+        Test.@test haskey(cg_helm, :rotational) && haskey(cg_helm, :divergent)
+        Test.@test cg_rot isa FET.CoarseGrainingFluxResult
+        Test.@test cg_div isa FET.CoarseGrainingFluxResult
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
+        using OhMyThreads
+
+        # Add workers if not present
+        if Distributed.nprocs() == 1
+            Distributed.addprocs(2)
+        end
+        # Load the package and extensions on all workers
+        Distributed.@everywhere using FlowInvariantTransfer: FlowInvariantTransfer as FET
+        Distributed.@everywhere using SharedArrays
+
+        # Create sample data
+        Random.seed!(42)
+        N = 8; L = 2π
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        û = zeros(ComplexF64, N, N, 2)
+        û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5
+        û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5
+
+        # 1. Shell-to-Shell Transfer Parity
+        b = FET.LinearBinning(2π / L)
+        res_serial = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.SerialBackend())
+        res_thread = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.ThreadedBackend())
+        
+        # For DistributedBackend, we convert velocity_hat to a SharedArray so workers can read it efficiently
+        s_û = SharedArrays.SharedArray(û)
+        res_dist = FET.calculate_shell_to_shell_transfer(s_û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.DistributedBackend())
+
+        Test.@test isapprox(res_serial.transfer_matrix, res_thread.transfer_matrix; atol=1e-12)
+        Test.@test isapprox(res_serial.transfer_matrix, res_dist.transfer_matrix; atol=1e-12)
+        Test.@test isapprox(res_serial.net_transfer, res_thread.net_transfer; atol=1e-12)
+        Test.@test isapprox(res_serial.net_transfer, res_dist.net_transfer; atol=1e-12)
+
+        # 2. Scale-to-Scale (Mode-to-Mode) Transfer Parity
+        m2m_serial = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, backend=FET.SerialBackend())
+        m2m_thread = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, backend=FET.ThreadedBackend())
+        m2m_dist = FET.calculate_mode_to_mode_transfer(s_û, ks; binning=b, dealiasing=true, backend=FET.DistributedBackend())
+
+        Test.@test isapprox(m2m_serial.net_transfer, m2m_thread.net_transfer; atol=1e-12)
+        Test.@test isapprox(m2m_serial.net_transfer, m2m_dist.net_transfer; atol=1e-12)
+        Test.@test isapprox(m2m_serial.reductions.TKQ, m2m_thread.reductions.TKQ; atol=1e-12)
+        Test.@test isapprox(m2m_serial.reductions.TKQ, m2m_dist.reductions.TKQ; atol=1e-12)
     end
 
 end # top-level testset
