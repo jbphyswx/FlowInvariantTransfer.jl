@@ -197,7 +197,16 @@ calculate_shell_to_shell_transfer!(result, ws, û, ks; dealiasing=true)
 
 ## Example Figure
 
-![Spectral flux and shell-to-shell transfer for a Taylor-Green vortex](docs/src/assets/energy_transfer.png)
+Shell-to-shell energy transfer matrix T(n,m), net transfer per shell, and kinetic energy slice
+for a **3D Taylor-Green Vortex** (N=32³, evolved to t=5 with pseudospectral Navier-Stokes).
+The near-diagonal red band above the diagonal (energy leaving shell m) and blue band below
+(energy arriving at shell n) show the canonical **forward energy cascade** of 3D turbulence.
+
+![3D TGV shell-to-shell energy transfer at t=5](docs/src/assets/energy_transfer.png)
+
+Cascade development from t=0 to t=10 (GIF, 51 frames at Δt=0.2):
+
+![3D TGV cascade animation](docs/src/assets/energy_transfer.gif)
 
 ---
 
