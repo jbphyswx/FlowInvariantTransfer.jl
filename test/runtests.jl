@@ -6,6 +6,9 @@ using FFTW: FFTW
 using LinearAlgebra: LinearAlgebra
 using Distributed: Distributed
 using SharedArrays: SharedArrays
+using OhMyThreads: OhMyThreads
+using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
+using HelmholtzDecomposition: HelmholtzDecomposition
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
 
@@ -226,14 +229,15 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    Test.@testset "CoarseGrainingFlux — requires CGEF (helpful error)" begin
-        # Without CoarseGrainingEnergyFluxes loaded the stub should throw a clear error
+    Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
+        # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π
         x = [L * (i-1) / N for i in 1:N]
         y = [L * (j-1) / N for j in 1:N]
         u = zeros(N, N); v = zeros(N, N)
-        Test.@test_throws ArgumentError FET.calculate_coarse_graining_flux(
+        result = FET.calculate_coarse_graining_flux(
             (u, v), (x, y), π/2, FET.GaussianFilter())
+        Test.@test result isa FET.CoarseGrainingFluxResult
     end
 
     # -----------------------------------------------------------------------
@@ -253,9 +257,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         x = [L * (i-1) / N for i in 1:N]
         y = [L * (j-1) / N for j in 1:N]
         u = zeros(N, N); v = zeros(N, N)
-        Test.@test_throws ArgumentError FET.calculate_energy_transfer(
+        r3 = FET.calculate_energy_transfer(
             FET.CoarseGrainingFluxMethod(FET.GaussianFilter(), Float64(π/2)),
             (u, v), (x, y))
+        Test.@test r3 isa FET.CoarseGrainingFluxResult
     end
 
     # -----------------------------------------------------------------------
@@ -412,8 +417,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(res_serial.frequencies, res_fft.frequencies)
         Test.@test isapprox(filter(!isnan, res_serial.mode_bispectrum), filter(!isnan, res_fft.mode_bispectrum); atol=1e-12)
 
-        # 5. ThreadedBackend stub validation (without OhMyThreads, should throw)
-        Test.@test_throws ArgumentError FET.triadic_orthogonal_decomposition(X; dt=dt_sig, backend=FET.ThreadedBackend())
+        # 5. ThreadedBackend — OhMyThreads is loaded so it should work
+        res_threaded = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, backend=FET.ThreadedBackend())
+        Test.@test res_threaded isa FET.TriadicOrthogonalDecompositionResult
+        Test.@test isapprox(res_serial.frequencies, res_threaded.frequencies)
 
         # 6. Coefficients and auxiliary modes
         res_aux = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, return_coefficients=true, return_auxiliary_modes=true)
@@ -423,9 +430,6 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
     # -----------------------------------------------------------------------
     Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
-        using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
-        using HelmholtzDecomposition: HelmholtzDecomposition
-
         # 1. Spectral flux decomposition test
         N = 8; L = 2π
         ks = FET.wavenumber_grid((N, N), (L, L))
@@ -468,8 +472,6 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
     # -----------------------------------------------------------------------
     Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
-        using OhMyThreads
-
         # Add workers if not present
         if Distributed.nprocs() == 1
             Distributed.addprocs(2)
