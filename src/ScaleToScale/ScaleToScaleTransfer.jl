@@ -1,17 +1,37 @@
 module ScaleToScaleTransfer
 
 using LinearAlgebra: LinearAlgebra
-using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractShellBinning, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend
+using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractShellBinning, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, DistributedBackend
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_magnitude_grid, dealiasing_mask
 using ..Workspaces: ScaleToScaleWorkspace
+using ..NonlinearTerm: compute_nonlinear_term
+using ..Invariants: transfer_density
+using ..ShellToShellTransfer: calculate_shell_to_shell_transfer
 
 export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!
 
 """
-    calculate_mode_to_mode_transfer(velocity_hat, ks; binning=nothing, invariant=KineticEnergy(), dealiasing=true, backend=SerialBackend()) -> ModeToModeTriadResult
+    calculate_mode_to_mode_transfer(velocity_hat, ks; binning=nothing, invariant=KineticEnergy(),
+                                    dealiasing=true, backend=SerialBackend()) -> ModeToModeTriadResult
 
-Compute the exact mode-to-mode triad transfer `S(k|p|q)` for the specified invariant.
+Net per-mode transfer `T(k)` and, when `binning` is given, the magnitude-to-magnitude matrix
+`T(K,Q)`, for the chosen invariant.
+
+These aggregates are sums over *all* triads, so by the convolution theorem they are computed
+**exactly** and cheaply through the FFT/pseudospectral paths — `O(Nᴰ log N)` for `T(k)` and
+`O(N_sh·Nᴰ log N)` for `T(K,Q)` — rather than the `O(N^{2D})` brute triad loop, and on the SAME
+normalization as [`calculate_spectral_flux`](@ref) / [`calculate_shell_to_shell_transfer`](@ref):
+
+- `net_transfer = T(k) = Re{û*(k)·N̂(k)}` via the nonlinear term + `transfer_density`;
+- `reductions.TKQ = T(K,Q)` = the shell-to-shell transfer matrix.
+
+The fully resolved per-triad tensor `S(k|p|q)` (the only object that genuinely requires the
+`O(N^{2D})` loop and that carries the gauge/circulating ambiguity per individual triad) is not
+returned here; the `compute_triad_S` kernel remains available for explicit single-triad queries.
+
+`backend` selects the transform backend (e.g. `FFTBackend()`); the parallel backends apply to the
+`T(K,Q)` shell-to-shell stage.
 """
 function calculate_mode_to_mode_transfer(
     velocity_hat,
@@ -21,21 +41,20 @@ function calculate_mode_to_mode_transfer(
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
 )
-    ws = ScaleToScaleWorkspace(velocity_hat, ks, binning)
-    calculate_mode_to_mode_transfer!(ws, velocity_hat, ks;
-        binning=binning, invariant=invariant, dealiasing=dealiasing, backend=backend)
-    
-    # Prepare reductions
+    # Net per-mode transfer: exact convolution via the (FFT or direct) nonlinear term.
+    nl_backend = backend isa FFTBackend ? FFTBackend() : SerialBackend()
+    N̂   = compute_nonlinear_term(velocity_hat, ks; dealiasing=dealiasing, backend=nl_backend)
+    net = transfer_density(invariant, velocity_hat, N̂, ks)   # validates invariant/dimension
+
     reductions = if binning !== nothing
-        k_mag = wavenumber_magnitude_grid(ks)
-        edges = shell_edges(binning, maximum(k_mag))
-        centers = shell_centers(binning, maximum(k_mag))
-        (; K=centers, Q=centers, TKQ=copy(ws.T_mat))
+        ss = calculate_shell_to_shell_transfer(velocity_hat, ks; binning=binning,
+            invariant=invariant, dealiasing=dealiasing, verify_antisymmetry=false, backend=backend)
+        (; K = ss.shell_centers, Q = ss.shell_centers, TKQ = ss.transfer_matrix)
     else
         NamedTuple()
     end
 
-    return ModeToModeTriadResult(invariant, ks, copy(ws.net_transfer), reductions)
+    return ModeToModeTriadResult(invariant, ks, net, reductions)
 end
 
 """

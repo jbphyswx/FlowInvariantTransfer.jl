@@ -258,8 +258,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             invariant = FET.Enstrophy(), dealiasing = true, backend = FET.FFTBackend())
         Test.@test res3 isa FET.SpectralFluxResult
         Test.@test all(isfinite, res3.transfer_spectrum)
-        # mode-to-mode enstrophy triads remain 2D-only
-        Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û3, ks3; invariant = FET.Enstrophy())
+        # mode-to-mode aggregates now route through the FFT paths, so 3D enstrophy net works
+        m2m3 = FET.calculate_mode_to_mode_transfer(û3, ks3; invariant = FET.Enstrophy(), backend = FET.FFTBackend())
+        Test.@test m2m3 isa FET.ModeToModeTriadResult
+        Test.@test all(isfinite, m2m3.net_transfer)
     end
 
     # -----------------------------------------------------------------------
@@ -620,17 +622,43 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "ModeToMode — invariant/dimension guards" begin
         L = 2π
-        # 2D field + Helicity() must error (Helicity is 3D-only); previously read OOB.
+        # 2D field + Helicity() must error (Helicity is 3D-only); routed via transfer_density.
         ks2 = FET.wavenumber_grid((4, 4), (L, L))
         û2  = zeros(ComplexF64, 4, 4, 2); û2[2, 1, 1] = 0.5; û2[1, 2, 2] = 0.5
         Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û2, ks2; invariant=FET.Helicity())
-        # 3D field + Enstrophy() must error (Enstrophy is 2D-only).
+        # 3D field + Enstrophy() now works (vector-vorticity transfer, routed).
         ks3 = FET.wavenumber_grid((4, 4, 4), (L, L, L))
         û3  = zeros(ComplexF64, 4, 4, 4, 3); û3[2, 1, 1, 1] = 0.5
-        Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û3, ks3; invariant=FET.Enstrophy())
+        Test.@test FET.calculate_mode_to_mode_transfer(û3, ks3; invariant=FET.Enstrophy()) isa FET.ModeToModeTriadResult
         # KineticEnergy works in both dimensionalities.
         Test.@test FET.calculate_mode_to_mode_transfer(û2, ks2; invariant=FET.KineticEnergy()) isa FET.ModeToModeTriadResult
         Test.@test FET.calculate_mode_to_mode_transfer(û3, ks3; invariant=FET.KineticEnergy()) isa FET.ModeToModeTriadResult
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "ModeToMode — routed aggregates consistent with spectral/shell-to-shell" begin
+        # The fix: mode-to-mode net + T(K,Q) route through the FFT paths, so they are on the
+        # SAME normalization as the other diagnostics (the old brute loop was off by ~Np²).
+        N = 16; L = 2π
+        Random.seed!(21)
+        ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FET.LinearBinning(2π/L)
+        m2m = FET.calculate_mode_to_mode_transfer(û, ks; binning = b, dealiasing = true, backend = FET.FFTBackend())
+        ss  = FET.calculate_shell_to_shell_transfer(û, ks; binning = b, dealiasing = true,
+            verify_antisymmetry = false, backend = FET.FFTBackend())
+        sf  = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true, backend = FET.FFTBackend())
+        sT  = sqrt(sum(abs2, ss.transfer_matrix)); Test.@test sT > 0
+        Test.@test isapprox(m2m.reductions.TKQ, ss.transfer_matrix; atol = 1e-10 * sT)   # T(K,Q) == shell-to-shell
+        # net per-mode summed into shells == spectral transfer T(k)
+        kmag  = FET.wavenumber_magnitude_grid(ks)
+        edges = FET.shell_edges(b, maximum(kmag))
+        sidx  = FET.assign_shells(kmag, edges)
+        netshell = zeros(length(edges) - 1)
+        for I in CartesianIndices(size(sidx)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
+        Test.@test isapprox(netshell, sf.transfer_spectrum; atol = 1e-10 * sqrt(sum(abs2, sf.transfer_spectrum)))
     end
 
 end # top-level testset
