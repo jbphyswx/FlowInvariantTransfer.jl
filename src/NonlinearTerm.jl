@@ -72,16 +72,20 @@ function compute_nonlinear_term!(
     ks::Tuple;
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
+    advecting_hat = velocity_hat,
 )
-    _compute_nonlinear_term!(ws, velocity_hat, ks, backend; dealiasing=dealiasing)
+    _compute_nonlinear_term!(ws, velocity_hat, ks, backend; dealiasing=dealiasing, advecting_hat=advecting_hat)
     return ws.N̂
 end
 
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SerialBackend; dealiasing) =
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=dealiasing)
+# `advecting_hat` is the velocity u_j that does the advecting; `velocity_hat` is the advected
+# field whose gradient ∂_j(·)_i is taken: N_i = (u_adv)_j ∂_j (u)_i. They coincide for the plain
+# self-advection term, and differ for shell-to-shell mediators ((u_m·∇)u) and scalar/MHD terms.
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::SerialBackend; dealiasing, advecting_hat=velocity_hat) =
+    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
 
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing) =
-    _nonlinear_term_fft(ws.N̂, velocity_hat, ks; dealiasing=dealiasing)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing, advecting_hat=velocity_hat) =
+    _nonlinear_term_fft(ws.N̂, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
 
 # ---------------------------------------------------------------------------
 # 2/3 dealiasing predicate (shared by input-truncation and output-zeroing)
@@ -130,6 +134,7 @@ function _compute_nonlinear_term_direct!(
     velocity_hat,
     ks::Tuple;
     dealiasing::Bool = true,
+    advecting_hat = velocity_hat,
 )
     nd  = length(ks)
     ns  = size(velocity_hat)[1:nd]
@@ -145,9 +150,9 @@ function _compute_nonlinear_term_direct!(
     # N_phys  shape: (ns..., D)
     # Index via (phys_I..., comp) or (phys_I..., comp, grad_d)
 
-    # --- uᵢ(x_p) = IDFT(ûᵢ) ---
+    # --- (advecting) uⱼ(x_p) = IDFT(û_adv) ---
     for comp in 1:D
-        û_c = selectdim(velocity_hat, nd+1, comp)
+        û_c = selectdim(advecting_hat, nd+1, comp)
         for phys_I in phys_idxs
             val = zero(complex(FT))
             for spec_I in CartesianIndices(ns)

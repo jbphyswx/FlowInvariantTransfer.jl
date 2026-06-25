@@ -216,7 +216,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.
         Random.seed!(7)
-        N = 8; L = 2π
+        N = 16; L = 2π   # large enough that the 2/3-retained band has real inter-shell coupling
         Np = N * N
         ks = FET.wavenumber_grid((N, N), (L, L))
         # Random streamfunction in spectral space (Hermitian so IFFT is real)
@@ -253,23 +253,32 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    Test.@testset "ShellToShellTransfer — FFTW vs direct (small 2D)" begin
+    Test.@testset "ShellToShell — backend consistency + reduction to T(k)" begin
+        # Divergence-free field from a random streamfunction (non-degenerate after dealiasing).
+        N = 16; L = 2π
         Random.seed!(13)
-        N = 6; L = 2π
+        ψ  = randn(N, N)
+        ψh = FFTW.fft(ψ) ./ N^2
         ks = FET.wavenumber_grid((N, N), (L, L))
-        û = zeros(ComplexF64, N, N, 2)
-        û[2, 1, 1] = 0.4; û[N, 1, 1] = 0.4   # k=(1,0) in u
-        û[1, 2, 2] = 0.3; û[1, N, 2] = 0.3   # k=(0,1) in v
+        kx = [ks[1][i] for i in 1:N, j in 1:N]
+        ky = [ks[2][j] for i in 1:N, j in 1:N]
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FET.LinearBinning(2π/L)
 
-        b = FET.LinearBinning(2π/L)
+        r_direct = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
+            verify_antisymmetry=true, backend=FET.SerialBackend())
+        r_fft = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
+            verify_antisymmetry=true, backend=FET.FFTBackend())
 
-        result_direct = FET.calculate_shell_to_shell_transfer(û, ks;
-            binning=b, dealiasing=false, verify_antisymmetry=false, backend=FET.SerialBackend())
-        result_fft = FET.calculate_shell_to_shell_transfer(û, ks;
-            binning=b, dealiasing=false, verify_antisymmetry=false, backend=FET.FFTBackend())
+        T_norm = sqrt(sum(abs2, r_direct.transfer_matrix))
+        Test.@test T_norm > 0                                            # non-degenerate
+        # serial and FFT implement the SAME (u·∇)u_m form → agree to roundoff
+        Test.@test isapprox(r_direct.transfer_matrix, r_fft.transfer_matrix; atol = 1e-9 * T_norm)
+        Test.@test r_direct.max_antisymmetry_error < 1e-10 * T_norm      # A is antisymmetric
 
-        Test.@test isapprox(result_direct.transfer_matrix,
-                             result_fft.transfer_matrix; atol=1e-10)
+        # Reduction: Σ_m T(n,m) must equal the spectral transfer T(k) (same field/binning).
+        sf = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true)
+        Test.@test isapprox(r_direct.net_transfer, sf.transfer_spectrum; atol = 1e-9 * T_norm)
     end
 
     # -----------------------------------------------------------------------

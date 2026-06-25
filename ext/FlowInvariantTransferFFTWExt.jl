@@ -29,6 +29,7 @@ function FET.NonlinearTerm._nonlinear_term_fft(
     velocity_hat,
     ks::Tuple;
     dealiasing::Bool = true,
+    advecting_hat = velocity_hat,
 )
     nd  = length(ks)
     ns  = size(velocity_hat)[1:nd]
@@ -40,9 +41,12 @@ function FET.NonlinearTerm._nonlinear_term_fft(
 
     # Orszag 2/3: truncate INPUTS before forming products (output-only truncation leaves
     # the retained band aliased — see FET.NonlinearTerm._is_dealiased and THEORY.md §0.5).
+    # N_i = (u_adv)_j ∂_j (u)_i : u_phys is the advecting velocity, grad is the advected gradient.
     vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
+    ahat = advecting_hat === velocity_hat ? vhat :
+           (dealiasing ? _dealias_copy(advecting_hat, ns, nd) : advecting_hat)
 
-    u_phys = [real.(FFTW.ifft(selectdim(vhat, nd+1, c))) for c in 1:D]
+    u_phys = [real.(FFTW.ifft(selectdim(ahat, nd+1, c))) for c in 1:D]
     grad   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(vhat, nd+1, c)))
                for j in 1:nd] for c in 1:D]
     N_phys = [sum(u_phys[j] .* grad[c][j] for j in 1:nd) for c in 1:D]
@@ -102,60 +106,42 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     N_sh  = size(result.transfer_matrix, 1)
     Np    = FT(prod(ns))
 
-    k_comp    = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-    grad_full = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(velocity_hat, nd+1, c)))
-                  for j in 1:nd] for c in 1:D]
+    # Orszag 2/3: truncate inputs before forming products (see _dealias_copy / THEORY.md §0.5).
+    vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
 
-    # Precompute N̂_m for each shell into a single reused buffer
-    # Store each result in a preallocated N_sh-length vector of views
-    # We need to hold all N̂_m simultaneously for the antisymmetric formula,
-    # so allocate one array per shell (N_sh allocations, unavoidable for Alexakis form)
-    N̂_all = [similar(velocity_hat) for _ in 1:N_sh]
+    k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
+    # Advecting field is the FULL velocity (computed once); the band-m field is what gets advected.
+    u_full_phys = [real.(FFTW.ifft(selectdim(vhat, nd+1, c))) for c in 1:D]
 
+    # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{û*·N̂_m}, N̂_m = (u·∇)u_m (full advects band-m; AMP 2005).
+    # Accumulated one mediator `m` at a time directly into result.transfer_matrix, reusing
+    # ws.nonlinear.N̂ / ws.transfer_density — peak memory O(N^D), not O(N_sh·N^D) (the old
+    # N_sh-fold allocation was a ~100 GB trap at 256³). A is antisymmetric (A[n,m]+A[m,n]=0) and
+    # reduces as Σ_m A[n,m] = transfer_spectrum[n], so NO ½(A−Aᵀ) is applied (that halves it).
+    fill!(result.transfer_matrix, zero(FT))
     for m in 1:N_sh
         fill!(ws.û_m, zero(eltype(ws.û_m)))
         for I in CartesianIndices(ns)
             ws.shell_idx[I] == m || continue
-            for c in 1:D; ws.û_m[I, c] = velocity_hat[I, c]; end
+            for c in 1:D; ws.û_m[I, c] = vhat[I, c]; end
         end
-        u_m_phys = [real.(FFTW.ifft(selectdim(ws.û_m, nd+1, c))) for c in 1:D]
-        N_phys_m = [sum(u_m_phys[j] .* grad_full[c][j] for j in 1:nd) for c in 1:D]
+        grad_m   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(ws.û_m, nd+1, c)))
+                     for j in 1:nd] for c in 1:D]
+        N_phys_m = [sum(u_full_phys[j] .* grad_m[c][j] for j in 1:nd) for c in 1:D]
         for c in 1:D
-            selectdim(N̂_all[m], nd+1, c) .= FFTW.fft(N_phys_m[c]) ./ Np
+            selectdim(ws.nonlinear.N̂, nd+1, c) .= FFTW.fft(N_phys_m[c]) ./ Np
         end
         if dealiasing
             for I in CartesianIndices(ns)
-                kill = false
-                for d in 1:nd
-                    k_idx = I[d] - 1
-                    k_abs = k_idx <= ns[d] ÷ 2 ? k_idx : ns[d] - k_idx
-                    k_abs >= ns[d] ÷ 3 && (kill = true; break)
-                end
-                kill && (for c in 1:D; N̂_all[m][I, c] = zero(eltype(N̂_all[m])); end)
+                FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
+                for c in 1:D; ws.nonlinear.N̂[I, c] = zero(eltype(ws.nonlinear.N̂)); end
             end
         end
-    end
-
-    # Precompute transfer density for all shells
-    T_density_all = [similar(ws.transfer_density) for _ in 1:N_sh]
-    for m in 1:N_sh
-        transfer_density!(T_density_all[m], invariant, velocity_hat, N̂_all[m], ks)
-    end
-
-    # Antisymmetric T(n,m) = ½[Σ_{S_n} T_density_m - Σ_{S_m} T_density_n]
-    fill!(result.transfer_matrix, zero(FT))
-    for n in 1:N_sh
-        for m in 1:N_sh
-            n == m && continue
-            s_nm = zero(FT)
-            s_mn = zero(FT)
-            for I in CartesianIndices(ns)
-                c_n = ws.shell_idx[I] == n
-                c_m = ws.shell_idx[I] == m
-                c_n && (s_nm += T_density_all[m][I])
-                c_m && (s_mn += T_density_all[n][I])
-            end
-            result.transfer_matrix[n, m] = FT(0.5) * (s_nm - s_mn)
+        transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)
+        @inbounds for I in CartesianIndices(ns)
+            n = ws.shell_idx[I]
+            n == 0 && continue
+            result.transfer_matrix[n, m] += ws.transfer_density[I]
         end
     end
 

@@ -86,12 +86,15 @@ function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, 
         end
     end
     
-    # Allocate a local NonlinearTermWorkspace
+    # Allocate a local NonlinearTermWorkspace.
+    # N̂_m = (u·∇)u_m: full velocity advects the band-m field (AMP 2005) — antisymmetric A[n,m]
+    # that reduces to transfer_spectrum[n] (matches serial/FFT/threaded).
     nl_ws = FET.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
-    FET.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing, backend=FET.SerialBackend())
-    
+    FET.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
+        backend=FET.SerialBackend(), advecting_hat=velocity_hat)
+
     # Write per-mode transfer density
-    transfer_density = Array{FT}(undef, ns...)
+    transfer_density = similar(velocity_hat, FT, ns...)
     FET.Invariants.transfer_density!(transfer_density, invariant, velocity_hat, nl_ws.N̂, ks)
     
     # Accumulate into column vector

@@ -167,15 +167,18 @@ function _calculate_shell_to_shell_direct!(
             end
         end
 
-        # Compute N̂_m = FFT[(u_m·∇)u] into ws.nonlinear.N̂
+        # N̂_m = (u·∇)u_m: the FULL velocity advects the band-m field (Alexakis–Mininni–Pouquet
+        # 2005). This makes A[n,m] = Σ_{k∈S_n} Re{û*·N̂_m} both antisymmetric (A[n,m]+A[m,n]=0)
+        # and correctly reducing (Σ_m A[n,m] = transfer_spectrum[n]) — no ½(A−Aᵀ) needed.
         compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-                                dealiasing=dealiasing, backend=SerialBackend())
+                                dealiasing=dealiasing, backend=SerialBackend(),
+                                advecting_hat=velocity_hat)
         N̂_m = ws.nonlinear.N̂
 
         # Write per-mode transfer density into ws.transfer_density
         transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂_m, ks)
 
-        # Accumulate T(n,m) for all receiver shells n
+        # Accumulate A(n,m) = Σ_{k∈S_n} Re{û*·N̂_m} for all receiver shells n
         for n in 1:N_sh
             s = zero(FT)
             for I in CartesianIndices(ns)

@@ -51,11 +51,13 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
             end
         end
 
+        # N̂_m = (u·∇)u_m: full velocity advects the band-m field (AMP 2005) — gives an
+        # antisymmetric A[n,m] that reduces to transfer_spectrum[n] (matches serial/FFT).
         FET.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
-            dealiasing=dealiasing, backend=FET.SerialBackend())
+            dealiasing=dealiasing, backend=FET.SerialBackend(), advecting_hat=velocity_hat)
         N̂_m = local_ws.N̂
 
-        local_density = Array{FT}(undef, ns...)
+        local_density = similar(velocity_hat, FT, ns...)
         FET.Invariants.transfer_density!(local_density, invariant, velocity_hat, N̂_m, ks)
 
         for n in 1:N_sh
