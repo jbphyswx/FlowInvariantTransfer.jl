@@ -8,6 +8,124 @@
 
 ---
 
+## 0.5 Conventions (verified against primary sources — WV)
+
+> Ground-truth spec for the overhaul. Each row is transcribed from the *original* paper (equation
+> numbers cited) and is what unit tests assert against. Where two conventions coexist in the
+> literature, we record both and pick one (marked **[CHOSEN]**).
+
+### Energy transfer & flux sign — [CHOSEN: Alexakis–Biferale 2018]
+Verified from arXiv:1808.06186 (HTML):
+- Spectral balance **Eq. (12):** `∂_t E(k) = −T(k) − 2νk²E(k) − 2αE(k) + F(k)` — `T(k)` is the net
+  **loss** from shell k (positive `T` = energy removed).
+- Transfer **Eq. (13):** `T(k) = ℑ Σ_{shell} Σ_{p+q=k} û*_i(k) P_ij(k) q_l û_l(p) û_j(q)`,
+  Leray projector `P_ij(k)=δ_ij − k_i k_j/k²`.
+- Spectrum **Eq. (11):** `E(k) = (1/2Δk) Σ_{k≤|k'|<k+Δk} |û(k')|²` (explicit ½).
+- Flux **Eq. (17):** `Π(K) = +Σ_{k<K} T(k) = ⟨u^{<K}·(u·∇)u⟩`. Inviscid: `Π(∞)=0`.
+- **Sign anchor:** `Π>0` forward/direct (= `ε` in the forward inertial range); `Π<0` inverse (= `−ε_α`).
+
+Equivalence used by the FFT path (derived + verified): the package's `transfer_density = Re{û*·N̂}`
+with `N̂=FFT[(u·∇)u]` equals AB's `T(k)` (for incompressible `û`, `û*·P·N̂ = û*·N̂`). Therefore the
+correct flux is **`Π = +cumsum(T)`**.
+> ⚠ **BUG to fix in W6:** [SpectralFlux.jl:162-163](src/SpectralFlux.jl) computes `flux = −cumsum(T)`,
+> returning `−Π_AB` — inverted vs the `Π>0 ⇒ forward` anchor. Drop the negation. The
+> `transfer_spectrum` sign (= AB `T`, loss) is already correct.
+
+### Mode-to-mode triad transfer — [CHOSEN: Dar–Verma–Eswaran 2001]
+Verified from arXiv:nlin/0109004 (HTML):
+- **Eq. (11):** `S^{uu}(k|p|q) = −ℑ([k·u(q)][u(k)·u(p)])`; arguments are **k = receiver, p = giver,
+  q = mediator**.
+- Triad convention in DVE is **`k+p+q=0`**. The package uses the equivalent **`k=p+q`** (so `q=k−p`);
+  both are valid (real fields: `û(−q)=û*(q)`). *Document both; the package's `q=k−p` form is correct
+  and sums to the FFT net transfer — verified analytically: `Σ_p S(k|p|k−p) = Re{û*·N̂} = T(k)`.*
+- Antisymmetry **Eq. (A4):** `R^{uu}(k|p|q) + R^{uu}(p|k|q) = 0`.
+- Gauge: full transfer `R = S + X_Δ`; `X_Δ` is the **circulating** term (q→k→p→q, changes no mode's
+  energy). Only `S`-sums (combined, shell-to-shell, flux) are unique (cf. Plunian–Stepanov–Verma 2020).
+- Flux **Eq. (17):** `Π(K) = Σ_{|k|>K} Σ_{|p|<K} S(k|p|q)`.
+
+### Helical ± decomposition — [CHOSEN: Alexakis 2017 √2-unit-norm]
+Verified from arXiv:1606.02540 (HTML):
+- Basis **Eq. (10):** `h^s_k = (e_z×k)/(√2|e_z×k|) + i s (k×(e_z×k))/(√2|k×(e_z×k)|)`, with
+  `h^s·h^s = 0`, `h^s·h^{-s} = 1`, and `i k×h^s_k = s|k| h^s_k`.
+- Decomposition **Eq. (9):** `û_k = u^+_k h^+_k + u^-_k h^-_k`.
+- **Eq. (13):** `E^± = ½Σ|u^±|²`, `H^± = ±½Σ|k||u^±|²` (so `E=E^++E^-`, `H=H^++H^-`).
+- Partial flux **Eq. (17):** `Π_E^{s1,s2,s3}(k) = −⟨u^{s1<}_k·(u^{s2}×w^{s3})⟩_T`, `w=∇×u`.
+- Homochiral `Π^{+++}+Π^{---}` is constant & **negative** (hidden inverse transfer inside the 3D
+  forward cascade); heterochiral channels are net **forward**.
+
+### Anisotropic / directional shells — [CHOSEN: Alexakis–Marino–Mininni 2025]
+Verified from arXiv:2508.00340 (HTML):
+- Shell sets **Eq. (4):** spherical `k≤|q|<k+k_L`; cylindrical/axisymmetric `k_⊥≤|q_⊥|<k_⊥+k_L`;
+  plane-averaged `k_∥≤|q_∥|<k_∥+k_L`; 2D = both bounds.
+- Spectrum normalization `1/(2k_L)`, `k_L=1/L` the bin width (one-mode-one-bin).
+- Directional flux **Eq. (9):** `Π_K(k)=⟨u_{S_k}·(u·∇)u⟩`, `Π_P(k)=⟨φ_{S_k}(u·∇)φ⟩`, `Π_T=Π_K+Π_P`.
+- Sign: `Π<0` inverse, `Π>0` forward (strong-rotation inverse ⊥-cascade saturates near `−1`).
+
+### Coarse-graining flux & smooth band-to-band — [CHOSEN: Eyink–Aluie 2009]
+Verified from arXiv:0909.2386 (HTML):
+- Filter **Eq. (1):** `ū_ℓ(x)=∫dr G_ℓ(r) u(x+r)`, `G_ℓ(r)=ℓ^{−d}G(r/ℓ)` (`∫G=1`).
+- SGS stress **Eq. (3):** `τ̄_ℓ(u,u)=(uu)‾_ℓ − ū_ℓ ū_ℓ` (full Germano stress — Galilean-invariant).
+- Space-local flux **Eq. (5):** `Π̄_ℓ = −(∂_j ū_i) τ̄_ij = −S̄_ij τ̄_ij` (τ symmetric),
+  `S̄_ij=½(∂_iū_j+∂_jū_i)`. `Π̄_ℓ>0` forward (sink in the resolved-KE budget Eq. 4).
+- Band energy **Eq. (8):** `½τ̃(ū;ū)`; inter-band transfer `T_n = Π_{n−1} − Π_n` (net flux
+  difference at band boundaries) — the smooth-kernel generalization of shell-to-shell.
+
+### MHD invariants & gauge — [CHOSEN: Plunian–Stepanov–Verma 2020]
+Verified from arXiv:2004.10107 (HTML):
+- KE mode-to-mode is **gauge-dependent** — **Eq. (53):**
+  `ΔE^u(k|p|q)=α^u_E Re{(u_k,u_p,ω_q)+(u_k,ω_p,u_q)+(ω_k,u_p,u_q)}`, `α` arbitrary (DVE = 0).
+  → only combined/shell/flux sums are physical (matches the helicity-gauge note above).
+- **Eq. (16):** `E^u_k=½u_k·u*_k`, `E^b_k=½b_k·b*_k`; **Eq. (28):** magnetic helicity `H^b_k=½b_k·a*_k`.
+- Magnetic-field energy transfers become **uniquely defined** when split into magnetic *advection*
+  vs *stretching* (unlike KE); magnetic-helicity transfer (Eq. 34) is unique with no free coefficient.
+- *Cascade directions* + cross-helicity `H_c=∫u·b` + 2D mean-square vector potential `∫½a²` not
+  defined in this paper — still to confirm against Pouquet–Frisch–Léorat 1976 / Fyfe–Montgomery 1976
+  (working values from survey: 3D total energy & cross-helicity forward; magnetic helicity inverse;
+  2D MHD energy forward; 2D `∫½a²` inverse).
+
+### Triadic Orthogonal Decomposition — [CHOSEN: Yeung–Chu–Schmidt]
+Verified from arXiv:2411.12057 (HTML; re-confirm vs final JFM 1031:A34):
+- Convective term **Eq. (6):** `ĉ_{l→n} = −(û_{n−l}·∇)û_l` (explicit minus; donor `û_l`, catalyst
+  `û_{n−l}`, recipient `û_n`).
+- Covariance kernel **Eq. (9):** `S(x,x';l,n)=E{ĉ_{l→n}(x) û_n^H(x')}`; SVE **Eq. (10):**
+  `S=Σ_j σ_j ψ̂_{l→n,j}(x) φ̂_{n,j}^H(x')`.
+- Modal energy budget **Eq. (33):** `T̂_{l→n}=−∫_Ω û_n^H (û_{n−l}·∇)û_l dx`; Re part = energy flow;
+  pairwise conservation `T̂^R_{l→n}+T̂^R_{n→l}=0`.
+- Welch blocks (Eqs. 14–17), `S_{l,n}=(1/N_blk)Ĉ_{l→n}Û_n^H` (Eq. 17), W-weighted SVD with
+  `Φ̂_n^H W Φ̂_n = I` (Eq. 18). Triad: `f_{n−l}+f_l=f_n`.
+
+### Compressible mode-to-mode — [CHOSEN: Singh–Tiwari–Sharma–Verma 2025]
+Verified from arXiv:2508.04300 (HTML):
+- KE (Framework A, **Eqs. 14,15,19**): `v=ρu`, `E_u(k)=½Re[v(k)·u*(k)]`. Framework B
+  (**App. B, Eqs. 91,98**): `w=√ρ u`, `E_u=½|w|²`. **[CHOSEN: A for transfer; B available for 4/5-law.]**
+- Transfer **Eq. (28):** `S^{uu}(a|b|c) = −½ Im[{a·u(c)}{v(b)·u(a)} − {b·u(c)}{u(b)·v(a)}]`,
+  triad `a+b+c=0`; antisymmetric **Eq. (30):** `S^{uu}(a|b|c)=−S^{uu}(b|a|c)`.
+- Helmholtz **Eq. (32):** `u=u_R+u_C` (`u_C∥k` compressive, `u_R⊥k` rotational); flux channels
+  `Π_R` (Eq. 52), `Π_C` (Eq. 53), cross `Π^{R<}_{C>}` (Eq. 56), `Π^{C<}_{R>}` (Eq. 57).
+- KE↔IE pressure-dilatation **Eqs. (38–39):** `Q_{I,R}=½Re[σ̃·v_R*]`,
+  `Q_{I,C}=½Re[σ̃·v_C*] − ½Im[σ{k·u_C*}]`, `σ̃=∇σ/ρ`.
+
+### Standard / non-contested conventions (canonical refs; no ambiguity to resolve)
+- **Kinetic energy cascade:** `E(k)=C_K ε^{2/3}k^{−5/3}`, `Π=ε` forward (Kolmogorov 1941).
+- **Passive scalar variance** `∫E_θ dk=½⟨θ²⟩`, `T_θ` from `−Re{θ̂*·FFT[(u·∇)θ]}`, forward in 2D & 3D;
+  `E_θ=C_θ ε_θ ε^{−1/3}k^{−5/3}` (Obukhov 1949; Corrsin 1951); `k^{−1}` viscous-convective for Sc≫1
+  (Batchelor 1959).
+- **2D dual cascade:** `Z=½⟨ω²⟩`, `Z(k)=k²E(k)`; inverse energy (`Π_E<0`, `k^{−5/3}`) + forward
+  enstrophy (`Π_Z>0`, `k^{−3}`) (Kraichnan 1967; Batchelor 1969; Leith 1968).
+- **Buoyancy/APE:** `APE=½⟨b²⟩/N²`, `b=gαθ'`; reversible KE↔APE conversion `B=⟨wb⟩`; total energy
+  forward in strong stratification (Lindborg 2006, JFM 550).
+- **Compressible coarse-graining (Favre):** `ũ=(ρu)‾/ρ̄`; flux = deformation-work + pressure-dilatation
+  + baropycnal (Aluie 2011 PRL 106; 2013 Physica D 247).
+- **QG:** potential enstrophy `½q²` forward / energy inverse (Charney 1971).
+
+### WV status
+All contested/high-risk conventions locked against primary sources (HTML). Remaining open items are
+narrow sign confirmations (MHD cross-helicity / 2D vector-potential cascade direction vs
+Pouquet–Frisch–Léorat 1976 & Fyfe–Montgomery 1976) — to confirm when MHD invariants are implemented
+in W4. Every locked formula gets a numerical unit test in W14.
+
+---
+
 ## 1. Governing equations & the nonlinear term
 
 Incompressible Navier–Stokes on a periodic domain:

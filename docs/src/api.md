@@ -125,7 +125,6 @@ dealiasing_mask!
 assign_shells
 shell_edges
 shell_centers
-shell_mask
 n_shells
 ```
 

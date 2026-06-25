@@ -83,14 +83,16 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test FET.n_shells(b, 10.0) == 4
     end
 
-    Test.@testset "ShellBinning — shell_mask" begin
+    Test.@testset "ShellBinning — assign_shells" begin
         ks = FET.wavenumber_grid((8,), (2π,))
         k_mag_1d = FET.wavenumber_magnitude_grid(ks)
         b = FET.LinearBinning(2π / 8)
         edges = FET.shell_edges(b, maximum(k_mag_1d))
-        mask1 = FET.shell_mask(k_mag_1d, edges, 1)
-        Test.@test any(mask1)
-        Test.@test !any(mask1 .& FET.shell_mask(k_mag_1d, edges, 2))  # no overlap
+        idx = FET.assign_shells(k_mag_1d, edges)
+        Test.@test size(idx) == size(k_mag_1d)
+        Test.@test eltype(idx) === Int
+        Test.@test all(0 .<= idx .<= length(edges) - 1)  # 0 = outside all shells
+        Test.@test any(idx .== 1)                         # shell 1 is populated
     end
 
     # -----------------------------------------------------------------------

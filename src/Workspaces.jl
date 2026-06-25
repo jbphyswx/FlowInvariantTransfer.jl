@@ -11,21 +11,23 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, Sca
 # ---------------------------------------------------------------------------
 
 """
-    NonlinearTermWorkspace{CA, RA}
+    NonlinearTermWorkspace{CA, RA, GA}
 
 Preallocated buffers for computing the nonlinear advection term N̂(k) = FFT[(u·∇)u].
 
 # Fields
-- `u_phys::RA`:    `(ns..., D)` real physical-space velocities.
-- `grad_phys::RA`: `(ns..., D, nd)` real physical-space velocity gradients ∂u_i/∂x_j.
-- `N_phys::RA`:    `(ns..., D)` real physical-space nonlinear term.
-- `N̂::CA`:         `(ns..., D)` complex spectral output buffer.
+- `u_phys::RA`:    `(ns..., D)` real physical-space velocities (rank `nd+1`).
+- `grad_phys::GA`: `(ns..., D, nd)` real physical-space velocity gradients ∂u_i/∂x_j (rank `nd+2`).
+- `N_phys::RA`:    `(ns..., D)` real physical-space nonlinear term (rank `nd+1`).
+- `N̂::CA`:         `(ns..., D)` complex spectral output buffer (rank `nd+1`).
 
-Parametric on array types `CA` (complex) and `RA` (real) — no element-type bounds.
+Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), and `GA`
+(real gradient buffer, rank `nd+2`) — no element-type bounds, and each field is concretely
+typed (`grad_phys` has a separate parameter because its rank differs from the others).
 """
-struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray}
+struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray}
     u_phys::RA
-    grad_phys::RA
+    grad_phys::GA
     N_phys::RA
     N̂::CA
 end
@@ -37,18 +39,15 @@ Construct a `NonlinearTermWorkspace` sized for `velocity_hat` and wavenumber tup
 """
 function NonlinearTermWorkspace(velocity_hat, ks)
     FT  = real(eltype(velocity_hat))
-    CT  = eltype(velocity_hat)   # complex type
     ns  = size(velocity_hat)[1:length(ks)]
     D   = size(velocity_hat, ndims(velocity_hat))
     nd  = length(ks)
-    RA  = Array{FT}
-    CA  = Array{CT}
-    return NonlinearTermWorkspace{CA, RA}(
-        RA(undef, ns..., D),       # u_phys
-        RA(undef, ns..., D, nd),   # grad_phys
-        RA(undef, ns..., D),       # N_phys
-        CA(undef, ns..., D),       # N̂
-    )
+    # `similar` propagates the array kind (CPU Array, CuArray, …) — GPU-generic.
+    u_phys    = similar(velocity_hat, FT, ns..., D)
+    grad_phys = similar(velocity_hat, FT, ns..., D, nd)
+    N_phys    = similar(velocity_hat, FT, ns..., D)
+    N̂         = similar(velocity_hat, ns..., D)   # keeps complex eltype
+    return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂)
 end
 
 # ---------------------------------------------------------------------------
@@ -86,9 +85,9 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
     ns     = size(velocity_hat)[1:length(ks)]
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
-        Vector{FT}(undef, N_sh),
-        Vector{FT}(undef, N_sh),
-        Array{FT}(undef, ns...),
+        similar(velocity_hat, FT, N_sh),     # T_spec
+        similar(velocity_hat, FT, N_sh),     # flux
+        similar(velocity_hat, FT, ns...),    # transfer_density
     )
 end
 
@@ -137,10 +136,10 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
         similar(velocity_hat),                   # û_m
-        Matrix{FT}(undef, N_sh, N_sh),           # T_mat
-        Vector{FT}(undef, N_sh),                 # net_transfer
+        similar(velocity_hat, FT, N_sh, N_sh),   # T_mat
+        similar(velocity_hat, FT, N_sh),         # net_transfer
         shell_idx,
-        Array{FT}(undef, ns...),
+        similar(velocity_hat, FT, ns...),        # transfer_density
     )
 end
 
@@ -179,13 +178,13 @@ function ScaleToScaleWorkspace(velocity_hat, ks, binning)
         edges     = shell_edges(binning, maximum(k_mag))
         N_sh      = length(edges) - 1
         shell_idx = assign_shells(k_mag, edges)
-        T_mat     = Matrix{FT}(undef, N_sh, N_sh)
+        T_mat     = similar(velocity_hat, FT, N_sh, N_sh)
     else
-        shell_idx = zeros(Int, ns...)
-        T_mat     = Matrix{FT}(undef, 0, 0)
+        shell_idx = fill!(similar(velocity_hat, Int, ns...), 0)
+        T_mat     = similar(velocity_hat, FT, 0, 0)
     end
 
-    net_transfer = Array{FT}(undef, ns...)
+    net_transfer = similar(velocity_hat, FT, ns...)
     return ScaleToScaleWorkspace(T_mat, net_transfer, shell_idx)
 end
 

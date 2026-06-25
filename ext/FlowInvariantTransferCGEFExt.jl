@@ -32,7 +32,7 @@ function FET.CoarseGrainingFlux._cg_flux_cgef(
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
-    backend::CGEF.Filtering.AbstractExecutionBackend = CGEF.Filtering.AutoBackend(),
+    backend::CGEF.Backends.AbstractExecutionBackend = CGEF.Backends.AutoBackend(),
     kwargs...,
 )
     D  = length(velocity_fields)

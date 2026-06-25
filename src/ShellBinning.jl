@@ -2,7 +2,7 @@ module ShellBinning
 
 using ..Types: AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 
-export shell_edges, shell_centers, shell_mask, n_shells, assign_shells
+export shell_edges, shell_centers, n_shells, assign_shells
 
 # ---------------------------------------------------------------------------
 # Shell edge generation
@@ -39,7 +39,7 @@ function shell_edges(b::LogarithmicBinning, k_max::Real)
 end
 
 function shell_edges(b::DyadicBinning, k_max::Real)
-    return shell_edges(LogarithmicBinning(b.k₀, 2.0), k_max)
+    return shell_edges(LogarithmicBinning(b.k₀, oftype(b.k₀, 2)), k_max)
 end
 
 function shell_edges(b::CustomBinning, k_max::Real)
@@ -84,31 +84,13 @@ function n_shells(b::AbstractShellBinning, k_max::Real)
 end
 
 """
-    shell_mask(k_mag, edges, n) -> BitArray
-
-Return a boolean array the same shape as `k_mag` indicating which grid points
-fall in shell n: `edges[n] <= |k| < edges[n+1]`.
-
-# Arguments
-- `k_mag::AbstractArray`: Wavenumber magnitude at each grid point.
-- `edges::AbstractVector`: Shell edge vector (from `shell_edges`).
-- `n::Int`: 1-based shell index.
-"""
-function shell_mask(k_mag::AbstractArray, edges::AbstractVector, n::Int)
-    1 <= n <= length(edges) - 1 ||
-        throw(BoundsError(edges, n+1))
-    lo = edges[n]
-    hi = edges[n+1]
-    return @. lo <= k_mag < hi
-end
-
-"""
     assign_shells(k_mag, edges) -> Array{Int}
 
 Return an integer array (same shape as `k_mag`) where `[I] = n` if
 `edges[n] <= k_mag[I] < edges[n+1]`, and `0` if the mode falls outside all shells.
 
-Single allocation; replaces `[shell_mask(k_mag, edges, n) for n in 1:N_sh]`.
+One integer per mode (single allocation, cache-friendly): the canonical shell-membership
+representation used by every transfer accumulation kernel.
 """
 function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
     idx  = similar(k_mag, Int)

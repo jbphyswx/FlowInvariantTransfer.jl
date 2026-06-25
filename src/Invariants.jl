@@ -82,7 +82,7 @@ function transfer_density(invariant::AbstractInvariant, velocity_hat, N̂, ks::T
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))
-    t  = Array{FT}(undef, ns...)
+    t  = similar(velocity_hat, FT, ns...)
     return transfer_density!(t, invariant, velocity_hat, N̂, ks)
 end
 

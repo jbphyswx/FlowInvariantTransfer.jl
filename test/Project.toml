@@ -13,6 +13,6 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-CoarseGrainingEnergyFluxes = {subdir = "julia/CoarseGrainingEnergyFluxes.jl", url = "https://github.com/jbphyswx/CoarseGrainingEnergyFluxes.git"}
+CoarseGrainingEnergyFluxes = {url = "https://github.com/jbphyswx/CoarseGrainingEnergyFluxes.jl.git"}
 FlowInvariantTransfer = {path = ".."}
 HelmholtzDecomposition = {url = "https://github.com/jbphyswx/HelmholtzDecomposition.jl.git"}

@@ -6,11 +6,11 @@ using PrecompileTools: PrecompileTools
 # Submodule includes
 # ---------------------------------------------------------------------------
 
-include("types.jl")
-include("utils.jl")
+include("Types.jl")
+include("Utils.jl")
 include("Invariants.jl")
 include("Decomposition.jl")
-include("ShellToShell/ShellBinning.jl")
+include("ShellBinning.jl")
 include("Filters.jl")
 include("Workspaces.jl")
 include("NonlinearTerm.jl")
@@ -86,8 +86,8 @@ using .Utils:
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 
-using .ShellBinning: shell_edges, shell_centers, n_shells, shell_mask, assign_shells
-export shell_edges, shell_centers, n_shells, shell_mask, assign_shells
+using .ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
+export shell_edges, shell_centers, n_shells, assign_shells
 
 using .Invariants: transfer_density, transfer_density!
 export transfer_density, transfer_density!

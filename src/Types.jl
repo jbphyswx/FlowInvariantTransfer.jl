@@ -127,20 +127,20 @@ struct SpectralFluxMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMeth
 end
 
 """
-    CoarseGrainingFluxMethod{F<:AbstractFilter} <: AbstractEnergyTransferMethod
+    CoarseGrainingFluxMethod{F<:AbstractFilter, S} <: AbstractEnergyTransferMethod
 
 Compute the pointwise cross-scale energy flux Π_ℓ(x) = −τ̄ᵢⱼ S̄ᵢⱼ at filter scale ℓ.
 
 # Fields
 - `filter::F`: Filter kernel (Gaussian, sharp-spectral, or top-hat).
-- `scale::Float64`: Filter length scale ℓ (same units as the coordinate arrays).
+- `scale::S`: Filter length scale ℓ (same units as the coordinate arrays).
 
 # Notes
 Physical-space output; suitable for detecting spatial intermittency in the cascade.
 """
-struct CoarseGrainingFluxMethod{F<:AbstractFilter} <: AbstractEnergyTransferMethod
+struct CoarseGrainingFluxMethod{F<:AbstractFilter, S} <: AbstractEnergyTransferMethod
     filter::F
-    scale::Float64
+    scale::S
 end
 
 """
@@ -265,10 +265,10 @@ struct TopHatFilter <: AbstractFilter end
 Uniform shell spacing: k_n = n · Δk.
 
 # Fields
-- `Δk::Float64`: Shell width in physical wavenumber units.
+- `Δk`: Shell width in physical wavenumber units.
 """
-struct LinearBinning <: AbstractShellBinning
-    Δk::Float64
+struct LinearBinning{T} <: AbstractShellBinning
+    Δk::T
 end
 
 """
@@ -277,13 +277,14 @@ end
 Geometrically-spaced shells: k_n = k₀ · λⁿ.
 
 # Fields
-- `k₀::Float64`: First shell lower edge (> 0).
-- `λ::Float64`: Ratio between consecutive shell edges (> 1); λ = 2 gives dyadic.
+- `k₀`: First shell lower edge (> 0).
+- `λ`: Ratio between consecutive shell edges (> 1); λ = 2 gives dyadic.
 """
-struct LogarithmicBinning <: AbstractShellBinning
-    k₀::Float64
-    λ::Float64
+struct LogarithmicBinning{T} <: AbstractShellBinning
+    k₀::T
+    λ::T
 end
+LogarithmicBinning(k₀, λ) = LogarithmicBinning(promote(k₀, λ)...)
 
 """
     DyadicBinning(k₀) <: AbstractShellBinning
@@ -291,10 +292,10 @@ end
 Dyadic (octave) shells: k_n = k₀ · 2ⁿ.  Equivalent to `LogarithmicBinning(k₀, 2.0)`.
 
 # Fields
-- `k₀::Float64`: First shell lower edge (> 0).
+- `k₀`: First shell lower edge (> 0).
 """
-struct DyadicBinning <: AbstractShellBinning
-    k₀::Float64
+struct DyadicBinning{T} <: AbstractShellBinning
+    k₀::T
 end
 
 """
@@ -303,10 +304,10 @@ end
 User-specified shell edges.  Shell n covers wavenumbers in [edges[n], edges[n+1]).
 
 # Fields
-- `edges::Vector{Float64}`: Monotonically increasing edge values (length = N_shells + 1).
+- `edges`: Monotonically increasing edge values (length = N_shells + 1).
 """
-struct CustomBinning <: AbstractShellBinning
-    edges::Vector{Float64}
+struct CustomBinning{V<:AbstractVector} <: AbstractShellBinning
+    edges::V
 end
 
 # ---------------------------------------------------------------------------
@@ -515,7 +516,7 @@ ModeToModeTriadResult(invariant, ks, net_transfer) =
     ModeToModeTriadResult(invariant, ks, net_transfer, NamedTuple())
 
 """
-    TriadicOrthogonalDecompositionResult{V, A3, PM}
+    TriadicOrthogonalDecompositionResult{V, A3, PM, EC, XM}
 
 Result container for Triadic Orthogonal Decomposition.
 
@@ -528,16 +529,19 @@ Result container for Triadic Orthogonal Decomposition.
   (index 2) with spatial/variable dimensions.
 - `modal_energy_budget::A3`: Energy transfer T(fl, fn, mode) per triad per mode.
   Same shape as `mode_bispectrum`.
-- `expansion_coefficients`: Expansion coefficients, or `nothing` if not requested.
-- `auxiliary_modes`: Dict mapping `(l, n)` to donor/catalyst modes, or `nothing`.
+- `expansion_coefficients::EC`: Expansion coefficients, or `nothing` if not requested.
+- `auxiliary_modes::XM`: Dict mapping `(l, n)` to donor/catalyst modes, or `nothing`.
+
+All fields are typed — the optional `EC`/`XM` parameters resolve to `Nothing` or the concrete
+container type at construction, so the struct is type-stable (no untyped `Any` fields).
 """
-struct TriadicOrthogonalDecompositionResult{V<:AbstractVector, A3<:AbstractArray, PM}
+struct TriadicOrthogonalDecompositionResult{V<:AbstractVector, A3<:AbstractArray, PM, EC, XM}
     frequencies::V
     mode_bispectrum::A3
     modes::PM
     modal_energy_budget::A3
-    expansion_coefficients
-    auxiliary_modes
+    expansion_coefficients::EC
+    auxiliary_modes::XM
 end
 
 end # module Types
