@@ -27,7 +27,7 @@ Algorithm (pseudospectral):
 function FET.NonlinearTerm._nonlinear_term_fft(
     N̂,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     advecting_hat = velocity_hat,
 )
@@ -67,7 +67,7 @@ function FET.NonlinearTerm._nonlinear_term_fft(
 end
 
 # Allocate a copy of `velocity_hat` with the 2/3-rule discard modes zeroed (input truncation).
-function _dealias_copy(velocity_hat, ns::Tuple, nd::Int)
+function _dealias_copy(velocity_hat, ns, nd::Int)
     vd = copy(velocity_hat)
     D  = size(velocity_hat, nd + 1)
     for I in CartesianIndices(ns)
@@ -94,7 +94,7 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -169,7 +169,7 @@ end
 # Helpers
 # ---------------------------------------------------------------------------
 
-function _build_k_component_fft(ks::Tuple, d::Int, ns::Tuple)
+function _build_k_component_fft(ks, d::Int, ns)
     nd = length(ns)
     FT = eltype(ks[1])
     kc = zeros(FT, ns...)

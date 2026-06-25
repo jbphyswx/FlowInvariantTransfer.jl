@@ -29,7 +29,7 @@ given Fourier-space velocity `velocity_hat` and nonlinear term `N̂` (both shape
 """
 function transfer_density! end
 
-function transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks::Tuple)
+function transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     D  = size(velocity_hat, nd + 1)
@@ -44,7 +44,7 @@ function transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks::Tuple)
     return t
 end
 
-function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks::Tuple)
+function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
@@ -59,7 +59,7 @@ function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks::Tuple)
     return t
 end
 
-function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks::Tuple)
+function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks)
     nd = length(ks)
     nd == 2 || throw(ArgumentError("Enstrophy transfer is defined in 2D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
@@ -78,7 +78,7 @@ end
 Allocating version of [`transfer_density!`](@ref): returns a real array of shape
 `ns` with the per-mode transfer density.
 """
-function transfer_density(invariant::AbstractInvariant, velocity_hat, N̂, ks::Tuple)
+function transfer_density(invariant::AbstractInvariant, velocity_hat, N̂, ks)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))

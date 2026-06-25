@@ -47,7 +47,7 @@ end
 function FET.Decomposition._decompose_field_spectral(
     decomp::Union{HelmholtzDecompType, RotationalDecomposition, DivergentDecomposition},
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple
+    ks
 )
     D = size(velocity_hat, 3)
     D == 2 || throw(ArgumentError("Helmholtz decomposition currently supports 2D fields only."))
@@ -101,7 +101,7 @@ function FET.Decomposition._decompose_field_spectral(
 end
 
 # 3. Direct spectral project method override
-function FET.Decomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks::Tuple)
+function FET.Decomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks)
     return HelmholtzDecomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks)
 end
 

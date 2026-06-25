@@ -25,7 +25,7 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
     result,
     ws,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -173,7 +173,7 @@ end
 function FET.ScaleToScaleTransfer._mode_to_mode_threaded!(
     ws,
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning,
     invariant,
     dealiasing,

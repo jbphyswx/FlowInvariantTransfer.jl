@@ -15,7 +15,7 @@ Compute the exact mode-to-mode triad transfer `S(k|p|q)` for the specified invar
 """
 function calculate_mode_to_mode_transfer(
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning::Union{Nothing, AbstractShellBinning} = nothing,
     invariant::AbstractInvariant = KineticEnergy(),
     dealiasing::Bool = true,
@@ -46,7 +46,7 @@ In-place version of `calculate_mode_to_mode_transfer`.
 function calculate_mode_to_mode_transfer!(
     ws::ScaleToScaleWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning::Union{Nothing, AbstractShellBinning} = nothing,
     invariant::AbstractInvariant = KineticEnergy(),
     dealiasing::Bool = true,
@@ -78,7 +78,7 @@ end
 function _calculate_mode_to_mode!(
     ws::ScaleToScaleWorkspace,
     velocity_hat,
-    ks::Tuple,
+    ks,
     ::SerialBackend;
     binning,
     invariant,
@@ -132,7 +132,7 @@ end
 function _calculate_mode_to_mode!(
     ws::ScaleToScaleWorkspace,
     velocity_hat,
-    ks::Tuple,
+    ks,
     ::ThreadedBackend;
     kwargs...
 )

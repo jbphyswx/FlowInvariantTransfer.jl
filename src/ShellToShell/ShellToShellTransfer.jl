@@ -73,7 +73,7 @@ O(N_shells² · N^D log N^D) with FFTW; O(N_shells² · N^{2D}) direct-sum.
 """
 function calculate_shell_to_shell_transfer(
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
@@ -105,7 +105,7 @@ function calculate_shell_to_shell_transfer!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -144,7 +144,7 @@ function _calculate_shell_to_shell_direct!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),

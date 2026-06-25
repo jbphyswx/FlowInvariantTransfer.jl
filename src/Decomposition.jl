@@ -35,20 +35,20 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks::Tuple)
+    decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
 
 Decompose a spectral-space velocity field `velocity_hat` along the wavenumbers `ks`.
 """
-function decompose_field(::NoDecomposition, velocity_hat::AbstractArray{<:Complex}, ks::Tuple)
+function decompose_field(::NoDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return velocity_hat
 end
 
-function decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks::Tuple)
+function decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return _decompose_field_spectral(decomp, velocity_hat, ks)
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
-function _decompose_field_spectral(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks::Tuple)
+function _decompose_field_spectral(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     throw(ArgumentError(
         "Spectral-space decomposition ($(typeof(decomp))) requires HelmholtzDecomposition.jl. " *
         "Run `using HelmholtzDecomposition` to load the extension."

@@ -48,7 +48,7 @@ Positive Π: forward (downscale) cascade; negative Π: inverse (upscale) cascade
 """
 function calculate_spectral_flux(
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -64,7 +64,7 @@ end
 function _calculate_spectral_flux_decomposed(
     û_decomp::AbstractArray{<:Complex},
     velocity_hat,
-    ks::Tuple,
+    ks,
     binning::AbstractShellBinning,
     dealiasing::Bool,
     invariant::AbstractInvariant,
@@ -90,7 +90,7 @@ end
 function _calculate_spectral_flux_decomposed(
     decomposed::NamedTuple,
     velocity_hat,
-    ks::Tuple,
+    ks,
     binning::AbstractShellBinning,
     dealiasing::Bool,
     invariant::AbstractInvariant,
@@ -123,7 +123,7 @@ function calculate_spectral_flux!(
     result::SpectralFluxResult,
     ws::SpectralFluxWorkspace,
     velocity_hat,
-    ks::Tuple,
+    ks,
     shell_idx::AbstractArray{Int};
     dealiasing::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -140,7 +140,7 @@ function _calculate_spectral_flux_with_N̂!(
     ws::SpectralFluxWorkspace,
     velocity_hat,
     N̂,
-    ks::Tuple,
+    ks,
     shell_idx::AbstractArray{Int};
     invariant::AbstractInvariant = KineticEnergy(),
 )

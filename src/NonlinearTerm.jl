@@ -51,7 +51,7 @@ that is exact but slow.  Load FFTW to activate the O(N log N) path.
 """
 function compute_nonlinear_term(
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
 )
@@ -69,7 +69,7 @@ Pass a `NonlinearTermWorkspace` to avoid any allocations in the hot path.
 function compute_nonlinear_term!(
     ws::NonlinearTermWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
@@ -103,7 +103,7 @@ _compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing, advecti
 `true` if Fourier mode `I` lies in the 2/3-rule discard zone (|k_d| ≥ N_d/3 along any
 dimension `d`), in FFTW index order.
 """
-@inline function _is_dealiased(I::CartesianIndex, ns::Tuple, nd::Int)
+@inline function _is_dealiased(I::CartesianIndex, ns, nd::Int)
     @inbounds for d in 1:nd
         idx0  = I[d] - 1
         k_abs = idx0 <= ns[d] ÷ 2 ? idx0 : ns[d] - idx0
@@ -132,7 +132,7 @@ Algorithm (pseudospectral, direct DFT/IDFT):
 function _compute_nonlinear_term_direct!(
     ws::NonlinearTermWorkspace,
     velocity_hat,
-    ks::Tuple;
+    ks;
     dealiasing::Bool = true,
     advecting_hat = velocity_hat,
 )

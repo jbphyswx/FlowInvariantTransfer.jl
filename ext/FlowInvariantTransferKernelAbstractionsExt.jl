@@ -155,7 +155,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     result::ShellToShellResult,
     ws::FET.Workspaces.ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple,
+    ks,
     gpu_backend::GPUBackend;
     dealiasing::Bool,
     verify_antisymmetry::Bool,
@@ -253,7 +253,7 @@ end
 function FET.ScaleToScaleTransfer._calculate_mode_to_mode!(
     ws::ScaleToScaleWorkspace,
     velocity_hat,
-    ks::Tuple,
+    ks,
     gpu_backend::GPUBackend;
     binning::Union{Nothing, AbstractShellBinning},
     invariant::AbstractInvariant,

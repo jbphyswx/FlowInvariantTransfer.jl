@@ -175,7 +175,7 @@ result = calculate_energy_transfer(SpectralFluxMethod(LinearBinning(2π/L)), û,
 function calculate_energy_transfer(
     method::SpectralFluxMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_spectral_flux(velocity_hat, ks; binning=method.binning, kwargs...)
@@ -194,7 +194,7 @@ end
 function calculate_energy_transfer(
     method::ShellToShellTransferMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_shell_to_shell_transfer(velocity_hat, ks; binning=method.binning, kwargs...)
@@ -203,7 +203,7 @@ end
 function calculate_energy_transfer(
     method::ModeToModeTransferMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_mode_to_mode_transfer(velocity_hat, ks;
