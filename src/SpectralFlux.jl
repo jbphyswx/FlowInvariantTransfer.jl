@@ -159,8 +159,12 @@ function _calculate_spectral_flux_with_N̂!(
     end
 
     copyto!(result.transfer_spectrum, ws.T_spec)
+    # Flux convention (Alexakis & Biferale 2018, Eqs. 12–17; see THEORY.md §0.5):
+    #   T(k) = Re{û*·N̂} is the net energy *loss* from shell k, and
+    #   Π(K) = +Σ_{k≤K} T(k)  ⇒  Π>0 forward (down-scale) cascade, Π<0 inverse.
+    # (Earlier code negated this, returning −Π — i.e. forward cascades read as negative.)
     cumsum!(ws.flux, ws.T_spec)
-    result.flux .= .-ws.flux
+    copyto!(result.flux, ws.flux)
 
     return result
 end

@@ -170,6 +170,48 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "SpectralFlux — energy conservation Σ T(k) ≈ 0 (dealiased, div-free)" begin
+        # A divergence-free 2D field built from a streamfunction ψ:
+        #   û_x = i k_y ψ̂,  û_y = −i k_x ψ̂  ⇒  k·û = 0, u real (ψ real).
+        # With the corrected 2/3 dealiasing (INPUTS truncated, so no Nyquist mode and no
+        # aliasing), the pseudospectral nonlinear term conserves energy exactly:
+        # Σ_k Re{û*·N̂} = 0 by discrete skew-symmetry. This also distinguishes the fix from
+        # the old output-only truncation (which leaves the retained band non-conserving).
+        # (Without dealiasing the retained Nyquist mode breaks conservation at ~1e-8 — a
+        #  standard pseudospectral artefact, not a bug.)
+        N = 16; L = 2π
+        Random.seed!(7)
+        ψ  = randn(N, N)
+        ψh = FFTW.fft(ψ) ./ N^2
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]
+        ky = [ks[2][j] for i in 1:N, j in 1:N]
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        Test.@test maximum(abs.(kx .* û[:, :, 1] .+ ky .* û[:, :, 2])) < 1e-12  # div-free
+
+        for backend in (FET.SerialBackend(), FET.FFTBackend())
+            N̂ = FET.compute_nonlinear_term(û, ks; dealiasing = true, backend = backend)
+            t = FET.transfer_density(FET.KineticEnergy(), û, N̂, ks)
+            scale = sum(abs, t)
+            Test.@test abs(sum(t)) < 1e-10 * scale       # energy-conserving, alias-free
+        end
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "SpectralFlux — flux-sign convention Π = +cumsum(T)" begin
+        # Pins the Alexakis–Biferale convention (Π>0 forward): flux is the *positive*
+        # cumulative sum of the transfer spectrum (not negated).
+        Random.seed!(11)
+        N = 8; L = 2π
+        x = range(0, L; length = N + 1)[1:N]
+        u = cos.(x) .+ 0.3 .* sin.(2 .* x) .+ 0.1 .* cos.(3 .* x)
+        û = ComplexF64.(reshape(FFTW.fft(u) ./ N, N, 1))
+        ks = FET.wavenumber_grid((N,), (L,))
+        r = FET.calculate_spectral_flux(û, ks; binning = FET.LinearBinning(2π/L), dealiasing = false)
+        Test.@test isapprox(r.flux, cumsum(r.transfer_spectrum); atol = 1e-12)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer — antisymmetry (divergence-free field)" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.

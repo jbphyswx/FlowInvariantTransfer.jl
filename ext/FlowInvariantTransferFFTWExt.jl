@@ -38,8 +38,12 @@ function FET.NonlinearTerm._nonlinear_term_fft(
 
     k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
 
-    u_phys = [real.(FFTW.ifft(selectdim(velocity_hat, nd+1, c))) for c in 1:D]
-    grad   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(velocity_hat, nd+1, c)))
+    # Orszag 2/3: truncate INPUTS before forming products (output-only truncation leaves
+    # the retained band aliased — see FET.NonlinearTerm._is_dealiased and THEORY.md §0.5).
+    vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
+
+    u_phys = [real.(FFTW.ifft(selectdim(vhat, nd+1, c))) for c in 1:D]
+    grad   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(vhat, nd+1, c)))
                for j in 1:nd] for c in 1:D]
     N_phys = [sum(u_phys[j] .* grad[c][j] for j in 1:nd) for c in 1:D]
 
@@ -47,21 +51,28 @@ function FET.NonlinearTerm._nonlinear_term_fft(
         selectdim(N̂, nd+1, c) .= FFTW.fft(N_phys[c]) ./ FT(Np)
     end
 
+    # Zero output above the cutoff (inputs already truncated) for a clean N̂.
     if dealiasing
         for I in CartesianIndices(ns)
-            kill = false
-            for d in 1:nd
-                k_idx = I[d] - 1
-                k_abs = k_idx <= ns[d] ÷ 2 ? k_idx : ns[d] - k_idx
-                k_abs >= ns[d] ÷ 3 && (kill = true; break)
-            end
-            if kill
-                for c in 1:D; N̂[I, c] = zero(eltype(N̂)); end
-            end
+            FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
+            for c in 1:D; N̂[I, c] = zero(eltype(N̂)); end
         end
     end
 
     return N̂
+end
+
+# Allocate a copy of `velocity_hat` with the 2/3-rule discard modes zeroed (input truncation).
+function _dealias_copy(velocity_hat, ns::Tuple, nd::Int)
+    vd = copy(velocity_hat)
+    D  = size(velocity_hat, nd + 1)
+    for I in CartesianIndices(ns)
+        FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
+        for c in 1:D
+            vd[I, c] = zero(eltype(vd))
+        end
+    end
+    return vd
 end
 
 # ---------------------------------------------------------------------------

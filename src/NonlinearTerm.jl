@@ -84,6 +84,31 @@ _compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing) =
     _nonlinear_term_fft(ws.N̂, velocity_hat, ks; dealiasing=dealiasing)
 
 # ---------------------------------------------------------------------------
+# 2/3 dealiasing predicate (shared by input-truncation and output-zeroing)
+# ---------------------------------------------------------------------------
+#
+# Orszag's 2/3 rule must truncate the *inputs* of the quadratic product, not only the
+# output: a product of two retained modes p,q with p+q wrapping past Nyquist aliases
+# back onto a *low* mode (e.g. p=q=N/2−1 → k≈−2), so output-only truncation leaves the
+# retained band |k|<N/3 contaminated. We therefore (a) skip dealiased input modes when
+# building u and ∇u, and (b) still zero the output above the cutoff for a clean N̂.
+
+"""
+    _is_dealiased(I, ns, nd) -> Bool
+
+`true` if Fourier mode `I` lies in the 2/3-rule discard zone (|k_d| ≥ N_d/3 along any
+dimension `d`), in FFTW index order.
+"""
+@inline function _is_dealiased(I::CartesianIndex, ns::Tuple, nd::Int)
+    @inbounds for d in 1:nd
+        idx0  = I[d] - 1
+        k_abs = idx0 <= ns[d] ÷ 2 ? idx0 : ns[d] - idx0
+        k_abs >= ns[d] ÷ 3 && return true
+    end
+    return false
+end
+
+# ---------------------------------------------------------------------------
 # Direct-sum reference implementation
 # ---------------------------------------------------------------------------
 
@@ -126,6 +151,7 @@ function _compute_nonlinear_term_direct!(
         for phys_I in phys_idxs
             val = zero(complex(FT))
             for spec_I in CartesianIndices(ns)
+                dealiasing && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
                 phase = zero(FT)
                 for d in 1:nd
                     xj    = FT(phys_I[d] - 1) / FT(ns[d])
@@ -146,6 +172,7 @@ function _compute_nonlinear_term_direct!(
             for phys_I in phys_idxs
                 val = zero(complex(FT))
                 for spec_I in CartesianIndices(ns)
+                    dealiasing && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
                     kphys = ks[grad_d][spec_I[grad_d]]
                     phase = zero(FT)
                     for d in 1:nd
@@ -191,19 +218,12 @@ function _compute_nonlinear_term_direct!(
         end
     end
 
-    # --- 2/3 dealiasing ---
+    # --- zero output above the 2/3 cutoff (inputs already truncated above) ---
     if dealiasing
         for I in CartesianIndices(ns)
-            kill = false
-            for d in 1:nd
-                kidx  = I[d] - 1
-                k_abs = kidx <= ns[d] ÷ 2 ? kidx : ns[d] - kidx
-                k_abs >= ns[d] ÷ 3 && (kill = true; break)
-            end
-            if kill
-                for comp in 1:D
-                    ws.N̂[I, comp] = zero(eltype(ws.N̂))
-                end
+            _is_dealiased(I, ns, nd) || continue
+            for comp in 1:D
+                ws.N̂[I, comp] = zero(eltype(ws.N̂))
             end
         end
     end
