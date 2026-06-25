@@ -11,7 +11,17 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, Sca
 # ---------------------------------------------------------------------------
 
 """
-    NonlinearTermWorkspace{CA, RA, GA}
+    _make_fft_plans(velocity_hat, ks)
+
+Hook returning an FFT plan/scratch bundle stored in `NonlinearTermWorkspace.plans`, or
+`nothing`. The core returns `nothing` (the direct-DFT path needs no plans); the FFTW
+extension overrides this to build pre-planned transforms + scratch buffers so the
+FFT-accelerated hot path allocates nothing.
+"""
+_make_fft_plans(velocity_hat, ks) = nothing
+
+"""
+    NonlinearTermWorkspace{CA, RA, GA, P}
 
 Preallocated buffers for computing the nonlinear advection term N̂(k) = FFT[(u·∇)u].
 
@@ -20,22 +30,26 @@ Preallocated buffers for computing the nonlinear advection term N̂(k) = FFT[(u�
 - `grad_phys::GA`: `(ns..., D, nd)` real physical-space velocity gradients ∂u_i/∂x_j (rank `nd+2`).
 - `N_phys::RA`:    `(ns..., D)` real physical-space nonlinear term (rank `nd+1`).
 - `N̂::CA`:         `(ns..., D)` complex spectral output buffer (rank `nd+1`).
+- `plans::P`:      FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
 
-Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), and `GA`
-(real gradient buffer, rank `nd+2`) — no element-type bounds, and each field is concretely
-typed (`grad_phys` has a separate parameter because its rank differs from the others).
+Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), `GA`
+(real gradient buffer, rank `nd+2`), and the plan-bundle type `P` — no element-type bounds,
+and each field is concretely typed (`grad_phys` has a separate parameter because its rank
+differs from the others).
 """
-struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray}
+struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray, P}
     u_phys::RA
     grad_phys::GA
     N_phys::RA
     N̂::CA
+    plans::P
 end
 
 """
     NonlinearTermWorkspace(velocity_hat, ks)
 
 Construct a `NonlinearTermWorkspace` sized for `velocity_hat` and wavenumber tuple `ks`.
+When FFTW is loaded, `plans` is populated with pre-planned transforms (see `_make_fft_plans`).
 """
 function NonlinearTermWorkspace(velocity_hat, ks)
     FT  = real(eltype(velocity_hat))
@@ -47,7 +61,8 @@ function NonlinearTermWorkspace(velocity_hat, ks)
     grad_phys = similar(velocity_hat, FT, ns..., D, nd)
     N_phys    = similar(velocity_hat, FT, ns..., D)
     N̂         = similar(velocity_hat, ns..., D)   # keeps complex eltype
-    return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂)
+    plans     = _make_fft_plans(velocity_hat, ks)
+    return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
 end
 
 # ---------------------------------------------------------------------------

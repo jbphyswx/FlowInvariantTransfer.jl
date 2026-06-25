@@ -212,6 +212,22 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "NonlinearTerm — allocation-free in-place hot path" begin
+        # The !-variant must allocate nothing per call: FFT path uses pre-planned transforms
+        # (ws.plans) + mul! into preallocated buffers; direct path is pure loops.
+        N = 16; L = 2π
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        Random.seed!(3)
+        û  = randn(ComplexF64, N, N, 2)
+        ws = FET.NonlinearTermWorkspace(û, ks)
+        for backend in (FET.SerialBackend(), FET.FFTBackend())
+            FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, backend = backend)  # warmup
+            a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, backend = backend)
+            Test.@test a == 0
+        end
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer — antisymmetry (divergence-free field)" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.

@@ -31,12 +31,17 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
 )
     N_sh = size(result.transfer_matrix, 1)
     FT = real(eltype(velocity_hat))
-    
+
+    # Hoist shell_idx to a local so the @distributed closure captures only this plain
+    # Int array — NOT the whole `ws`, whose nonlinear workspace may hold an FFTW-ext plan
+    # bundle that workers can't deserialize (they need not have FFTWExt loaded).
+    shell_idx = ws.shell_idx
+
     # We distribute the computation over the mediator shells `m`.
     # Using `Distributed.@distributed (+)` reduces the resulting N_sh x N_sh matrices.
     T_mat_reduced = Distributed.@distributed (+) for m in 1:N_sh
         # Compute column m on the worker process
-        col = compute_mediator_transfer_column(m, velocity_hat, ks, ws.shell_idx, N_sh, invariant, dealiasing, FT)
+        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT)
         
         # Construct an array where only column m is filled
         local_T = zeros(FT, N_sh, N_sh)

@@ -7,63 +7,116 @@ using FlowInvariantTransfer.Invariants: transfer_density!
 using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
 using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
+using LinearAlgebra: mul!
 
 # ---------------------------------------------------------------------------
-# Override NonlinearTerm._nonlinear_term_fft
+# FFT plan/scratch bundle + allocation-free nonlinear term
 # ---------------------------------------------------------------------------
 
-"""
-    _nonlinear_term_fft(N̂, velocity_hat, ks; dealiasing=true)
+# FFTW plan creation is NOT thread-safe and the threaded backend builds a workspace per task,
+# so serialize planning behind a lock.
+const _PLAN_LOCK = ReentrantLock()
 
-FFT-accelerated computation of the nonlinear advection term N̂(k) = FFT[(u·∇)u].
-
-Algorithm (pseudospectral):
-1. u_i(x)   = IFFT(û_i(k))
-2. ∂u_i/∂x_j(x) = IFFT(i·k_j · û_i(k))
-3. N_i(x)   = Σ_j u_j(x) · ∂u_i/∂x_j(x)
-4. N̂_i(k)  = FFT(N_i(x))
-5. Apply 2/3 dealiasing mask.
 """
-function FET.NonlinearTerm._nonlinear_term_fft(
-    N̂,
+    FFTPlanBundle
+
+Pre-planned transforms + scratch buffers stored in `NonlinearTermWorkspace.plans` so the
+FFT-accelerated nonlinear term allocates nothing in the hot path.
+"""
+struct FFTPlanBundle{PF, PB, CA, KC, MA}
+    p_fft::PF      # unnormalized forward plan on a single (ns...) component
+    p_bfft::PB     # unnormalized backward plan on a single (ns...) component
+    ctmp::CA       # complex (ns...) scratch
+    ctmp2::CA      # complex (ns...) scratch
+    k_comp::KC     # nd real (ns...) wavenumber-component arrays
+    keepmask::MA   # Bool (ns...): true where the mode is KEPT (not 2/3-dealiased)
+end
+
+# More specific than the core fallback `_make_fft_plans(::Any, ::Any) = nothing`, so this ADDS
+# a method (no overwriting) — dispatched only for complex spectral fields when FFTW is loaded.
+function FET.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks)
+    nd = length(ks)
+    ns = size(velocity_hat)[1:nd]
+    ct  = similar(velocity_hat, ns...)   # complex (ns...)
+    ct2 = similar(velocity_hat, ns...)
+    # ESTIMATE (default) does not overwrite the array during planning; serialize for thread-safety.
+    p_fft, p_bfft = lock(_PLAN_LOCK) do
+        (FFTW.plan_fft(ct), FFTW.plan_bfft(ct))
+    end
+    k_comp   = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
+    keepmask = [!FET.NonlinearTerm._is_dealiased(I, ns, nd) for I in CartesianIndices(ns)]
+    return FFTPlanBundle(p_fft, p_bfft, ct, ct2, k_comp, keepmask)
+end
+
+"""
+    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=true, advecting_hat=velocity_hat)
+
+Allocation-free pseudospectral nonlinear term N̂ = FFT[(u_adv·∇)u] written into `ws.N̂`, using
+the pre-planned transforms / scratch in `ws.plans`. The 2/3 input truncation is folded into the
+spectral copies (no temporary dealiased array) and the output is re-zeroed above the cutoff.
+Normalisation: `ifft = bfft/Np`, and the forward result is divided by `Np` (package coefficient
+convention). `N_i = (u_adv)_j ∂_j u_i`: `u_phys` is the advecting velocity, `grad_phys` the
+advected gradient.
+"""
+function FET.NonlinearTerm._nonlinear_term_fft!(
+    ws,
     velocity_hat,
     ks;
     dealiasing::Bool = true,
     advecting_hat = velocity_hat,
 )
-    nd  = length(ks)
-    ns  = size(velocity_hat)[1:nd]
-    D   = size(velocity_hat, nd+1)
-    FT  = real(eltype(velocity_hat))
-    Np  = prod(ns)
+    pb   = ws.plans
+    nd   = length(ks)
+    ns   = size(velocity_hat)[1:nd]
+    D    = size(velocity_hat, nd+1)
+    FT   = real(eltype(velocity_hat))
+    Np   = FT(prod(ns))
+    ct   = pb.ctmp
+    ct2  = pb.ctmp2
+    keep = pb.keepmask
 
-    k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-
-    # Orszag 2/3: truncate INPUTS before forming products (output-only truncation leaves
-    # the retained band aliased — see FET.NonlinearTerm._is_dealiased and THEORY.md §0.5).
-    # N_i = (u_adv)_j ∂_j (u)_i : u_phys is the advecting velocity, grad is the advected gradient.
-    vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
-    ahat = advecting_hat === velocity_hat ? vhat :
-           (dealiasing ? _dealias_copy(advecting_hat, ns, nd) : advecting_hat)
-
-    u_phys = [real.(FFTW.ifft(selectdim(ahat, nd+1, c))) for c in 1:D]
-    grad   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(vhat, nd+1, c)))
-               for j in 1:nd] for c in 1:D]
-    N_phys = [sum(u_phys[j] .* grad[c][j] for j in 1:nd) for c in 1:D]
-
-    for c in 1:D
-        selectdim(N̂, nd+1, c) .= FFTW.fft(N_phys[c]) ./ FT(Np)
+    # Advecting velocity: u_phys[...,j] = real(ifft(advecting_hat[...,j])) = real(bfft)/Np
+    for j in 1:D
+        a_j = selectdim(advecting_hat, nd+1, j)
+        dealiasing ? (ct .= keep .* a_j) : (ct .= a_j)
+        mul!(ct2, pb.p_bfft, ct)
+        uj = selectdim(ws.u_phys, nd+1, j)
+        uj .= real.(ct2) ./ Np
     end
 
-    # Zero output above the cutoff (inputs already truncated) for a clean N̂.
-    if dealiasing
-        for I in CartesianIndices(ns)
-            FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
-            for c in 1:D; N̂[I, c] = zero(eltype(N̂)); end
+    # Advected gradient: ∂_j u_i = real(ifft(i k_j û_i))
+    for c in 1:D
+        v_c = selectdim(velocity_hat, nd+1, c)
+        for j in 1:nd
+            dealiasing ? (ct .= im .* pb.k_comp[j] .* keep .* v_c) :
+                         (ct .= im .* pb.k_comp[j] .* v_c)
+            mul!(ct2, pb.p_bfft, ct)
+            gcj = selectdim(selectdim(ws.grad_phys, nd+2, j), nd+1, c)
+            gcj .= real.(ct2) ./ Np
         end
     end
 
-    return N̂
+    # N_i = Σ_j (u_adv)_j ∂_j u_i
+    for c in 1:D
+        Nc = selectdim(ws.N_phys, nd+1, c)
+        fill!(Nc, zero(FT))
+        for j in 1:nd
+            uj  = selectdim(ws.u_phys, nd+1, j)
+            gcj = selectdim(selectdim(ws.grad_phys, nd+2, j), nd+1, c)
+            Nc .+= uj .* gcj
+        end
+    end
+
+    # N̂_i = fft(N_i)/Np, zeroed above the 2/3 cutoff
+    for c in 1:D
+        Nc = selectdim(ws.N_phys, nd+1, c)
+        ct .= Nc
+        mul!(ct2, pb.p_fft, ct)
+        Nhat_c = selectdim(ws.N̂, nd+1, c)
+        dealiasing ? (Nhat_c .= (ct2 .* keep) ./ Np) : (Nhat_c .= ct2 ./ Np)
+    end
+
+    return ws.N̂
 end
 
 # Allocate a copy of `velocity_hat` with the 2/3-rule discard modes zeroed (input truncation).

@@ -5,19 +5,20 @@ using ..Types: AbstractExecutionBackend, SerialBackend, FFTBackend
 using ..Workspaces: NonlinearTermWorkspace
 
 export compute_nonlinear_term, compute_nonlinear_term!
-export _nonlinear_term_fft   # stub overridden by FFTW extension
+export _nonlinear_term_fft!   # stub overridden by FFTW extension
 
 # ---------------------------------------------------------------------------
 # Internal FFTW extension stub
 # ---------------------------------------------------------------------------
 
 """
-    _nonlinear_term_fft(velocity_hat, ks; dealiasing=true)
+    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=true, advecting_hat=velocity_hat)
 
-FFT-accelerated computation of the nonlinear term N̂(k) = FFT[(u·∇)u].
+FFT-accelerated, allocation-free computation of N̂(k) = FFT[(u_adv·∇)u] into `ws.N̂`,
+using the pre-planned transforms and scratch buffers in `ws.plans`.
 This stub is overridden by the FFTW extension when FFTW is loaded.
 """
-function _nonlinear_term_fft(args...; kwargs...)
+function _nonlinear_term_fft!(args...; kwargs...)
     throw(ArgumentError(
         "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
 end
@@ -85,7 +86,7 @@ _compute_nonlinear_term!(ws, velocity_hat, ks, ::SerialBackend; dealiasing, adve
     _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
 
 _compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing, advecting_hat=velocity_hat) =
-    _nonlinear_term_fft(ws.N̂, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
+    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
 
 # ---------------------------------------------------------------------------
 # 2/3 dealiasing predicate (shared by input-truncation and output-zeroing)
