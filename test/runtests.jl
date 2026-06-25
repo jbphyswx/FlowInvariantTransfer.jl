@@ -557,4 +557,20 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(m2m_serial.reductions.TKQ, m2m_dist.reductions.TKQ; atol=1e-12)
     end
 
+    # -----------------------------------------------------------------------
+    Test.@testset "ModeToMode — invariant/dimension guards" begin
+        L = 2π
+        # 2D field + Helicity() must error (Helicity is 3D-only); previously read OOB.
+        ks2 = FET.wavenumber_grid((4, 4), (L, L))
+        û2  = zeros(ComplexF64, 4, 4, 2); û2[2, 1, 1] = 0.5; û2[1, 2, 2] = 0.5
+        Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û2, ks2; invariant=FET.Helicity())
+        # 3D field + Enstrophy() must error (Enstrophy is 2D-only).
+        ks3 = FET.wavenumber_grid((4, 4, 4), (L, L, L))
+        û3  = zeros(ComplexF64, 4, 4, 4, 3); û3[2, 1, 1, 1] = 0.5
+        Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û3, ks3; invariant=FET.Enstrophy())
+        # KineticEnergy works in both dimensionalities.
+        Test.@test FET.calculate_mode_to_mode_transfer(û2, ks2; invariant=FET.KineticEnergy()) isa FET.ModeToModeTriadResult
+        Test.@test FET.calculate_mode_to_mode_transfer(û3, ks3; invariant=FET.KineticEnergy()) isa FET.ModeToModeTriadResult
+    end
+
 end # top-level testset

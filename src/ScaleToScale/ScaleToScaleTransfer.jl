@@ -52,9 +52,26 @@ function calculate_mode_to_mode_transfer!(
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
 )
+    nd = length(ks)
+    D  = size(velocity_hat, nd + 1)
+    _validate_invariant_dims(invariant, nd, D)
     _calculate_mode_to_mode!(ws, velocity_hat, ks, backend;
         binning=binning, invariant=invariant, dealiasing=dealiasing)
     return ws
+end
+
+# Guard invariant/dimension compatibility (mirrors Invariants.transfer_density!): the
+# mode-to-mode kernels index components directly, so a 2D field + Helicity() would otherwise
+# read out of bounds or silently misbehave (this path previously had no check).
+_validate_invariant_dims(::KineticEnergy, nd, D) = nothing
+function _validate_invariant_dims(::Helicity, nd, D)
+    nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
+    D  == 3 || throw(ArgumentError("Helicity transfer requires 3 velocity components (got D=$D)."))
+    return nothing
+end
+function _validate_invariant_dims(::Enstrophy, nd, D)
+    nd == 2 || throw(ArgumentError("Enstrophy transfer is defined in 2D only (got nd=$nd)."))
+    return nothing
 end
 
 # Direct serial implementation
