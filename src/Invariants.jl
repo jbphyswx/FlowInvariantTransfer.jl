@@ -16,8 +16,11 @@ export transfer_density, transfer_density!
 #
 #   KineticEnergy : t[I] = Σ_c Re{ conj(û_c)  N̂_c }
 #   Helicity (3D) : t[I] = Σ_c Re{ conj(ω̂_c)  N̂_c },   ω̂ = i k × û
-#   Enstrophy (2D): t[I] =       Re{ conj(ω̂)   N̂_ω },   ω̂  = i(k_x û_y − k_y û_x)
-#                                                        N̂_ω = i(k_x N̂_y − k_y N̂_x)
+#   Enstrophy     : t[I] = Re{ conj(ω̂) · N̂_ω },   ω̂ = i k × û,  N̂_ω = i k × N̂.
+#                   2D: scalar vorticity, ENSTROPHY IS CONSERVED (Σ_k t = 0, dual cascade).
+#                   3D: vector vorticity; N̂_ω = curl[(u·∇)u] = (u·∇)ω − (ω·∇)u includes the
+#                   vortex-STRETCHING term, so 3D enstrophy is NOT conserved (Σ_k t ≠ 0:
+#                   net production). See THEORY.md §0.5.
 # ---------------------------------------------------------------------------
 
 """
@@ -61,13 +64,30 @@ end
 
 function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks)
     nd = length(ks)
-    nd == 2 || throw(ArgumentError("Enstrophy transfer is defined in 2D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
-    @inbounds for I in CartesianIndices(ns)
-        kx = ks[1][I[1]]; ky = ks[2][I[2]]
-        ω̂   = im * (kx * velocity_hat[I, 2] - ky * velocity_hat[I, 1])
-        N̂_ω = im * (kx * N̂[I, 2] - ky * N̂[I, 1])
-        t[I] = real(conj(ω̂) * N̂_ω)
+    if nd == 2
+        # Scalar vorticity ω̂ = i(k_x û_y − k_y û_x); N̂_ω = i(k_x N̂_y − k_y N̂_x). Conserved.
+        @inbounds for I in CartesianIndices(ns)
+            kx = ks[1][I[1]]; ky = ks[2][I[2]]
+            ω̂   = im * (kx * velocity_hat[I, 2] - ky * velocity_hat[I, 1])
+            N̂_ω = im * (kx * N̂[I, 2] - ky * N̂[I, 1])
+            t[I] = real(conj(ω̂) * N̂_ω)
+        end
+    elseif nd == 3
+        # Vector vorticity ω̂ = i k × û; N̂_ω = i k × N̂ = curl[(u·∇)u] (= (u·∇)ω − (ω·∇)u),
+        # so the vortex-stretching term is included — 3D enstrophy is NOT conserved.
+        @inbounds for I in CartesianIndices(ns)
+            kx = ks[1][I[1]]; ky = ks[2][I[2]]; kz = ks[3][I[3]]
+            ux = velocity_hat[I, 1]; uy = velocity_hat[I, 2]; uz = velocity_hat[I, 3]
+            Nx = N̂[I, 1];           Ny = N̂[I, 2];           Nz = N̂[I, 3]
+            ωx  = im * (ky * uz - kz * uy); ωy  = im * (kz * ux - kx * uz); ωz  = im * (kx * uy - ky * ux)
+            Nωx = im * (ky * Nz - kz * Ny); Nωy = im * (kz * Nx - kx * Nz); Nωz = im * (kx * Ny - ky * Nx)
+            t[I] = real(conj(ωx) * Nωx + conj(ωy) * Nωy + conj(ωz) * Nωz)
+        end
+    else
+        throw(ArgumentError(
+            "Enstrophy transfer is defined in 2D (scalar vorticity, conserved) or 3D " *
+            "(vector vorticity, non-conservative via stretching); got nd=$nd."))
     end
     return t
 end

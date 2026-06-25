@@ -70,7 +70,11 @@ function _validate_invariant_dims(::Helicity, nd, D)
     return nothing
 end
 function _validate_invariant_dims(::Enstrophy, nd, D)
-    nd == 2 || throw(ArgumentError("Enstrophy transfer is defined in 2D only (got nd=$nd)."))
+    # The explicit mode-to-mode triad form is 2D-only; 3D enstrophy transfer (vector vorticity,
+    # non-conservative) is available via calculate_spectral_flux / calculate_shell_to_shell_transfer.
+    nd == 2 || throw(ArgumentError(
+        "Mode-to-mode Enstrophy triads are 2D-only (got nd=$nd); for 3D enstrophy transfer use " *
+        "calculate_spectral_flux or calculate_shell_to_shell_transfer with Enstrophy()."))
     return nothing
 end
 

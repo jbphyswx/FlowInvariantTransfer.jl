@@ -112,6 +112,11 @@ Verified from arXiv:2508.04300 (HTML):
   (Batchelor 1959).
 - **2D dual cascade:** `Z=½⟨ω²⟩`, `Z(k)=k²E(k)`; inverse energy (`Π_E<0`, `k^{−5/3}`) + forward
   enstrophy (`Π_Z>0`, `k^{−3}`) (Kraichnan 1967; Batchelor 1969; Leith 1968).
+- **3D enstrophy is NOT conserved:** `dΩ/dt = ⟨ω·S·ω⟩ − ν⟨|∇ω|²⟩` — vortex stretching `⟨ω·S·ω⟩>0`
+  has no 2D analogue (`(ω·∇)u≡0` in 2D). So 3D "enstrophy transfer" is a valid *budget* with a
+  production term (`Σ_k T_Ω≠0`), computed with the vector vorticity `ω̂=ik×û` and
+  `N̂_ω=ik×N̂=curl[(u·∇)u]=(u·∇)ω−(ω·∇)u` — NOT a conservative cascade like 2D. (Davidson;
+  Tennekes–Lumley.) Implemented in `Invariants.transfer_density!(::Enstrophy)` for nd∈{2,3}.
 - **Buoyancy/APE:** `APE=½⟨b²⟩/N²`, `b=gαθ'`; reversible KE↔APE conversion `B=⟨wb⟩`; total energy
   forward in strong stratification (Lindborg 2006, JFM 550).
 - **Compressible coarse-graining (Favre):** `ũ=(ρu)‾/ρ̄`; flux = deformation-work + pressure-dilatation

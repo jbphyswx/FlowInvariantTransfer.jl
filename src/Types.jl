@@ -60,10 +60,18 @@ struct Helicity <: AbstractInvariant end
 """
     Enstrophy <: AbstractInvariant
 
-Enstrophy `Ω = ½∫ ω²` (2D only), `ω = ∂_x v − ∂_y u`. Transfer density is
-`Re{ ω̂*(k) · N̂_ω(k) }` with scalar vorticity `ω̂ = i(k_x û_y − k_y û_x)` and
-its nonlinear term `N̂_ω = i(k_x N̂_y − k_y N̂_x)`. Counter-directional (forward)
-to the inverse energy cascade (Kraichnan–Batchelor).
+Enstrophy `Ω = ½∫|ω|²`, transfer density `Re{ ω̂*(k) · N̂_ω(k) }` with `ω̂ = i k×û`
+and `N̂_ω = i k×N̂`.
+
+- **2D** (scalar vorticity `ω̂ = i(k_x û_y − k_y û_x)`): enstrophy is an inviscid invariant —
+  conserved (`Σ_k T_Ω = 0`), counter-directional forward cascade dual to the inverse energy
+  cascade (Kraichnan–Batchelor).
+- **3D** (vector vorticity): `N̂_ω = curl[(u·∇)u] = (u·∇)ω − (ω·∇)u` includes vortex
+  **stretching**, so enstrophy is **not** conserved (`Σ_k T_Ω ≠ 0`: net production). This is a
+  valid transfer/budget diagnostic, not a conservative cascade.
+
+Available in 3D via spectral flux and shell-to-shell; the explicit mode-to-mode triad form
+is 2D-only for now.
 """
 struct Enstrophy <: AbstractInvariant end
 

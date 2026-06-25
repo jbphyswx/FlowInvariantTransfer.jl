@@ -228,6 +228,41 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "Enstrophy — 2D conserved, 3D works (vortex stretching)" begin
+        L = 2π
+        # 2D: enstrophy is an inviscid invariant ⇒ Σ_k T_Ω ≈ 0 (div-free, dealiased).
+        N = 16
+        Random.seed!(5)
+        ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
+        ks2 = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks2[1][i] for i in 1:N, j in 1:N]; ky = [ks2[2][j] for i in 1:N, j in 1:N]
+        û2 = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        N̂2 = FET.compute_nonlinear_term(û2, ks2; dealiasing = true, backend = FET.FFTBackend())
+        tΩ2 = FET.transfer_density(FET.Enstrophy(), û2, N̂2, ks2)
+        Test.@test abs(sum(tΩ2)) < 1e-9 * sum(abs, tΩ2)        # 2D enstrophy conserved
+
+        # 3D: vector-vorticity enstrophy transfer runs (non-conservative; sanity only).
+        M = 8
+        ks3 = FET.wavenumber_grid((M, M, M), (L, L, L))
+        Random.seed!(6)
+        Â = randn(ComplexF64, M, M, M, 3)   # u = ∇×A ⇒ û = i k × Â is divergence-free
+        kx3 = [ks3[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky3 = [ks3[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz3 = [ks3[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        ûx = im .* (ky3 .* Â[:, :, :, 3] .- kz3 .* Â[:, :, :, 2])
+        ûy = im .* (kz3 .* Â[:, :, :, 1] .- kx3 .* Â[:, :, :, 3])
+        ûz = im .* (kx3 .* Â[:, :, :, 2] .- ky3 .* Â[:, :, :, 1])
+        û3 = cat(ûx, ûy, ûz; dims = 4)
+        Test.@test maximum(abs.(kx3 .* ûx .+ ky3 .* ûy .+ kz3 .* ûz)) < 1e-10  # div-free
+        res3 = FET.calculate_spectral_flux(û3, ks3; binning = FET.LinearBinning(1.0),
+            invariant = FET.Enstrophy(), dealiasing = true, backend = FET.FFTBackend())
+        Test.@test res3 isa FET.SpectralFluxResult
+        Test.@test all(isfinite, res3.transfer_spectrum)
+        # mode-to-mode enstrophy triads remain 2D-only
+        Test.@test_throws ArgumentError FET.calculate_mode_to_mode_transfer(û3, ks3; invariant = FET.Enstrophy())
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer — antisymmetry (divergence-free field)" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.
