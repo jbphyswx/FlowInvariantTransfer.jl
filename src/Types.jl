@@ -2,7 +2,7 @@ module Types
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
-export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
@@ -156,6 +156,25 @@ struct RotationalDecomposition <: AbstractFieldDecomposition end
 Only compute or retain the divergent (dilatational/curl-free) component.
 """
 struct DivergentDecomposition <: AbstractFieldDecomposition end
+
+"""
+    HelicalDecomposition <: AbstractFieldDecomposition
+
+Decompose a 3D velocity field into its **positive- and negative-helicity** components via the
+Craya–Herring/helical basis (Waleffe 1992; Alexakis 2017). For each `k ≠ 0` the plane `⊥ k` is
+spanned by the orthonormal helical eigenvectors of the curl,
+`h_±(k) = (e₁ ± i e₂)/√2` with `i k̂ × h_± = ± h_±` and the Alexakis √2 unit-norm convention
+(`h_± · h_±* = 1`, `h_+ · h_-* = 0`). The velocity projects as `û = u_+ h_+ + u_- h_-`
+(`u_± = û · h_±*`), so
+
+    E(k) = E⁺(k) + E⁻(k),   E^±(k) = ½|u_±|²,   H(k) = |k|(|u_+|² − |u_-|²) = 2|k|(E⁺ − E⁻),
+
+recovering the realizability bound `|H(k)| ≤ 2|k| E(k)`. Returns the two **vector** components
+`(positive = u_+ h_+, negative = u_- h_-)`; for an incompressible field they sum back to `û`.
+3D only. Used as the `decomposition` argument to `calculate_spectral_flux` to get
+helicity-resolved energy fluxes `Π^±(K)`.
+"""
+struct HelicalDecomposition <: AbstractFieldDecomposition end
 
 """
     SpectralFluxMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod

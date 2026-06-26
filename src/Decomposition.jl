@@ -1,6 +1,6 @@
 module Decomposition
 
-using ..Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+using ..Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition
 
 export decompose_field, helmholtz_project_spectral!
 
@@ -45,6 +45,56 @@ end
 
 function decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return _decompose_field_spectral(decomp, velocity_hat, ks)
+end
+
+# ---------------------------------------------------------------------------
+# Helical (Craya–Herring) decomposition — pure per-mode linear algebra, no external solver
+# ---------------------------------------------------------------------------
+
+@inline _cross3(a, b) = (a[2]*b[3] - a[3]*b[2], a[3]*b[1] - a[1]*b[3], a[1]*b[2] - a[2]*b[1])
+
+"""
+    decompose_field(::HelicalDecomposition, velocity_hat, ks) -> (positive=u₊, negative=u₋)
+
+Project a 3D spectral velocity onto the positive/negative-helicity vector components (see
+[`HelicalDecomposition`](@ref)). Each returned array has the shape of `velocity_hat`; for an
+incompressible field `positive .+ negative ≈ velocity_hat`.
+"""
+function _decompose_field_spectral(::HelicalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+    nd = length(ks)
+    nd == 3 || throw(ArgumentError("HelicalDecomposition is defined in 3D only (got nd=$nd)."))
+    ns = size(velocity_hat)[1:nd]
+    D  = size(velocity_hat, nd + 1)
+    D >= 3 || throw(ArgumentError("HelicalDecomposition needs ≥3 velocity components (got D=$D)."))
+    FT = real(eltype(velocity_hat))
+    up = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
+    um = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
+    invsqrt2 = inv(sqrt(FT(2)))
+    @inbounds for I in CartesianIndices(ns)
+        kx = FT(ks[1][I[1]]); ky = FT(ks[2][I[2]]); kz = FT(ks[3][I[3]])
+        kk = sqrt(kx*kx + ky*ky + kz*kz)
+        kk == 0 && continue                              # DC mode carries no helicity
+        k̂ = (kx/kk, ky/kk, kz/kk)
+        # Reference vector not (nearly) parallel to k̂, so k̂×ref is well-conditioned.
+        ref = abs(k̂[3]) < FT(0.9) ? (zero(FT), zero(FT), one(FT)) : (one(FT), zero(FT), zero(FT))
+        e1 = _cross3(k̂, ref)
+        n1 = sqrt(e1[1]^2 + e1[2]^2 + e1[3]^2)
+        e1 = (e1[1]/n1, e1[2]/n1, e1[3]/n1)              # unit, ⊥ k̂
+        e2 = _cross3(k̂, e1)                              # unit, ⊥ k̂ and e1
+        u1 = velocity_hat[I, 1]; u2 = velocity_hat[I, 2]; u3 = velocity_hat[I, 3]
+        ue1 = u1*e1[1] + u2*e1[2] + u3*e1[3]
+        ue2 = u1*e2[1] + u2*e2[2] + u3*e2[3]
+        # h_± = (e1 ± i e2)/√2 ; coefficients u_± = û·h_±*  (h_+* = (e1−ie2)/√2, h_-* = (e1+ie2)/√2)
+        upc = (ue1 - im*ue2) * invsqrt2
+        umc = (ue1 + im*ue2) * invsqrt2
+        for c in 1:3
+            hpc = (e1[c] + im*e2[c]) * invsqrt2          # h_+ component c
+            hmc = (e1[c] - im*e2[c]) * invsqrt2          # h_- component c
+            up[I, c] = upc * hpc
+            um[I, c] = umc * hmc
+        end
+    end
+    return (positive = up, negative = um)
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded

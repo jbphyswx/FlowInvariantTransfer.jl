@@ -41,6 +41,7 @@ using .Types:
     HelmholtzDecomposition,
     RotationalDecomposition,
     DivergentDecomposition,
+    HelicalDecomposition,
     AbstractFilter,
     SharpSpectralFilter,
     GaussianFilter,
@@ -76,7 +77,7 @@ using .Types:
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
-export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells

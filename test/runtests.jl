@@ -485,6 +485,47 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "HelicalDecomposition — reconstruct, orthonormal, helicity split, flux" begin
+        M = 16; L = 2π
+        ks = FET.wavenumber_grid((M, M, M), (L, L, L))
+        kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        Random.seed!(51)
+        Â = randn(ComplexF64, M, M, M, 3)
+        ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
+        ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
+        ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
+        û  = cat(ûx, ûy, ûz; dims = 4)                     # divergence-free by construction
+
+        dec = FET.decompose_field(FET.HelicalDecomposition(), û, ks)
+        up = dec.positive; um = dec.negative
+        # 1. reconstruction u₊ + u₋ ≈ û (incompressible)
+        Test.@test isapprox(up .+ um, û; atol = 1e-12 * maximum(abs, û))
+        # 2. orthonormal split: Σ(|u₊|²+|u₋|²) ≈ Σ|û|²
+        Test.@test isapprox(sum(abs2, up) + sum(abs2, um), sum(abs2, û); rtol = 1e-12)
+        # 3. each helical component is divergence-free (k·u± = 0)
+        divp = kx .* up[:,:,:,1] .+ ky .* up[:,:,:,2] .+ kz .* up[:,:,:,3]
+        divm = kx .* um[:,:,:,1] .+ ky .* um[:,:,:,2] .+ kz .* um[:,:,:,3]
+        Test.@test maximum(abs, divp) < 1e-10 * maximum(abs, û)
+        Test.@test maximum(abs, divm) < 1e-10 * maximum(abs, û)
+        # 4. helicity split: Σ Re{û*·(ik×û)} ≈ Σ |k|(|u₊|² − |u₋|²)
+        ωx = im .* (ky .* ûz .- kz .* ûy); ωy = im .* (kz .* ûx .- kx .* ûz); ωz = im .* (kx .* ûy .- ky .* ûx)
+        H_direct = sum(real.(conj.(ûx).*ωx .+ conj.(ûy).*ωy .+ conj.(ûz).*ωz))
+        kmag = sqrt.(kx.^2 .+ ky.^2 .+ kz.^2)
+        H_heli = sum(kmag .* (sum(abs2, up; dims=4)[:,:,:,1] .- sum(abs2, um; dims=4)[:,:,:,1]))
+        Test.@test isapprox(H_direct, H_heli; rtol = 1e-10)
+        # 5. helicity-resolved energy flux: Π⁺ + Π⁻ == total KE flux (same N̂, u₊+u₋=û)
+        b = FET.LinearBinning(2π/L)
+        rtot = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
+        rhel = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(),
+            decomposition=FET.HelicalDecomposition())
+        Test.@test rhel isa NamedTuple
+        Test.@test isapprox(rhel.positive.transfer_spectrum .+ rhel.negative.transfer_spectrum,
+            rtot.transfer_spectrum; atol = 1e-9 * (sqrt(sum(abs2, rtot.transfer_spectrum)) + eps()))
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π
