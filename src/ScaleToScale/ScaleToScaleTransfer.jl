@@ -1,12 +1,13 @@
 module ScaleToScaleTransfer
 
 using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractInvariant, KineticEnergy,
-               AbstractSpectralBackend, DirectSumBackend, FFTBackend
+               PassiveScalar, AbstractSpectralBackend, DirectSumBackend, FFTBackend
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace
+using ..Utils: as_component_field
 
-export calculate_mode_to_mode_transfer
+export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
 
 """
     calculate_mode_to_mode_transfer(velocity_hat, ks; invariant=KineticEnergy(), dealiasing=true,
@@ -53,10 +54,11 @@ function calculate_mode_to_mode_transfer(
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     max_modes::Int = 1024,
     force::Bool = false,
+    advecting_hat = velocity_hat,
 )
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd + 1)
+    M  = size(velocity_hat, nd + 1)   # components of the giver/carried primary field
     FT = real(eltype(velocity_hat))
     Nmodes = prod(ns)
     (force || Nmodes <= max_modes) || throw(ArgumentError(
@@ -71,12 +73,13 @@ function calculate_mode_to_mode_transfer(
     net = fill!(similar(velocity_hat, FT, ns...), zero(FT))
 
     @inbounds for p in CartesianIndices(ns)
-        # Isolate giver mode p, advected by the full velocity: N̂_p = (u·∇)u_p.
+        # Isolate giver mode p of the primary field, advected by the full velocity:
+        # 𝒩̂_p = (u·∇)f_p (f = u for energy; f = θ for a passive scalar).
         fill!(û_p, zero(eltype(û_p)))
-        for c in 1:D
+        for c in 1:M
             û_p[p, c] = velocity_hat[p, c]
         end
-        compute_nonlinear_term!(ws, û_p, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=velocity_hat)
+        compute_nonlinear_term!(ws, û_p, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
         transfer_density!(td, invariant, velocity_hat, ws.N̂, ks)   # validates invariant/dimension
         for k in CartesianIndices(ns)
             S[k, p] = td[k]
@@ -85,6 +88,20 @@ function calculate_mode_to_mode_transfer(
     end
 
     return ModeToModeTriadResult(invariant, ks, net, S)
+end
+
+"""
+    calculate_scalar_mode_to_mode_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ModeToModeTriadResult
+
+Fully mode-resolved passive-scalar **variance** transfer `S_θ(k|p)` — variance delivered to
+scalar mode `k` from scalar mode `p` (mediated by the velocity, `q = k−p`). Thin wrapper over
+[`calculate_mode_to_mode_transfer`](@ref) with `invariant = PassiveScalar()` and
+`advecting_hat = velocity_hat`; the scalar may be `(ns...)` or `(ns..., 1)`.
+"""
+function calculate_scalar_mode_to_mode_transfer(velocity_hat, scalar_hat, ks; kwargs...)
+    θ̂ = as_component_field(scalar_hat, length(ks))
+    return calculate_mode_to_mode_transfer(θ̂, ks;
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
 end
 
 end # module ScaleToScaleTransfer

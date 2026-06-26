@@ -412,6 +412,37 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "ModeToMode — passive scalar S_θ(k|p): antisym, conserves, reduces" begin
+        N = 12; L = 2π
+        Random.seed!(15)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
+        θ  = FFTW.fft(randn(N, N)) ./ N^2                          # scalar
+
+        m2m = FET.calculate_scalar_mode_to_mode_transfer(û, θ, ks; dealiasing = true,
+            spectral = FET.FFTBackend())
+        S   = m2m.transfer
+        nrm = sqrt(sum(abs2, S)); Test.@test nrm > 0
+        asym = 0.0
+        for k in CartesianIndices((N, N)), p in CartesianIndices((N, N))
+            asym = max(asym, abs(S[k, p] + S[p, k]))
+        end
+        Test.@test asym < 1e-10 * nrm                              # S_θ(k|p) = −S_θ(p|k)
+        Test.@test abs(sum(S)) < 1e-10 * nrm                       # conserves
+        # net (= Σ_p S_θ) shell-summed == scalar transfer spectrum
+        b = FET.LinearBinning(2π/L)
+        sfθ = FET.calculate_scalar_flux(û, θ, ks; binning = b, dealiasing = true,
+            spectral = FET.FFTBackend())
+        kmag = FET.wavenumber_magnitude_grid(ks)
+        edges = FET.shell_edges(b, maximum(kmag)); sidx = FET.assign_shells(kmag, edges)
+        netshell = zeros(length(edges) - 1)
+        for I in CartesianIndices((N, N)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
+        Test.@test isapprox(netshell, sfθ.transfer_spectrum; atol = 1e-9 * sqrt(sum(abs2, sfθ.transfer_spectrum)))
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π

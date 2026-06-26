@@ -99,8 +99,19 @@ Scalar variance is an inviscid invariant for incompressible flow (`∫θ(u·∇)
 so it is **conserved** (`Σ_k T_θ ≈ 0`) and cascades **forward** (to small scales) in both 2D and
 3D — unlike kinetic energy there is no inverse-cascade dimension.
 
+# A family of canonical invariants
+Several other quadratic invariants are advected by the velocity exactly like a passive scalar, so
+their cross-scale transfer is computed by this same path (pass the field as the "scalar"):
+- **2D-MHD mean-square vector potential** `½⟨a²⟩` (`∂_t a + (u·∇)a = η∇²a`, `b = ∇×(a ẑ)`) —
+  inverse-cascades in 2D.
+- **Buoyancy / available-potential-energy variance** `½⟨b²⟩` (APE `= ½⟨b²⟩/N²`) in the
+  Boussinesq system; the `−N²w` term is a KE↔APE *conversion* (a separate source, not a triad
+  transfer), so the variance *cascade* is exactly the scalar transfer of `b`.
+- **QG potential enstrophy** `½⟨q²⟩` with PV `q = ∇²ψ + βy` advected by the geostrophic velocity.
+
 # References
-- Obukhov (1949); Corrsin (1951); Batchelor (1959). See THEORY.md §0.5.
+- Obukhov (1949); Corrsin (1951); Batchelor (1959); 2D-MHD: Fyfe–Montgomery (1976);
+  QG: Charney (1971); stratified APE: Lindborg (2006). See THEORY.md §0.5.
 """
 struct PassiveScalar <: AbstractInvariant end
 
