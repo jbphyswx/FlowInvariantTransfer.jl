@@ -292,6 +292,30 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "SpectralFlux — passive-scalar variance flux (conserved, cumulative→0)" begin
+        N = 16; L = 2π
+        Random.seed!(32)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
+        θ  = FFTW.fft(randn(N, N)) ./ N^2                          # scalar as (N,N)
+        b  = FET.LinearBinning(2π/L)
+
+        res = FET.calculate_scalar_flux(û, θ, ks; binning = b, dealiasing = true,
+            spectral = FET.FFTBackend())
+        Test.@test res isa FET.SpectralFluxResult
+        sT = sqrt(sum(abs2, res.transfer_spectrum)); Test.@test sT > 0
+        Test.@test abs(sum(res.transfer_spectrum)) < 1e-9 * sT       # variance conserved
+        Test.@test abs(res.flux[end]) < 1e-9 * sT                    # cumulative flux returns to 0
+
+        # Passing the scalar already shaped (N,N,1) gives the identical result.
+        res1 = FET.calculate_scalar_flux(û, reshape(θ, N, N, 1), ks; binning = b,
+            dealiasing = true, spectral = FET.FFTBackend())
+        Test.@test res1.transfer_spectrum ≈ res.transfer_spectrum
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer — antisymmetry (divergence-free field)" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.

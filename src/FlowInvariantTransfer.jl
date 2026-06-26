@@ -108,13 +108,13 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 export compute_nonlinear_term, compute_nonlinear_term!
 
-using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!
+using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
 using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition
 
-export calculate_spectral_flux, calculate_spectral_flux!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
 export calculate_mode_to_mode_transfer

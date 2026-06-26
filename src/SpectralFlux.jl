@@ -1,6 +1,6 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
@@ -8,7 +8,7 @@ using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coor
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
-export calculate_spectral_flux, calculate_spectral_flux!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -54,10 +54,11 @@ function calculate_spectral_flux(
     invariant::AbstractInvariant = KineticEnergy(),
     decomposition::AbstractFieldDecomposition = NoDecomposition(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    advecting_hat = velocity_hat,
 )
     decomposed = decompose_field(decomposition, velocity_hat, ks)
     return _calculate_spectral_flux_decomposed(
-        decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral
+        decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral, advecting_hat
     )
 end
 
@@ -69,6 +70,7 @@ function _calculate_spectral_flux_decomposed(
     dealiasing::Bool,
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
+    advecting_hat,
 )
     ws        = SpectralFluxWorkspace(velocity_hat, ks, binning)
     k_mag     = wavenumber_magnitude_grid(ks)
@@ -79,9 +81,11 @@ function _calculate_spectral_flux_decomposed(
 
     if û_decomp === velocity_hat
         calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
-                                  dealiasing=dealiasing, invariant=invariant, spectral=spectral)
+                                  dealiasing=dealiasing, invariant=invariant, spectral=spectral,
+                                  advecting_hat=advecting_hat)
     else
-        compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing, spectral=spectral)
+        compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing,
+                                spectral=spectral, advecting_hat=advecting_hat)
         _calculate_spectral_flux_with_N̂!(result, ws, û_decomp, ws.nonlinear.N̂, ks, shell_idx; invariant=invariant)
     end
     return result
@@ -95,9 +99,11 @@ function _calculate_spectral_flux_decomposed(
     dealiasing::Bool,
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
+    advecting_hat,
 )
     ws = SpectralFluxWorkspace(velocity_hat, ks, binning)
-    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing, spectral=spectral)
+    compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing,
+                            spectral=spectral, advecting_hat=advecting_hat)
     N̂ = ws.nonlinear.N̂
 
     k_mag     = wavenumber_magnitude_grid(ks)
@@ -128,9 +134,10 @@ function calculate_spectral_flux!(
     dealiasing::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    advecting_hat = velocity_hat,
 )
     compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks;
-                            dealiasing=dealiasing, spectral=spectral)
+                            dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
     _calculate_spectral_flux_with_N̂!(result, ws, velocity_hat, ws.nonlinear.N̂, ks, shell_idx; invariant=invariant)
     return result
 end
@@ -170,8 +177,56 @@ function _calculate_spectral_flux_with_N̂!(
 end
 
 # ---------------------------------------------------------------------------
+# Passive-scalar variance flux (convenience over the generalized advecting_hat path)
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_scalar_flux(velocity_hat, scalar_hat, ks; binning, dealiasing=true, spectral) -> SpectralFluxResult
+
+Compute the passive-scalar **variance** transfer spectrum `T_θ(k)` and flux `Π_θ(K)`, for a
+scalar `θ` advected by the velocity `u` (`∂_tθ + (u·∇)θ = κ∇²θ`):
+
+    T_θ(k_n) = Σ_{|k|∈shell_n} Re{ θ̂*(k) N̂_θ(k) },   N̂_θ = FFT[(u·∇)θ],   Π_θ(K) = Σ_{k≤K} T_θ(k).
+
+Scalar variance is conserved for incompressible `u` (`Σ_k T_θ ≈ 0`) and cascades forward in any
+dimension (Obukhov–Corrsin). Thin wrapper over [`calculate_spectral_flux`](@ref) with
+`invariant = PassiveScalar()` and `advecting_hat = velocity_hat`.
+
+# Arguments
+- `velocity_hat`: complex `(ns..., D)` velocity Fourier coefficients (the advecting field).
+- `scalar_hat`: complex scalar field, either `(ns...)` or `(ns..., 1)`.
+- `ks`: tuple of `nd` 1D wavenumber vectors.
+"""
+function calculate_scalar_flux(
+    velocity_hat,
+    scalar_hat,
+    ks;
+    binning::AbstractShellBinning = _default_binning(ks),
+    dealiasing::Bool = true,
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+)
+    θ̂ = _as_component_field(scalar_hat, length(ks))
+    return calculate_spectral_flux(θ̂, ks; binning=binning, dealiasing=dealiasing,
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral)
+end
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+"""
+    _as_component_field(f, nd) -> array of rank nd+1
+
+Normalize a scalar field to the package's `(ns..., M)` component-axis convention: a rank-`nd`
+array `(ns...)` is reshaped to `(ns..., 1)`; a rank-`nd+1` array is returned unchanged.
+"""
+function _as_component_field(f, nd::Int)
+    r = ndims(f)
+    r == nd     && return reshape(f, size(f)..., 1)
+    r == nd + 1 && return f
+    throw(ArgumentError(
+        "scalar field has $r dims; expected nd=$nd (shape (ns...)) or nd+1=$(nd+1) (shape (ns...,1))."))
+end
 
 function _default_binning(ks)
     # Default linear binning with spacing = minimum non-zero wavenumber increment
