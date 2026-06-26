@@ -68,15 +68,16 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
     pb   = ws.plans
     nd   = length(ks)
     ns   = size(velocity_hat)[1:nd]
-    D    = size(velocity_hat, nd+1)
+    M    = size(velocity_hat, nd+1)   # advected-field components (D for momentum, 1 for scalar)
     FT   = real(eltype(velocity_hat))
     Np   = FT(prod(ns))
     ct   = pb.ctmp
     ct2  = pb.ctmp2
     keep = pb.keepmask
 
-    # Advecting velocity: u_phys[...,j] = real(ifft(advecting_hat[...,j])) = real(bfft)/Np
-    for j in 1:D
+    # Advecting velocity: u_phys[...,j] = real(ifft(advecting_hat[...,j])) = real(bfft)/Np,
+    # j = 1:nd (only the spatial directions of the velocity participate in (u·∇)).
+    for j in 1:nd
         a_j = selectdim(advecting_hat, nd+1, j)
         dealiasing ? (ct .= keep .* a_j) : (ct .= a_j)
         mul!(ct2, pb.p_bfft, ct)
@@ -84,8 +85,8 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
         uj .= real.(ct2) ./ Np
     end
 
-    # Advected gradient: ∂_j u_i = real(ifft(i k_j û_i))
-    for c in 1:D
+    # Advected gradient: ∂_j f_i = real(ifft(i k_j f̂_i)), i = 1:M
+    for c in 1:M
         v_c = selectdim(velocity_hat, nd+1, c)
         for j in 1:nd
             dealiasing ? (ct .= im .* pb.k_comp[j] .* keep .* v_c) :
@@ -96,8 +97,8 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
         end
     end
 
-    # N_i = Σ_j (u_adv)_j ∂_j u_i
-    for c in 1:D
+    # 𝒩_i = Σ_j (u_adv)_j ∂_j f_i
+    for c in 1:M
         Nc = selectdim(ws.N_phys, nd+1, c)
         fill!(Nc, zero(FT))
         for j in 1:nd
@@ -107,8 +108,8 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
         end
     end
 
-    # N̂_i = fft(N_i)/Np, zeroed above the 2/3 cutoff
-    for c in 1:D
+    # 𝒩̂_i = fft(𝒩_i)/Np, zeroed above the 2/3 cutoff
+    for c in 1:M
         Nc = selectdim(ws.N_phys, nd+1, c)
         ct .= Nc
         mul!(ct2, pb.p_fft, ct)

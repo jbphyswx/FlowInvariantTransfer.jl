@@ -28,44 +28,47 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    compute_nonlinear_term(velocity_hat, ks; dealiasing=true, backend=SerialBackend())
+    compute_nonlinear_term(advected_hat, ks; dealiasing=true,
+                           spectral=DirectSumBackend(), advecting_hat=advected_hat)
 
-Compute N̂ᵢ(k) = F̂[(uⱼ ∂uᵢ/∂xⱼ)] for all components i via the pseudospectral
-method.
+Compute the pseudospectral nonlinear term `𝒩̂ᵢ(k) = F̂[(uⱼ ∂fᵢ/∂xⱼ)]` — the advection of an
+`M`-component field `f` (`advected_hat`) by a velocity `u` (`advecting_hat`). For the momentum
+self-advection term pass the velocity as both (the default), giving `N̂ᵢ = F̂[(u·∇)uᵢ]`.
 
 # Arguments
-- `velocity_hat`: Array of size `(ns..., D)` containing the complex Fourier
-  coefficients of each velocity component.  `ns` is the D-dimensional grid shape
-  and the last dimension indexes the D vector components.
-- `ks`: Tuple of 1D wavenumber vectors (length D), one per spatial dimension.
+- `advected_hat`: Array of size `(ns..., M)` — Fourier coefficients of the advected field `f`
+  (`M = D` for momentum, `M = 1` for a passive scalar / vector potential).
+- `ks`: Tuple of 1D wavenumber vectors (length `nd`), one per spatial dimension.
 
 # Keyword Arguments
-- `dealiasing::Bool=true`: Apply the 2/3 dealiasing rule after computing products.
-- `backend::AbstractExecutionBackend`: `SerialBackend()` (default) or `FFTBackend()` (requires FFTW extension).
+- `dealiasing::Bool=true`: Apply the Orszag 2/3 rule (truncate inputs *and* output).
+- `spectral::AbstractSpectralBackend`: `DirectSumBackend()` (default, no deps) or `FFTBackend()`
+  (requires the FFTW extension) for the O(N log N) path.
+- `advecting_hat`: the advecting velocity `u` (shape `(ns..., D)`, `D ≥ nd`); defaults to
+  `advected_hat` (self-advection). Only the `nd` spatial components participate in `(u·∇)`.
 
 # Returns
-Array of the same size as `velocity_hat` containing N̂ᵢ(k).
-
-# Notes
-Without FFTW, this falls back to a pure Julia O(N²) direct-sum implementation
-that is exact but slow.  Load FFTW to activate the O(N log N) path.
+Array of size `(ns..., M)` containing `𝒩̂ᵢ(k)`.
 """
 function compute_nonlinear_term(
     velocity_hat,
     ks;
     dealiasing::Bool = true,
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    advecting_hat = velocity_hat,
 )
     ws = NonlinearTermWorkspace(velocity_hat, ks)
-    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, spectral=spectral)
+    compute_nonlinear_term!(ws, velocity_hat, ks;
+        dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
     return ws.N̂
 end
 
 """
-    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=true, backend=SerialBackend())
+    compute_nonlinear_term!(ws, advected_hat, ks; dealiasing=true,
+                            spectral=DirectSumBackend(), advecting_hat=advected_hat)
 
 In-place version of `compute_nonlinear_term`. Writes result into `ws.N̂`.
-Pass a `NonlinearTermWorkspace` to avoid any allocations in the hot path.
+Pass a `NonlinearTermWorkspace` (sized for `advected_hat`) to avoid any allocations in the hot path.
 """
 function compute_nonlinear_term!(
     ws::NonlinearTermWorkspace,
@@ -140,21 +143,21 @@ function _compute_nonlinear_term_direct!(
 )
     nd  = length(ks)
     ns  = size(velocity_hat)[1:nd]
-    D   = size(velocity_hat, nd+1)
+    M   = size(velocity_hat, nd+1)   # advected-field components (D for momentum, 1 for scalar)
     FT  = real(eltype(velocity_hat))
     Np  = prod(ns)
     phys_idxs = CartesianIndices(ns)
 
     fill!(ws.N̂, zero(eltype(ws.N̂)))
 
-    # u_phys  shape: (ns..., D)
-    # grad_phys shape: (ns..., D, nd)
-    # N_phys  shape: (ns..., D)
+    # u_phys  shape: (ns..., nd)   — advecting velocity, spatial directions only
+    # grad_phys shape: (ns..., M, nd)
+    # N_phys  shape: (ns..., M)
     # Index via (phys_I..., comp) or (phys_I..., comp, grad_d)
 
-    # --- (advecting) uⱼ(x_p) = IDFT(û_adv) ---
-    for comp in 1:D
-        û_c = selectdim(advecting_hat, nd+1, comp)
+    # --- (advecting) uⱼ(x_p) = IDFT(û_adv), j = 1:nd (only the advecting directions) ---
+    for j in 1:nd
+        û_j = selectdim(advecting_hat, nd+1, j)
         for phys_I in phys_idxs
             val = zero(complex(FT))
             for spec_I in CartesianIndices(ns)
@@ -166,14 +169,14 @@ function _compute_nonlinear_term_direct!(
                     km    = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
                     phase += FT(2π) * km * xj
                 end
-                val += û_c[spec_I] * exp(im * phase)
+                val += û_j[spec_I] * exp(im * phase)
             end
-            ws.u_phys[phys_I, comp] = real(val / FT(Np))
+            ws.u_phys[phys_I, j] = real(val / FT(Np))
         end
     end
 
-    # --- ∂uᵢ/∂xⱼ(x_p) = IDFT(i·kⱼ·ûᵢ) ---
-    for comp in 1:D
+    # --- ∂fᵢ/∂xⱼ(x_p) = IDFT(i·kⱼ·f̂ᵢ),  i = 1:M advected components ---
+    for comp in 1:M
         û_c = selectdim(velocity_hat, nd+1, comp)
         for grad_d in 1:nd
             for phys_I in phys_idxs
@@ -195,8 +198,8 @@ function _compute_nonlinear_term_direct!(
         end
     end
 
-    # --- Nᵢ(x_p) = Σⱼ u_j · ∂uᵢ/∂xⱼ ---
-    for comp in 1:D
+    # --- 𝒩ᵢ(x_p) = Σⱼ u_j · ∂fᵢ/∂xⱼ ---
+    for comp in 1:M
         for phys_I in phys_idxs
             s = zero(FT)
             for j in 1:nd
@@ -206,8 +209,8 @@ function _compute_nonlinear_term_direct!(
         end
     end
 
-    # --- N̂ᵢ(k) = DFT(Nᵢ) ---
-    for comp in 1:D
+    # --- 𝒩̂ᵢ(k) = DFT(𝒩ᵢ) ---
+    for comp in 1:M
         N̂_c = selectdim(ws.N̂, nd+1, comp)
         for spec_I in CartesianIndices(ns)
             val = zero(complex(FT))
@@ -229,7 +232,7 @@ function _compute_nonlinear_term_direct!(
     if dealiasing
         for I in CartesianIndices(ns)
             _is_dealiased(I, ns, nd) || continue
-            for comp in 1:D
+            for comp in 1:M
                 ws.N̂[I, comp] = zero(eltype(ws.N̂))
             end
         end

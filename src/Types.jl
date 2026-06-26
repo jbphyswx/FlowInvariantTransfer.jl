@@ -1,7 +1,7 @@
 module Types
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
-export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
@@ -38,7 +38,15 @@ invariant; only the per-mode transfer-density weighting changes (see
 `Invariants.transfer_density!`).
 
 Concrete subtypes: [`KineticEnergy`](@ref) (default), [`Helicity`](@ref) (3D),
-[`Enstrophy`](@ref) (2D).
+[`Enstrophy`](@ref) (2D), [`PassiveScalar`](@ref) (any D).
+
+# Advected vs. carrier field
+Every transfer diagnostic forms `T(k) = Re{ ĉ*(k) · 𝒩̂(k) }`, where `𝒩̂ = FFT[(u·∇)f]` is the
+nonlinear term of the *advected* field `f` and `ĉ` is the *carrier*. For the momentum
+invariants (KE/helicity/enstrophy) both are the velocity (`f = c = u`, with vorticity weighting
+folded into the carrier for helicity/enstrophy). For [`PassiveScalar`](@ref) the advected and
+carrier field is the scalar `θ`, advected by the velocity `u` — handled by passing the scalar as
+the primary field and the velocity as `advecting_hat`.
 """
 abstract type AbstractInvariant end
 
@@ -75,6 +83,26 @@ Available in 3D via spectral flux and shell-to-shell; the explicit mode-to-mode 
 is 2D-only for now.
 """
 struct Enstrophy <: AbstractInvariant end
+
+"""
+    PassiveScalar <: AbstractInvariant
+
+Passive-scalar variance `E_θ = ½∫θ²` (Obukhov–Corrsin), advected by the velocity:
+`∂_tθ + (u·∇)θ = κ∇²θ`. The transfer density is `Re{ θ̂*(k) N̂_θ(k) }` with
+`N̂_θ = FFT[(u·∇)θ]`.
+
+The scalar is the *advected and carrier* field; the velocity only advects it. Pass the scalar
+(shape `(ns..., 1)`) as the primary field and the velocity as `advecting_hat` (the convenience
+entry points `calculate_scalar_*` do this for you).
+
+Scalar variance is an inviscid invariant for incompressible flow (`∫θ(u·∇)θ = −½∫θ²∇·u = 0`),
+so it is **conserved** (`Σ_k T_θ ≈ 0`) and cascades **forward** (to small scales) in both 2D and
+3D — unlike kinetic energy there is no inverse-cascade dimension.
+
+# References
+- Obukhov (1949); Corrsin (1951); Batchelor (1959). See THEORY.md §0.5.
+"""
+struct PassiveScalar <: AbstractInvariant end
 
 # ---------------------------------------------------------------------------
 # Field decomposition / projection traits

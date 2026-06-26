@@ -35,6 +35,7 @@ using .Types:
     KineticEnergy,
     Helicity,
     Enstrophy,
+    PassiveScalar,
     AbstractFieldDecomposition,
     NoDecomposition,
     HelmholtzDecomposition,

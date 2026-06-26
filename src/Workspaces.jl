@@ -4,7 +4,7 @@ using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, Se
 using ..ShellBinning: shell_edges, assign_shells
 using ..Utils: wavenumber_magnitude_grid
 
-export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, ScaleToScaleWorkspace
+export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
 # NonlinearTermWorkspace
@@ -23,19 +23,24 @@ _make_fft_plans(velocity_hat, ks) = nothing
 """
     NonlinearTermWorkspace{CA, RA, GA, P}
 
-Preallocated buffers for computing the nonlinear advection term N̂(k) = FFT[(u·∇)u].
+Preallocated buffers for the generalized pseudospectral nonlinear term
+`𝒩(k) = FFT[(u·∇)f]`, where the advecting velocity `u` has `nd` advecting (spatial)
+components and the advected field `f` has `M` components. For the momentum term `f = u`
+(`M = D`); for passive-scalar / vector-potential advection `f = θ`/`a` (`M = 1`).
 
 # Fields
-- `u_phys::RA`:    `(ns..., D)` real physical-space velocities (rank `nd+1`).
-- `grad_phys::GA`: `(ns..., D, nd)` real physical-space velocity gradients ∂u_i/∂x_j (rank `nd+2`).
-- `N_phys::RA`:    `(ns..., D)` real physical-space nonlinear term (rank `nd+1`).
-- `N̂::CA`:         `(ns..., D)` complex spectral output buffer (rank `nd+1`).
+- `u_phys::RA`:    `(ns..., nd)` real physical-space advecting velocity (rank `nd+1`); only the
+  `nd` spatial directions of the velocity participate in `(u·∇)`, so this never depends on `D`.
+- `grad_phys::GA`: `(ns..., M, nd)` real physical-space gradients ∂f_i/∂x_j (rank `nd+2`).
+- `N_phys::RA`:    `(ns..., M)` real physical-space nonlinear term (rank `nd+1`).
+- `N̂::CA`:         `(ns..., M)` complex spectral output buffer (rank `nd+1`).
 - `plans::P`:      FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
 
 Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), `GA`
 (real gradient buffer, rank `nd+2`), and the plan-bundle type `P` — no element-type bounds,
 and each field is concretely typed (`grad_phys` has a separate parameter because its rank
-differs from the others).
+differs from the others; `u_phys` and `N_phys` share `RA` — same rank/eltype, possibly
+different trailing extent).
 """
 struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray, P}
     u_phys::RA
@@ -46,22 +51,25 @@ struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:Abstract
 end
 
 """
-    NonlinearTermWorkspace(velocity_hat, ks)
+    NonlinearTermWorkspace(advected_hat, ks)
 
-Construct a `NonlinearTermWorkspace` sized for `velocity_hat` and wavenumber tuple `ks`.
-When FFTW is loaded, `plans` is populated with pre-planned transforms (see `_make_fft_plans`).
+Construct a `NonlinearTermWorkspace` sized for advecting an `M`-component field `advected_hat`
+(shape `(ns..., M)`) by a velocity, on wavenumber tuple `ks` (length `nd`). The advecting
+velocity needs only its `nd` spatial components, so `u_phys` is `(ns..., nd)` regardless of how
+many components the velocity carries. For the momentum self-advection term pass the velocity
+itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned transforms.
 """
-function NonlinearTermWorkspace(velocity_hat, ks)
-    FT  = real(eltype(velocity_hat))
-    ns  = size(velocity_hat)[1:length(ks)]
-    D   = size(velocity_hat, ndims(velocity_hat))
+function NonlinearTermWorkspace(advected_hat, ks)
+    FT  = real(eltype(advected_hat))
     nd  = length(ks)
+    ns  = size(advected_hat)[1:nd]
+    M   = size(advected_hat, nd + 1)              # advected-field component count
     # `similar` propagates the array kind (CPU Array, CuArray, …) — GPU-generic.
-    u_phys    = similar(velocity_hat, FT, ns..., D)
-    grad_phys = similar(velocity_hat, FT, ns..., D, nd)
-    N_phys    = similar(velocity_hat, FT, ns..., D)
-    N̂         = similar(velocity_hat, ns..., D)   # keeps complex eltype
-    plans     = _make_fft_plans(velocity_hat, ks)
+    u_phys    = similar(advected_hat, FT, ns..., nd)    # advecting velocity, spatial dirs only
+    grad_phys = similar(advected_hat, FT, ns..., M, nd)
+    N_phys    = similar(advected_hat, FT, ns..., M)
+    N̂         = similar(advected_hat, ns..., M)         # keeps complex eltype
+    plans     = _make_fft_plans(advected_hat, ks)
     return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
 end
 
@@ -156,51 +164,6 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
         shell_idx,
         similar(velocity_hat, FT, ns...),        # transfer_density
     )
-end
-
-# ---------------------------------------------------------------------------
-# ScaleToScaleWorkspace
-# ---------------------------------------------------------------------------
-
-"""
-    ScaleToScaleWorkspace{M, V, IA}
-
-Preallocated buffers for `calculate_mode_to_mode_transfer!`.
-
-# Fields
-- `T_mat::M`:        Output transfer matrix (N_sh × N_sh), written in-place.
-- `net_transfer::V`: Net per-mode transfer buffer.
-- `shell_idx::IA`:   Integer shell-index array.
-"""
-struct ScaleToScaleWorkspace{M<:AbstractMatrix, V<:AbstractArray, IA<:AbstractArray{Int}}
-    T_mat::M
-    net_transfer::V
-    shell_idx::IA
-end
-
-"""
-    ScaleToScaleWorkspace(velocity_hat, ks, binning)
-
-Construct a `ScaleToScaleWorkspace` for the given input and binning.
-"""
-function ScaleToScaleWorkspace(velocity_hat, ks, binning)
-    FT        = real(eltype(velocity_hat))
-    nd        = length(ks)
-    ns        = size(velocity_hat)[1:nd]
-    k_mag     = wavenumber_magnitude_grid(ks)
-
-    if !isnothing(binning)
-        edges     = shell_edges(binning, maximum(k_mag))
-        N_sh      = length(edges) - 1
-        shell_idx = assign_shells(k_mag, edges)
-        T_mat     = similar(velocity_hat, FT, N_sh, N_sh)
-    else
-        shell_idx = fill!(similar(velocity_hat, Int, ns...), 0)
-        T_mat     = similar(velocity_hat, FT, 0, 0)
-    end
-
-    net_transfer = similar(velocity_hat, FT, ns...)
-    return ScaleToScaleWorkspace(T_mat, net_transfer, shell_idx)
 end
 
 end # module Workspaces

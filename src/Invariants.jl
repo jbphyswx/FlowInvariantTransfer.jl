@@ -1,6 +1,6 @@
 module Invariants
 
-using ..Types: AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+using ..Types: AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 
 export transfer_density, transfer_density!
 
@@ -15,6 +15,7 @@ export transfer_density, transfer_density!
 # kernel serve kinetic energy, helicity (3D), and enstrophy (2D).
 #
 #   KineticEnergy : t[I] = Σ_c Re{ conj(û_c)  N̂_c }
+#   PassiveScalar : t[I] = Re{ conj(θ̂)  N̂_θ },   N̂_θ = FFT[(u·∇)θ]   (same dot form, M=1 field)
 #   Helicity (3D) : t[I] = Σ_c Re{ conj(ω̂_c)  N̂_c },   ω̂ = i k × û
 #   Enstrophy     : t[I] = Re{ conj(ω̂) · N̂_ω },   ω̂ = i k × û,  N̂_ω = i k × N̂.
 #                   2D: scalar vorticity, ENSTROPHY IS CONSERVED (Σ_k t = 0, dual cascade).
@@ -32,20 +33,30 @@ given Fourier-space velocity `velocity_hat` and nonlinear term `N̂` (both shape
 """
 function transfer_density! end
 
-function transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks)
+# Shared quadratic dot density t[I] = Σ_c Re{ conj(carrier_c) · N̂_c }. Serves kinetic energy
+# (carrier = û, M = D components) and passive-scalar variance (carrier = θ̂, M = 1) identically —
+# the only difference between those invariants is which field is advected/carried, handled by the
+# caller (the scalar passes θ̂ as the primary field). N-D, allocation-free.
+function _transfer_density_dot!(t, carrier_hat, N̂, ks)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd + 1)
-    FT = real(eltype(velocity_hat))
+    ns = size(carrier_hat)[1:nd]
+    M  = size(carrier_hat, nd + 1)
+    FT = real(eltype(carrier_hat))
     @inbounds for I in CartesianIndices(ns)
         s = zero(FT)
-        for c in 1:D
-            s += real(conj(velocity_hat[I, c]) * N̂[I, c])
+        for c in 1:M
+            s += real(conj(carrier_hat[I, c]) * N̂[I, c])
         end
         t[I] = s
     end
     return t
 end
+
+transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks) =
+    _transfer_density_dot!(t, velocity_hat, N̂, ks)
+
+transfer_density!(t, ::PassiveScalar, scalar_hat, N̂, ks) =
+    _transfer_density_dot!(t, scalar_hat, N̂, ks)
 
 function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks)
     nd = length(ks)

@@ -265,6 +265,33 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "NonlinearTerm — generalized advection of an M=1 scalar (u·∇)θ" begin
+        # The generalized engine advects an arbitrary M-component field by the velocity. Here a
+        # passive scalar (M=1) advected by a divergence-free 2D velocity: the direct and FFT
+        # backends must agree, and scalar variance must be conserved (Σ_k Re{θ̂* N̂_θ} ≈ 0,
+        # since ∫θ(u·∇)θ = −½∫θ²(∇·u) = 0 for incompressible u).
+        N = 12; L = 2π
+        Random.seed!(31)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity (D=2)
+        θ̂  = reshape(FFTW.fft(randn(N, N)) ./ N^2, N, N, 1)        # passive scalar (M=1)
+
+        # N̂_θ = (u·∇)θ via direct DFT and FFT backends — must match.
+        N̂_dir = FET.compute_nonlinear_term(θ̂, ks; dealiasing = true,
+            spectral = FET.DirectSumBackend(), advecting_hat = û)
+        N̂_fft = FET.compute_nonlinear_term(θ̂, ks; dealiasing = true,
+            spectral = FET.FFTBackend(), advecting_hat = û)
+        Test.@test size(N̂_dir) == (N, N, 1)
+        Test.@test isapprox(N̂_dir, N̂_fft; atol = 1e-10 * maximum(abs, N̂_fft))
+
+        # Scalar variance conservation: Σ_k Re{θ̂*(k) N̂_θ(k)} ≈ 0.
+        tθ = FET.transfer_density(FET.PassiveScalar(), θ̂, N̂_fft, ks)
+        Test.@test abs(sum(tθ)) < 1e-9 * sum(abs, tθ)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer — antisymmetry (divergence-free field)" begin
         # T(n,m) = -T(m,n) holds exactly for divergence-free (incompressible) fields.
         # Build u = ∂ψ/∂y, v = -∂ψ/∂x from a random streamfunction ψ.
