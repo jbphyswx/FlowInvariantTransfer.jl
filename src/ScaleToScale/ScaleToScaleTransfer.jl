@@ -4,8 +4,8 @@ using LinearAlgebra: LinearAlgebra
 using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractShellBinning, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, DistributedBackend
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_magnitude_grid, dealiasing_mask
-using ..Workspaces: ScaleToScaleWorkspace
-using ..NonlinearTerm: compute_nonlinear_term
+using ..Workspaces: ScaleToScaleWorkspace, NonlinearTermWorkspace
+using ..NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 using ..Invariants: transfer_density
 using ..ShellToShellTransfer: calculate_shell_to_shell_transfer
 
@@ -41,10 +41,15 @@ function calculate_mode_to_mode_transfer(
     dealiasing::Bool = true,
     backend::AbstractExecutionBackend = SerialBackend(),
 )
-    # Net per-mode transfer: exact convolution via the (FFT or direct) nonlinear term.
-    nl_backend = backend isa FFTBackend ? FFTBackend() : SerialBackend()
-    N̂   = compute_nonlinear_term(velocity_hat, ks; dealiasing=dealiasing, backend=nl_backend)
-    net = transfer_density(invariant, velocity_hat, N̂, ks)   # validates invariant/dimension
+    # Net per-mode transfer T(k) = Re{û*·N̂} is ONE nonlinear-term evaluation, which has only a
+    # direct (SerialBackend) and an FFT (FFTBackend) implementation. Use the fastest available
+    # transform — the workspace carries FFT plans iff FFTW is loaded — independent of the parallel
+    # `backend` (which parallelises the shell-to-shell mediator loop in the T(K,Q) stage below,
+    # not this single transform). No backend "remap": we just pick FFT when it exists, else direct.
+    ws = NonlinearTermWorkspace(velocity_hat, ks)
+    nl_backend = ws.plans === nothing ? SerialBackend() : FFTBackend()
+    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, backend=nl_backend)
+    net = transfer_density(invariant, velocity_hat, ws.N̂, ks)   # validates invariant/dimension
 
     reductions = if binning !== nothing
         ss = calculate_shell_to_shell_transfer(velocity_hat, ks; binning=binning,
