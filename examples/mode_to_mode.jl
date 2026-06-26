@@ -42,21 +42,32 @@ function run_mode_to_mode_example(; N=16, seed=42)
 
     b = FET.LinearBinning(2π / L)
 
-    # --- Compute mode-to-mode triad transfer ---
-    # Note: O(N^{2D}) cost — keep N small for this example
+    # --- Compute the fully mode-resolved triad transfer S(k|p) ---
+    # Note: O(N^{2D}) cost — keep N small for this example. `spectral=FFTBackend()` makes each
+    # per-giver-mode nonlinear term O(N^D log N). The result carries `net_transfer` (= T(k),
+    # shape ns) and `transfer` (the resolved S[k...,p...], shape (ns..., ns...)).
     result = FET.calculate_mode_to_mode_transfer(û, ks;
-        binning   = b,
-        invariant = FET.KineticEnergy(),
+        invariant  = FET.KineticEnergy(),
         dealiasing = true,
-        backend   = FET.SerialBackend())
+        spectral   = FET.FFTBackend())
 
     # Verify conservation: Σ_k T(k) ≈ 0
     net_sum = sum(result.net_transfer)
     println("Σ_k T(k) = ", net_sum, " (should be ≈ 0)")
 
-    TKQ = result.reductions.TKQ
-    K   = result.reductions.K
-    N_sh = length(K)
+    # Shell-reduce the resolved tensor S(k|p) to the magnitude-to-magnitude matrix T(K,Q).
+    S         = result.transfer                              # (N, N, N, N): S[k..., p...]
+    k_mag     = FET.wavenumber_magnitude_grid(ks)
+    edges     = FET.shell_edges(b, maximum(k_mag))
+    shell_idx = FET.assign_shells(k_mag, edges)
+    K         = FET.shell_centers(b, maximum(k_mag))
+    N_sh      = length(K)
+    TKQ       = zeros(N_sh, N_sh)
+    for kI in CartesianIndices((N, N)), pI in CartesianIndices((N, N))
+        n = shell_idx[kI]; m = shell_idx[pI]
+        (n == 0 || m == 0) && continue
+        TKQ[n, m] += S[kI, pI]
+    end
     println("Shell-reduced T(K,Q): $(N_sh) × $(N_sh) matrix")
     println("Max |T(K,Q)|: ", maximum(abs, TKQ))
 

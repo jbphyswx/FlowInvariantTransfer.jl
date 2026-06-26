@@ -48,7 +48,7 @@ function run_spectral_flux_example(; N=64, seed=42)
     result = FET.calculate_spectral_flux(û, ks;
         binning    = b,
         dealiasing = true,
-        backend    = FET.FFTBackend())
+        spectral   = FET.FFTBackend())
 
     println("Shells: ", length(result.k_shells))
     println("Max |T(k)|: ", maximum(abs, result.transfer_spectrum))

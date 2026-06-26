@@ -48,13 +48,13 @@ function run_tod_example(; nt=512, nx=64, dt=0.02, seed=42)
     # - nfft = 128 (window block length)
     # - noverlap = 64 (50% overlap)
     # - nmode = 2 (retain top 2 modes per triad)
-    # - backend = FFTBackend() (use FFTW for temporal DFTs)
+    # - spectral = FFTBackend() (use FFTW for temporal DFTs)
     method = FET.TriadicOrthogonalDecompositionMethod(nfft=128, noverlap=64, nmode=2)
 
     result = FET.calculate_energy_transfer(method, X;
         dt=dt,
         isreal_data=true,
-        backend=FET.FFTBackend())
+        spectral=FET.FFTBackend())
 
     # Find the indices corresponding to our resonant frequencies
     freqs = result.frequencies

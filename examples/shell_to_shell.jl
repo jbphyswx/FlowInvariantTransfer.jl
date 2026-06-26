@@ -48,7 +48,7 @@ function run_shell_to_shell_example(; N=32, seed=7)
         binning             = b,
         dealiasing          = true,
         verify_antisymmetry = true,
-        backend             = FET.FFTBackend())
+        spectral            = FET.FFTBackend())
 
     N_sh = length(result.shell_centers)
     T_norm = sqrt(sum(abs2, result.transfer_matrix))
