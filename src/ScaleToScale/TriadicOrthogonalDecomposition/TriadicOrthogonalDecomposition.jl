@@ -21,7 +21,8 @@ module TriadicOrthogonalDecomposition
 using LinearAlgebra: LinearAlgebra
 using ..Types: TriadicOrthogonalDecompositionMethod,
                TriadicOrthogonalDecompositionResult,
-               AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend
+               AbstractExecutionBackend, SerialBackend, ThreadedBackend,
+               AbstractSpectralBackend, DirectSumBackend, FFTBackend
 
 export triadic_orthogonal_decomposition
 
@@ -343,7 +344,8 @@ end
 # Backend dispatch for temporal DFT
 # ---------------------------------------------------------------------------
 
-function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::SerialBackend)
+# Dispatch the temporal DFT on the SPECTRAL (transform) backend.
+function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::DirectSumBackend)
     _temporal_block_dft_direct!(Q_hat_blk, segment, window, win_weight, nDFT)
 end
 
@@ -457,15 +459,12 @@ function _triadic_loop_serial!(
     end
 end
 
-# Backend dispatch for triad loop
-function _dispatch_triadic_loop!(args_tuple...; backend::AbstractExecutionBackend=SerialBackend(), kwargs...)
-    _dispatch_triadic_loop_impl!(backend, args_tuple...; kwargs...)
+# Dispatch the triad loop on the EXECUTION (parallelism) backend.
+function _dispatch_triadic_loop!(args_tuple...; execution::AbstractExecutionBackend=SerialBackend(), kwargs...)
+    _dispatch_triadic_loop_impl!(execution, args_tuple...; kwargs...)
 end
 
 _dispatch_triadic_loop_impl!(::SerialBackend, args...; kwargs...) =
-    _triadic_loop_serial!(args...; kwargs...)
-
-_dispatch_triadic_loop_impl!(::FFTBackend, args...; kwargs...) =
     _triadic_loop_serial!(args...; kwargs...)
 
 _dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
@@ -505,8 +504,9 @@ strength per frequency triad), convective/recipient modes, and a modal energy bu
 - `mean_type`: `:zero` (default), `:blockwise`, or an array (long-time mean to subtract).
 - `return_coefficients::Bool=false`: Also compute expansion coefficients.
 - `return_auxiliary_modes::Bool=false`: Also compute donor/catalyst modes.
-- `backend::AbstractExecutionBackend=SerialBackend()`: Computation backend.
-  `FFTBackend()` uses FFTW for the temporal DFT (much faster).
+- `spectral::AbstractSpectralBackend=DirectSumBackend()`: temporal-DFT transform.
+  `FFTBackend()` uses FFTW (much faster; requires `using FFTW`).
+- `execution::AbstractExecutionBackend=SerialBackend()`: triad-loop parallelism.
   `ThreadedBackend()` parallelises the triad loop (requires OhMyThreads).
 
 # Returns
@@ -536,7 +536,8 @@ function triadic_orthogonal_decomposition(
     mean_type=:zero,
     return_coefficients=false,
     return_auxiliary_modes=false,
-    backend::AbstractExecutionBackend=SerialBackend(),
+    spectral::AbstractSpectralBackend=DirectSumBackend(),
+    execution::AbstractExecutionBackend=SerialBackend(),
 )
     # --- Problem dimensions ---
     dims = size(X)
@@ -590,8 +591,8 @@ function triadic_orthogonal_decomposition(
     # Temporary for block DFT
     Q_hat_blk = zeros(ComplexF64, nDFT, nVar * nx)
 
-    # Determine which backend to use for temporal DFT
-    dft_backend = backend isa FFTBackend ? FFTBackend() : SerialBackend()
+    # Temporal-DFT transform is chosen by the spectral backend.
+    dft_backend = spectral
 
     for iBlk in 1:nBlks
         # Time indices for this block
@@ -663,7 +664,7 @@ function triadic_orthogonal_decomposition(
         weights, nBlks, nFreq, nState, nx, nmode_val,
         Q, LHS,
         return_coefficients, return_auxiliary_modes;
-        backend=backend
+        execution=execution
     )
 
     return TriadicOrthogonalDecompositionResult(

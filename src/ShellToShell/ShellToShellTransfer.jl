@@ -1,6 +1,6 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, AbstractInvariant, KineticEnergy
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_magnitude_grid
@@ -48,7 +48,9 @@ Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 - `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(1.0)`.
 - `dealiasing::Bool=true`: Apply 2/3 rule dealiasing.
 - `verify_antisymmetry::Bool=true`: Compute `max|T(n,m)+T(m,n)|` and store in result.
-- `backend::AbstractExecutionBackend`: `SerialBackend()` (default), `FFTBackend()` (requires FFTW), or `ThreadedBackend()` (requires OhMyThreads).
+- `spectral::AbstractSpectralBackend`: transform — `DirectSumBackend()` (default) or `FFTBackend()` (FFTW).
+- `execution::AbstractExecutionBackend`: outer (mediator-loop) parallelism — `SerialBackend()` (default),
+  `ThreadedBackend()` (OhMyThreads), `DistributedBackend()`, or `GPUBackend(...)`.
 
 # Returns
 `ShellToShellResult` with:
@@ -78,7 +80,8 @@ function calculate_shell_to_shell_transfer(
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
 )
     ws      = ShellToShellWorkspace(velocity_hat, ks, binning)
     k_mag   = wavenumber_magnitude_grid(ks)
@@ -90,7 +93,7 @@ function calculate_shell_to_shell_transfer(
     net     = Vector{FT}(undef, N_sh)
     # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, backend;
+    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, execution, spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
     return ShellToShellResult(centers, edges, T_mat, net, max_asym)
 end
@@ -109,21 +112,25 @@ function calculate_shell_to_shell_transfer!(
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
 )
-    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, backend;
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution, spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
     return result
 end
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend; kwargs...) =
+# Dispatch on (execution, spectral). Serial loop: direct vs the optimized FFT path; the
+# threaded/distributed/GPU execution backends (extensions) parallelise the mediator loop and
+# pass the spectral backend down to each per-mediator nonlinear term.
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend, spectral::DirectSumBackend; kwargs...) =
     _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; kwargs...)
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::FFTBackend; kwargs...) =
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend, spectral::FFTBackend; kwargs...) =
     _shell_to_shell_fft!(result, ws, velocity_hat, ks; kwargs...)
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend; kwargs...) =
-    _shell_to_shell_threaded!(result, ws, velocity_hat, ks; kwargs...)
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend, spectral::AbstractSpectralBackend; kwargs...) =
+    _shell_to_shell_threaded!(result, ws, velocity_hat, ks, spectral; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Direct reference implementation
@@ -171,7 +178,7 @@ function _calculate_shell_to_shell_direct!(
         # 2005). This makes A[n,m] = Σ_{k∈S_n} Re{û*·N̂_m} both antisymmetric (A[n,m]+A[m,n]=0)
         # and correctly reducing (Σ_m A[n,m] = transfer_spectrum[n]) — no ½(A−Aᵀ) needed.
         compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-                                dealiasing=dealiasing, backend=SerialBackend(),
+                                dealiasing=dealiasing, spectral=DirectSumBackend(),
                                 advecting_hat=velocity_hat)
         N̂_m = ws.nonlinear.N̂
 

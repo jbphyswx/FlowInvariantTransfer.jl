@@ -25,7 +25,8 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
     result,
     ws,
     velocity_hat,
-    ks;
+    ks,
+    spectral;            # transform backend, passed to each per-mediator nonlinear term
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -54,7 +55,7 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
         # N̂_m = (u·∇)u_m: full velocity advects the band-m field (AMP 2005) — gives an
         # antisymmetric A[n,m] that reduces to transfer_spectrum[n] (matches serial/FFT).
         FET.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
-            dealiasing=dealiasing, backend=FET.SerialBackend(), advecting_hat=velocity_hat)
+            dealiasing=dealiasing, spectral=spectral, advecting_hat=velocity_hat)
         N̂_m = local_ws.N̂
 
         local_density = similar(velocity_hat, FT, ns...)

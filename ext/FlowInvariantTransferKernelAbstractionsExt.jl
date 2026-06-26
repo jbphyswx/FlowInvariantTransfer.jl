@@ -156,7 +156,8 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     ws::FET.Workspaces.ShellToShellWorkspace,
     velocity_hat,
     ks,
-    gpu_backend::GPUBackend;
+    gpu_backend::GPUBackend,
+    spectral;            # transform backend for each per-mediator nonlinear term
     dealiasing::Bool,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -196,7 +197,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
         # In a real GPU run, we expect FFTW to be replaced by a GPU FFT backend.
         # But we fall back to SerialBackend computation or a KA-compatible FFT.
         # For this KA implementation, we dispatch using compute_nonlinear_term! with Serial/FFTBackend depending on array type.
-        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks; dealiasing=dealiasing, backend=FET.SerialBackend())
+        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=velocity_hat)
         
         # 3. Compute per-mode transfer density on GPU using KA kernel
         # Run our custom KA transfer density kernel

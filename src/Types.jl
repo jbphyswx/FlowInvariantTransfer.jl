@@ -5,7 +5,8 @@ export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
+export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
 # ---------------------------------------------------------------------------
@@ -319,13 +320,67 @@ struct CustomBinning{V<:AbstractVector} <: AbstractShellBinning
 end
 
 # ---------------------------------------------------------------------------
-# Execution backends
+# Backends — two orthogonal axes that compose:
+#   • AbstractSpectralBackend  : WHICH transform   (direct / FFT / NUFFT / SHT / NUFSHT)
+#   • AbstractExecutionBackend : HOW it is run      (serial / threaded / distributed / GPU)
+# A computation chooses one of each, e.g. FFT transforms with a threaded mediator loop, or a
+# NUFSHT transform with an MPI reduction. Keeping them separate avoids conflating "what" with
+# "where" (a single transform's parallelism lives in FFTW threads / the GPU array, not here).
 # ---------------------------------------------------------------------------
+
+# --- Transform (spectral) axis ---------------------------------------------
+
+"""
+    AbstractSpectralBackend
+
+Abstract supertype for *transform* backends: how physical↔spectral coefficients and the
+pseudospectral nonlinear term are computed. Orthogonal to [`AbstractExecutionBackend`](@ref).
+"""
+abstract type AbstractSpectralBackend end
+
+"""
+    DirectSumBackend <: AbstractSpectralBackend
+
+Dependency-free direct DFT/sum reference transform (no external packages); exact but slow.
+The default — load `FFTW` and pass [`FFTBackend`](@ref) for the O(N log N) fast path.
+"""
+struct DirectSumBackend <: AbstractSpectralBackend end
+
+"""
+    FFTBackend <: AbstractSpectralBackend
+
+Uniform-grid FFT transform via FFTW (O(N log N)). Requires `using FFTW`.
+"""
+struct FFTBackend <: AbstractSpectralBackend end
+
+"""
+    NUFFTBackend <: AbstractSpectralBackend
+
+Non-uniform FFT for scattered Cartesian points, via FINUFFT. Requires `using FINUFFT`.
+"""
+struct NUFFTBackend <: AbstractSpectralBackend end
+
+"""
+    SHTBackend <: AbstractSpectralBackend
+
+Spherical-harmonic transform for regular spherical grids, via FastSphericalHarmonics.
+"""
+struct SHTBackend <: AbstractSpectralBackend end
+
+"""
+    NUFSHTBackend <: AbstractSpectralBackend
+
+Non-uniform spherical-harmonic transform for scattered spherical data, via NUFSHT.
+"""
+struct NUFSHTBackend <: AbstractSpectralBackend end
+
+# --- Execution (parallelism) axis ------------------------------------------
 
 """
     AbstractExecutionBackend
 
-Abstract supertype for computation backends.
+Abstract supertype for *execution* backends: how the outer work (shell/mode loops and
+reductions) is parallelised. Orthogonal to [`AbstractSpectralBackend`](@ref).
 """
 abstract type AbstractExecutionBackend end
 
@@ -339,43 +394,23 @@ struct SerialBackend <: AbstractExecutionBackend end
 """
     ThreadedBackend <: AbstractExecutionBackend
 
-Multi-threaded execution using Julia's base `Threads.@threads`.
-For OhMyThreads-based backend, load the `OhMyThreads` extension.
+Shared-memory multithreading over the outer (shell/mode) loop. Load `OhMyThreads`.
 """
 struct ThreadedBackend <: AbstractExecutionBackend end
 
 """
-    FFTBackend <: AbstractExecutionBackend
-
-Fast-path backend using FFTW for all transforms.
-Requires `using FFTW` to load the FFTW extension.
-"""
-struct FFTBackend <: AbstractExecutionBackend end
-
-"""
-    NUFFTBackend <: AbstractExecutionBackend
-
-Non-uniform fast Fourier transform backend using FINUFFT.
-Requires `using FINUFFT` to load the FINUFFT extension.
-"""
-struct NUFFTBackend <: AbstractExecutionBackend end
-
-"""
     DistributedBackend <: AbstractExecutionBackend
 
-Multi-process execution using the `Distributed` standard library (with
-`SharedArrays`). Parallelises the outer loop over receiver shells/modes across
-worker processes. Requires `using Distributed, SharedArrays` to load the extension.
+Multi-process execution via `Distributed`/`SharedArrays`: parallelises the outer loop over
+mediator shells / receiver modes across workers. Requires `using Distributed, SharedArrays`.
 """
 struct DistributedBackend <: AbstractExecutionBackend end
 
 """
     GPUBackend{B} <: AbstractExecutionBackend
 
-GPU execution via `KernelAbstractions`. Holds the concrete KA backend object
-`backend::B` (e.g. `GPUBackend(CUDA.CUDABackend())`), so the same kernels run on
-any KA-supported device. Requires `using KernelAbstractions` (and a vendor package
-such as `CUDA`) to load the extension.
+GPU execution via `KernelAbstractions`, holding the device backend `backend::B`
+(e.g. `GPUBackend(CUDA.CUDABackend())`). Requires `using KernelAbstractions` + a vendor package.
 """
 struct GPUBackend{B} <: AbstractExecutionBackend
     backend::B
@@ -384,27 +419,9 @@ end
 """
     AutoBackend <: AbstractExecutionBackend
 
-Automatically select the best available execution backend at call time, in the
-order distributed → threaded → serial (transform fast-paths such as FFT are
-chosen independently when their extensions are loaded).
+Select the best available execution backend at call time (distributed → threaded → serial).
 """
 struct AutoBackend <: AbstractExecutionBackend end
-
-"""
-    SHTBackend <: AbstractExecutionBackend
-
-Spherical-harmonic-transform front-end for regular spherical grids, backed by
-`FastSphericalHarmonics`. Requires the FastSphericalHarmonics extension.
-"""
-struct SHTBackend <: AbstractExecutionBackend end
-
-"""
-    NUFSHTBackend <: AbstractExecutionBackend
-
-Non-uniform spherical-harmonic-transform front-end for scattered spherical data,
-backed by `NUFSHT`. Requires the NUFSHT extension.
-"""
-struct NUFSHTBackend <: AbstractExecutionBackend end
 
 # ---------------------------------------------------------------------------
 # Result containers

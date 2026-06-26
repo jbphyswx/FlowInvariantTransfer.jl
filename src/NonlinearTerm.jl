@@ -1,7 +1,7 @@
 module NonlinearTerm
 
 using LinearAlgebra: LinearAlgebra as LA
-using ..Types: AbstractExecutionBackend, SerialBackend, FFTBackend
+using ..Types: AbstractSpectralBackend, DirectSumBackend, FFTBackend
 using ..Workspaces: NonlinearTermWorkspace
 
 export compute_nonlinear_term, compute_nonlinear_term!
@@ -54,10 +54,10 @@ function compute_nonlinear_term(
     velocity_hat,
     ks;
     dealiasing::Bool = true,
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
 )
     ws = NonlinearTermWorkspace(velocity_hat, ks)
-    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, backend=backend)
+    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, spectral=spectral)
     return ws.N̂
 end
 
@@ -72,17 +72,18 @@ function compute_nonlinear_term!(
     velocity_hat,
     ks;
     dealiasing::Bool = true,
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
 )
-    _compute_nonlinear_term!(ws, velocity_hat, ks, backend; dealiasing=dealiasing, advecting_hat=advecting_hat)
+    _compute_nonlinear_term!(ws, velocity_hat, ks, spectral; dealiasing=dealiasing, advecting_hat=advecting_hat)
     return ws.N̂
 end
 
-# `advecting_hat` is the velocity u_j that does the advecting; `velocity_hat` is the advected
-# field whose gradient ∂_j(·)_i is taken: N_i = (u_adv)_j ∂_j (u)_i. They coincide for the plain
-# self-advection term, and differ for shell-to-shell mediators ((u_m·∇)u) and scalar/MHD terms.
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SerialBackend; dealiasing, advecting_hat=velocity_hat) =
+# Dispatch on the SPECTRAL (transform) backend — direct DFT vs FFT. `advecting_hat` is the velocity
+# u_j that does the advecting; `velocity_hat` is the advected field whose gradient ∂_j(·)_i is taken:
+# N_i = (u_adv)_j ∂_j (u)_i. They coincide for plain self-advection, and differ for shell-to-shell
+# mediators ((u_m·∇)u) and scalar/MHD terms.
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::DirectSumBackend; dealiasing, advecting_hat=velocity_hat) =
     _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
 
 _compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing, advecting_hat=velocity_hat) =

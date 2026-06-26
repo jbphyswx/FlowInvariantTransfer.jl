@@ -24,7 +24,8 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     ws::FET.Workspaces.ShellToShellWorkspace,
     velocity_hat,
     ks,
-    ::DistributedBackend;
+    ::DistributedBackend,
+    spectral;            # transform backend, passed to each per-mediator nonlinear term
     dealiasing::Bool,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
@@ -41,7 +42,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     # Using `Distributed.@distributed (+)` reduces the resulting N_sh x N_sh matrices.
     T_mat_reduced = Distributed.@distributed (+) for m in 1:N_sh
         # Compute column m on the worker process
-        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT)
+        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral)
         
         # Construct an array where only column m is filled
         local_T = zeros(FT, N_sh, N_sh)
@@ -77,7 +78,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
 end
 
 # Helper function executed on worker processes for Shell-to-Shell
-function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT)
+function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     D  = size(velocity_hat, nd+1)
@@ -96,7 +97,7 @@ function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, 
     # that reduces to transfer_spectrum[n] (matches serial/FFT/threaded).
     nl_ws = FET.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
     FET.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
-        backend=FET.SerialBackend(), advecting_hat=velocity_hat)
+        spectral=spectral, advecting_hat=velocity_hat)
 
     # Write per-mode transfer density
     transfer_density = similar(velocity_hat, FT, ns...)

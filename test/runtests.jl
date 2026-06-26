@@ -158,11 +158,11 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         # Direct path
         result_direct = FET.calculate_spectral_flux(û_phys, ks;
-            binning=FET.LinearBinning(2π/L), dealiasing=false, backend=FET.SerialBackend())
+            binning=FET.LinearBinning(2π/L), dealiasing=false, spectral=FET.DirectSumBackend())
 
         # FFTW path (extension)
         result_fft = FET.calculate_spectral_flux(û_phys, ks;
-            binning=FET.LinearBinning(2π/L), dealiasing=false, backend=FET.FFTBackend())
+            binning=FET.LinearBinning(2π/L), dealiasing=false, spectral=FET.FFTBackend())
 
         Test.@test isapprox(result_direct.transfer_spectrum,
                              result_fft.transfer_spectrum; atol=1e-10)
@@ -189,8 +189,8 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
         Test.@test maximum(abs.(kx .* û[:, :, 1] .+ ky .* û[:, :, 2])) < 1e-12  # div-free
 
-        for backend in (FET.SerialBackend(), FET.FFTBackend())
-            N̂ = FET.compute_nonlinear_term(û, ks; dealiasing = true, backend = backend)
+        for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
+            N̂ = FET.compute_nonlinear_term(û, ks; dealiasing = true, spectral = spectral)
             t = FET.transfer_density(FET.KineticEnergy(), û, N̂, ks)
             scale = sum(abs, t)
             Test.@test abs(sum(t)) < 1e-10 * scale       # energy-conserving, alias-free
@@ -220,9 +220,9 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Random.seed!(3)
         û  = randn(ComplexF64, N, N, 2)
         ws = FET.NonlinearTermWorkspace(û, ks)
-        for backend in (FET.SerialBackend(), FET.FFTBackend())
-            FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, backend = backend)  # warmup
-            a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, backend = backend)
+        for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
+            FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, spectral = spectral)  # warmup
+            a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, spectral = spectral)
             Test.@test a == 0
         end
     end
@@ -237,7 +237,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         ks2 = FET.wavenumber_grid((N, N), (L, L))
         kx = [ks2[1][i] for i in 1:N, j in 1:N]; ky = [ks2[2][j] for i in 1:N, j in 1:N]
         û2 = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
-        N̂2 = FET.compute_nonlinear_term(û2, ks2; dealiasing = true, backend = FET.FFTBackend())
+        N̂2 = FET.compute_nonlinear_term(û2, ks2; dealiasing = true, spectral=FET.FFTBackend())
         tΩ2 = FET.transfer_density(FET.Enstrophy(), û2, N̂2, ks2)
         Test.@test abs(sum(tΩ2)) < 1e-9 * sum(abs, tΩ2)        # 2D enstrophy conserved
 
@@ -255,11 +255,11 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         û3 = cat(ûx, ûy, ûz; dims = 4)
         Test.@test maximum(abs.(kx3 .* ûx .+ ky3 .* ûy .+ kz3 .* ûz)) < 1e-10  # div-free
         res3 = FET.calculate_spectral_flux(û3, ks3; binning = FET.LinearBinning(1.0),
-            invariant = FET.Enstrophy(), dealiasing = true, backend = FET.FFTBackend())
+            invariant = FET.Enstrophy(), dealiasing = true, spectral=FET.FFTBackend())
         Test.@test res3 isa FET.SpectralFluxResult
         Test.@test all(isfinite, res3.transfer_spectrum)
         # mode-to-mode aggregates now route through the FFT paths, so 3D enstrophy net works
-        m2m3 = FET.calculate_mode_to_mode_transfer(û3, ks3; invariant = FET.Enstrophy(), backend = FET.FFTBackend())
+        m2m3 = FET.calculate_mode_to_mode_transfer(û3, ks3; invariant = FET.Enstrophy(), spectral=FET.FFTBackend())
         Test.@test m2m3 isa FET.ModeToModeTriadResult
         Test.@test all(isfinite, m2m3.net_transfer)
     end
@@ -297,7 +297,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         result = FET.calculate_shell_to_shell_transfer(û, ks;
             binning=FET.LinearBinning(2π/L), dealiasing=true,
-            verify_antisymmetry=true, backend=FET.FFTBackend())
+            verify_antisymmetry=true, spectral=FET.FFTBackend())
 
         Test.@test result isa FET.ShellToShellResult
         T_norm = sqrt(sum(abs2, result.transfer_matrix))
@@ -319,9 +319,9 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         b  = FET.LinearBinning(2π/L)
 
         r_direct = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
-            verify_antisymmetry=true, backend=FET.SerialBackend())
+            verify_antisymmetry=true, spectral=FET.DirectSumBackend())
         r_fft = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
-            verify_antisymmetry=true, backend=FET.FFTBackend())
+            verify_antisymmetry=true, spectral=FET.FFTBackend())
 
         T_norm = sqrt(sum(abs2, r_direct.transfer_matrix))
         Test.@test T_norm > 0                                            # non-degenerate
@@ -447,7 +447,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         û = zeros(ComplexF32, N, N, 2)
         result = FET.calculate_spectral_flux(û, ks;
-            binning=b, dealiasing=false, backend=FET.SerialBackend())
+            binning=b, dealiasing=false, spectral=FET.DirectSumBackend())
         Test.@test result isa FET.SpectralFluxResult
         Test.@test eltype(result.k_shells) == Float32
         Test.@test eltype(result.transfer_spectrum) == Float32
@@ -518,13 +518,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test size(res_dispatch.mode_bispectrum, 3) == 2
 
         # 4. FFTBackend consistency
-        res_serial = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, backend=FET.SerialBackend())
-        res_fft = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, backend=FET.FFTBackend())
+        res_serial = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, spectral=FET.DirectSumBackend())
+        res_fft = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, spectral=FET.FFTBackend())
         Test.@test isapprox(res_serial.frequencies, res_fft.frequencies)
         Test.@test isapprox(filter(!isnan, res_serial.mode_bispectrum), filter(!isnan, res_fft.mode_bispectrum); atol=1e-12)
 
         # 5. ThreadedBackend — OhMyThreads is loaded so it should work
-        res_threaded = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, backend=FET.ThreadedBackend())
+        res_threaded = FET.triadic_orthogonal_decomposition(X; dt=dt_sig, execution=FET.ThreadedBackend())
         Test.@test res_threaded isa FET.TriadicOrthogonalDecompositionResult
         Test.@test isapprox(res_serial.frequencies, res_threaded.frequencies)
 
@@ -596,12 +596,12 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         # 1. Shell-to-Shell Transfer Parity
         b = FET.LinearBinning(2π / L)
-        res_serial = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.SerialBackend())
-        res_thread = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.ThreadedBackend())
+        res_serial = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, execution=FET.SerialBackend())
+        res_thread = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, execution=FET.ThreadedBackend())
         
         # For DistributedBackend, we convert velocity_hat to a SharedArray so workers can read it efficiently
         s_û = SharedArrays.SharedArray(û)
-        res_dist = FET.calculate_shell_to_shell_transfer(s_û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, backend=FET.DistributedBackend())
+        res_dist = FET.calculate_shell_to_shell_transfer(s_û, ks; binning=b, dealiasing=true, verify_antisymmetry=true, execution=FET.DistributedBackend())
 
         Test.@test isapprox(res_serial.transfer_matrix, res_thread.transfer_matrix; atol=1e-12)
         Test.@test isapprox(res_serial.transfer_matrix, res_dist.transfer_matrix; atol=1e-12)
@@ -609,9 +609,9 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(res_serial.net_transfer, res_dist.net_transfer; atol=1e-12)
 
         # 2. Scale-to-Scale (Mode-to-Mode) Transfer Parity
-        m2m_serial = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, backend=FET.SerialBackend())
-        m2m_thread = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, backend=FET.ThreadedBackend())
-        m2m_dist = FET.calculate_mode_to_mode_transfer(s_û, ks; binning=b, dealiasing=true, backend=FET.DistributedBackend())
+        m2m_serial = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, execution=FET.SerialBackend())
+        m2m_thread = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, execution=FET.ThreadedBackend())
+        m2m_dist = FET.calculate_mode_to_mode_transfer(s_û, ks; binning=b, dealiasing=true, execution=FET.DistributedBackend())
 
         Test.@test isapprox(m2m_serial.net_transfer, m2m_thread.net_transfer; atol=1e-12)
         Test.@test isapprox(m2m_serial.net_transfer, m2m_dist.net_transfer; atol=1e-12)
@@ -646,10 +646,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
         b  = FET.LinearBinning(2π/L)
-        m2m = FET.calculate_mode_to_mode_transfer(û, ks; binning = b, dealiasing = true, backend = FET.FFTBackend())
+        m2m = FET.calculate_mode_to_mode_transfer(û, ks; binning = b, dealiasing = true, spectral=FET.FFTBackend())
         ss  = FET.calculate_shell_to_shell_transfer(û, ks; binning = b, dealiasing = true,
-            verify_antisymmetry = false, backend = FET.FFTBackend())
-        sf  = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true, backend = FET.FFTBackend())
+            verify_antisymmetry = false, spectral=FET.FFTBackend())
+        sf  = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true, spectral=FET.FFTBackend())
         sT  = sqrt(sum(abs2, ss.transfer_matrix)); Test.@test sT > 0
         Test.@test isapprox(m2m.reductions.TKQ, ss.transfer_matrix; atol = 1e-10 * sT)   # T(K,Q) == shell-to-shell
         # net per-mode summed into shells == spectral transfer T(k)

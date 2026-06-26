@@ -1,7 +1,7 @@
 module ScaleToScaleTransfer
 
 using LinearAlgebra: LinearAlgebra
-using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractShellBinning, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, DistributedBackend
+using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractShellBinning, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using ..Utils: wavenumber_magnitude_grid, dealiasing_mask
 using ..Workspaces: ScaleToScaleWorkspace, NonlinearTermWorkspace
@@ -39,21 +39,20 @@ function calculate_mode_to_mode_transfer(
     binning::Union{Nothing, AbstractShellBinning} = nothing,
     invariant::AbstractInvariant = KineticEnergy(),
     dealiasing::Bool = true,
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
 )
-    # Net per-mode transfer T(k) = Re{û*·N̂} is ONE nonlinear-term evaluation, which has only a
-    # direct (SerialBackend) and an FFT (FFTBackend) implementation. Use the fastest available
-    # transform — the workspace carries FFT plans iff FFTW is loaded — independent of the parallel
-    # `backend` (which parallelises the shell-to-shell mediator loop in the T(K,Q) stage below,
-    # not this single transform). No backend "remap": we just pick FFT when it exists, else direct.
+    # Net per-mode transfer T(k) = Re{û*·N̂}: one nonlinear-term evaluation via the `spectral`
+    # transform (DirectSum default, FFTBackend for speed). `execution` parallelises the
+    # shell-to-shell mediator loop in the T(K,Q) stage below — not this single transform.
     ws = NonlinearTermWorkspace(velocity_hat, ks)
-    nl_backend = ws.plans === nothing ? SerialBackend() : FFTBackend()
-    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, backend=nl_backend)
+    compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing=dealiasing, spectral=spectral)
     net = transfer_density(invariant, velocity_hat, ws.N̂, ks)   # validates invariant/dimension
 
     reductions = if binning !== nothing
         ss = calculate_shell_to_shell_transfer(velocity_hat, ks; binning=binning,
-            invariant=invariant, dealiasing=dealiasing, verify_antisymmetry=false, backend=backend)
+            invariant=invariant, dealiasing=dealiasing, verify_antisymmetry=false,
+            spectral=spectral, execution=execution)
         (; K = ss.shell_centers, Q = ss.shell_centers, TKQ = ss.transfer_matrix)
     else
         NamedTuple()
