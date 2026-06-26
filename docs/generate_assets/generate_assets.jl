@@ -93,7 +93,7 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
         û3[:,:,:,1] .= uh; û3[:,:,:,2] .= vh; û3[:,:,:,3] .= wh
         s2s = FET.calculate_shell_to_shell_transfer(û3, ks3;
             binning=b, dealiasing=true, verify_antisymmetry=false,
-            backend=FET.FFTBackend())
+            spectral=FET.FFTBackend())
         return s2s.transfer_matrix, s2s.net_transfer
     end
 

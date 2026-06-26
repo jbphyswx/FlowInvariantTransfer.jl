@@ -1,59 +1,44 @@
 """
 Anisotropic Directional Flux Example — FlowInvariantTransfer.jl
 
-Demonstrates the `geometry` argument of `calculate_spectral_flux`: isotropic Π(|k|) vs the
-anisotropic perpendicular Π(k⊥) and parallel Π(k∥) fluxes (Alexakis & Biferale 2018) for a 3D
-field — the natural diagnostics for rotating/stratified turbulence.
+The `geometry` argument of `calculate_spectral_flux` bins by a chosen wavenumber coordinate:
+isotropic Π(|k|), perpendicular Π(k⊥)=Π(√(kx²+ky²)), or parallel Π(k∥)=Π(|kz|). For a flow with
+a preferred axis these differ — the natural diagnostics for rotating/stratified turbulence
+(Alexakis & Biferale 2018). We use a Taylor–Green vortex (initialised with w=0, hence anisotropic).
 
 Run from the repo root:
     julia --project=examples examples/anisotropic_flux.jl
 """
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FFTW: FFTW
 using CairoMakie: CairoMakie
-using Random: Random
+include(joinpath(@__DIR__, "flows.jl"))
 
-function run_anisotropic_flux_example(; N=32, seed=42)
-    println("--- Anisotropic Directional Flux Example ---")
-    Random.seed!(seed)
-
-    L  = 2π
-    ks = FET.wavenumber_grid((N, N, N), (L, L, L))
-    kx = [ks[1][i] for i in 1:N, j in 1:N, l in 1:N]
-    ky = [ks[2][j] for i in 1:N, j in 1:N, l in 1:N]
-    kz = [ks[3][l] for i in 1:N, j in 1:N, l in 1:N]
-
-    Â = randn(ComplexF64, N, N, N, 3)
-    ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
-    ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
-    ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
-    û  = cat(ûx, ûy, ûz; dims = 4)
+function run_anisotropic_flux_example(; N=32)
+    println("--- Anisotropic Directional Flux Example (3D Taylor–Green vortex) ---")
+    û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    iso  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true,
-        spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
-    perp = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true,
-        spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
-    par  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true,
-        spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
+    iso  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
+    perp = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
+    par  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
 
-    println("isotropic shells: ", length(iso.k_shells),
-            "  perp: ", length(perp.k_shells), "  par: ", length(par.k_shells))
+    println("peak Π(|k|)=", round(maximum(iso.flux); sigdigits=3),
+            "  Π(k⊥)=", round(maximum(perp.flux); sigdigits=3),
+            "  Π(k∥)=", round(maximum(par.flux); sigdigits=3))
 
-    fig = CairoMakie.Figure(size=(800, 480), fontsize=14)
-    ax = CairoMakie.Axis(fig[1, 1], title="Isotropic vs anisotropic energy flux — 3D",
+    fig = CairoMakie.Figure(size=(840, 480), fontsize=14)
+    ax = CairoMakie.Axis(fig[1, 1], title="Isotropic vs Anisotropic Energy Flux — 3D Taylor–Green Vortex",
         xlabel="shell wavenumber", ylabel="Π")
-    CairoMakie.lines!(ax, iso.k_shells,  iso.flux,  label="Π(|k|)", linewidth=2, color=:black)
-    CairoMakie.lines!(ax, perp.k_shells, perp.flux, label="Π(k⊥)",  linewidth=2, color=:seagreen)
-    CairoMakie.lines!(ax, par.k_shells,  par.flux,  label="Π(k∥)",  linewidth=2, color=:purple)
+    CairoMakie.lines!(ax, iso.k_shells,  iso.flux,  label="Π(|k|) isotropic",   linewidth=2.5, color=:black)
+    CairoMakie.lines!(ax, perp.k_shells, perp.flux, label="Π(k⊥) perpendicular", linewidth=2.5, color=:seagreen)
+    CairoMakie.lines!(ax, par.k_shells,  par.flux,  label="Π(k∥) parallel",      linewidth=2.5, color=:purple)
     CairoMakie.hlines!(ax, [0]; color=:black, linewidth=0.8, linestyle=:dot)
-    CairoMakie.axislegend(ax; position=:rb)
+    CairoMakie.axislegend(ax; position=:rt)
 
     outpath = joinpath(@__DIR__, "anisotropic_flux.png")
     CairoMakie.save(outpath, fig)
     println("Saved figure: $outpath")
-    println("Done.")
     return (isotropic=iso, perpendicular=perp, parallel=par)
 end
 

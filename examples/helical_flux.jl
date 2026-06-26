@@ -1,60 +1,47 @@
 """
 Helicity-Resolved Energy Flux Example — FlowInvariantTransfer.jl
 
-Demonstrates `HelicalDecomposition`: splitting a 3D velocity into ±-helicity components and
-computing the helicity-resolved energy fluxes Π⁺(K), Π⁻(K) via the `decomposition` argument of
-`calculate_spectral_flux`. Their sum equals the total kinetic-energy flux.
+`HelicalDecomposition` splits a 3D velocity into its ±-helicity components; passing it as the
+`decomposition` argument of `calculate_spectral_flux` gives the helicity-resolved energy fluxes
+Π⁺(K), Π⁻(K). Their sum reproduces the total kinetic-energy flux exactly — the dashed curve
+(Π⁺+Π⁻) lies on top of the total. For the (mirror-symmetric, non-helical) Taylor–Green vortex the
+two helical channels carry comparable flux, as expected.
 
 Run from the repo root:
     julia --project=examples examples/helical_flux.jl
 """
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FFTW: FFTW
 using CairoMakie: CairoMakie
-using Random: Random
+include(joinpath(@__DIR__, "flows.jl"))
 
-function run_helical_flux_example(; N=32, seed=42)
-    println("--- Helicity-Resolved Energy Flux Example ---")
-    Random.seed!(seed)
-
-    L  = 2π
-    ks = FET.wavenumber_grid((N, N, N), (L, L, L))
-    kx = [ks[1][i] for i in 1:N, j in 1:N, l in 1:N]
-    ky = [ks[2][j] for i in 1:N, j in 1:N, l in 1:N]
-    kz = [ks[3][l] for i in 1:N, j in 1:N, l in 1:N]
-
-    # Divergence-free velocity û = i k × Â from a random vector potential Â.
-    Â = randn(ComplexF64, N, N, N, 3)
-    ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
-    ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
-    ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
-    û  = cat(ûx, ûy, ûz; dims = 4)
+function run_helical_flux_example(; N=32)
+    println("--- Helicity-Resolved Energy Flux Example (3D Taylor–Green vortex) ---")
+    û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    total = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true,
-        spectral = FET.FFTBackend())
-    hel = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true,
-        spectral = FET.FFTBackend(), decomposition = FET.HelicalDecomposition())
+    total = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
+    hel   = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(),
+        decomposition=FET.HelicalDecomposition())
 
-    resid = maximum(abs, hel.positive.flux .+ hel.negative.flux .- total.flux)
-    println("max|Π⁺+Π⁻ − Π| = ", resid, " (should be ≈ 0)")
+    summed = hel.positive.flux .+ hel.negative.flux
+    println("max|Π⁺+Π⁻ − Π| / max|Π| = ",
+            round(maximum(abs, summed .- total.flux) / maximum(abs, total.flux); sigdigits=3))
 
-    # --- Plot ---
-    fig = CairoMakie.Figure(size=(800, 480), fontsize=14)
-    ax = CairoMakie.Axis(fig[1, 1],
-        title="Helicity-Resolved Energy Flux — 3D",
-        xlabel="K", ylabel="Π(K)")
-    CairoMakie.lines!(ax, total.k_shells,          total.flux,          label="Π total", linewidth=2, color=:black)
-    CairoMakie.lines!(ax, hel.positive.k_shells,   hel.positive.flux,   label="Π⁺",      linewidth=2, color=:crimson)
-    CairoMakie.lines!(ax, hel.negative.k_shells,   hel.negative.flux,   label="Π⁻",      linewidth=2, color=:steelblue)
+    fig = CairoMakie.Figure(size=(820, 480), fontsize=14)
+    ax = CairoMakie.Axis(fig[1, 1], title="Helicity-Resolved Energy Flux — 3D Taylor–Green Vortex",
+        xlabel="wavenumber K", ylabel="Π(K)")
+    CairoMakie.lines!(ax, total.k_shells,        total.flux,        label="Π (total)",  linewidth=3,   color=:black)
+    CairoMakie.lines!(ax, hel.negative.k_shells, hel.negative.flux, label="Π⁻",         linewidth=2.5, color=:steelblue)
+    CairoMakie.scatterlines!(ax, hel.positive.k_shells, hel.positive.flux, label="Π⁺ (≈Π⁻: non-helical flow)",
+        linewidth=0, color=:crimson, marker=:circle, markersize=7)
+    CairoMakie.lines!(ax, total.k_shells,        summed,            label="Π⁺+Π⁻ = Π",  linewidth=2,   color=:gold, linestyle=:dash)
     CairoMakie.hlines!(ax, [0]; color=:black, linewidth=0.8, linestyle=:dot)
-    CairoMakie.axislegend(ax; position=:rb)
+    CairoMakie.axislegend(ax; position=:rt)
 
     outpath = joinpath(@__DIR__, "helical_flux.png")
     CairoMakie.save(outpath, fig)
     println("Saved figure: $outpath")
-    println("Done.")
     return (total=total, helical=hel)
 end
 

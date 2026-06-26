@@ -1,97 +1,61 @@
 """
 Shell-to-Shell Transfer Example — FlowInvariantTransfer.jl
 
-Demonstrates `calculate_shell_to_shell_transfer` on a 2D incompressible flow,
-verifying antisymmetry of T(n,m) and showing the transfer matrix heat map.
-Also demonstrates the zero-alloc `!`-variant for use in a hot loop.
+Computes the directed shell-to-shell energy transfer T(n,m) for a developed 3D Taylor–Green
+vortex. The matrix is antisymmetric (T(n,m) = −T(m,n)) and dominated by near-diagonal
+local transfer; the net transfer Σₘ T(n,m) shows the large scales losing energy and the
+small scales gaining it — a forward cascade.
 
 Run from the repo root:
     julia --project=examples examples/shell_to_shell.jl
 """
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FFTW: FFTW
 using CairoMakie: CairoMakie
-using Random: Random
+include(joinpath(@__DIR__, "flows.jl"))
 
-function run_shell_to_shell_example(; N=32, seed=7)
-    println("--- Shell-to-Shell Transfer Example ---")
-    Random.seed!(seed)
-
-    L  = 2π
-    ks = FET.wavenumber_grid((N, N), (L, L))
-
-    # Build a divergence-free velocity field from a random streamfunction
-    ψ̂ = zeros(ComplexF64, N, N)
-    for ix in 1:N, iy in 1:N
-        ψ̂[ix, iy] = randn() + im * randn()
-    end
-    # Enforce Hermitian symmetry so IFFT is real
-    for ix in 1:N, iy in 1:N
-        cix = ix == 1 ? 1 : N - ix + 2
-        ciy = iy == 1 ? 1 : N - iy + 2
-        if (cix, ciy) > (ix, iy)
-            ψ̂[cix, ciy] = conj(ψ̂[ix, iy])
-        end
-    end
-
-    û = zeros(ComplexF64, N, N, 2)
-    for ix in 1:N, iy in 1:N
-        û[ix, iy, 1] =  im * ks[2][iy] * ψ̂[ix, iy]
-        û[ix, iy, 2] = -im * ks[1][ix] * ψ̂[ix, iy]
-    end
+function run_shell_to_shell_example(; N=32)
+    println("--- Shell-to-Shell Transfer Example (3D Taylor–Green vortex) ---")
+    û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
+    result = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
+        verify_antisymmetry=true, spectral=FET.FFTBackend())
 
-    # --- Allocating convenience API ---
-    result = FET.calculate_shell_to_shell_transfer(û, ks;
-        binning             = b,
-        dealiasing          = true,
-        verify_antisymmetry = true,
-        spectral            = FET.FFTBackend())
+    Tn = sqrt(sum(abs2, result.transfer_matrix))
+    println("Shells: ", length(result.shell_centers))
+    println("antisymmetry max|T(n,m)+T(m,n)| / ‖T‖ = ",
+            round(result.max_antisymmetry_error / Tn; sigdigits=3))
 
-    N_sh = length(result.shell_centers)
-    T_norm = sqrt(sum(abs2, result.transfer_matrix))
-    println("Shells: $N_sh")
-    println("‖T‖₂ = $T_norm")
-    println("max|T(n,m)+T(m,n)| / ‖T‖₂ = ",
-        result.max_antisymmetry_error / (T_norm + eps()))
+    # Trim to the active shells (those carrying ≳1% of the peak transfer) for a readable plot.
+    T = result.transfer_matrix
+    Tlim = maximum(abs, T)
+    kmax = findlast(n -> any(>(0.01Tlim), abs.(T[n, :])) || any(>(0.01Tlim), abs.(T[:, n])),
+                    1:size(T, 1))
+    kmax = something(kmax, size(T, 1))
+    sh = 1:kmax
 
-    # --- Zero-alloc !-variant (for time-stepping use) ---
-    ws = FET.ShellToShellWorkspace(û, ks, b)
-    FET.calculate_shell_to_shell_transfer!(result, ws, û, ks;
-        dealiasing=true, verify_antisymmetry=false)
-    println("Re-used workspace successfully.")
+    fig = CairoMakie.Figure(size=(1050, 460), fontsize=14)
+    CairoMakie.Label(fig[0, 1:3], "Shell-to-Shell Energy Transfer — 3D Taylor–Green Vortex",
+        fontsize=17, font=:bold, tellwidth=false)
 
-    # --- Plot ---
-    fig = CairoMakie.Figure(size=(1100, 800), fontsize=14)
-    CairoMakie.Label(fig[0, 1:3],
-        "Shell-to-Shell Transfer T(n,m) — 2D Random Streamfunction (N=$N)",
-        fontsize=16, font=:bold)
+    ax1 = CairoMakie.Axis(fig[1, 1], title="T(n,m)  (blue: gain, red: loss)",
+        xlabel="source shell m", ylabel="receiver shell n", aspect=CairoMakie.DataAspect())
+    hm = CairoMakie.heatmap!(ax1, collect(sh), collect(sh), T[sh, sh],
+        colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
+    CairoMakie.lines!(ax1, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.5, linestyle=:dash)
+    CairoMakie.Colorbar(fig[1, 2], hm, label="T(n,m)", width=12)
 
-    # T(n,m) heatmap
-    T_max = maximum(abs, result.transfer_matrix)
-    ax1 = CairoMakie.Axis(fig[1, 1:2],
-        title="T(n,m) — donor shell m → receiver shell n",
-        xlabel="Donor shell m", ylabel="Receiver shell n",
-        aspect=CairoMakie.DataAspect())
-    hm = CairoMakie.heatmap!(ax1,
-        1:N_sh, 1:N_sh, result.transfer_matrix,
-        colormap=:RdBu, colorrange=(-T_max, T_max))
-    CairoMakie.Colorbar(fig[1, 3], hm, label="T(n,m)")
-
-    # Net transfer per shell
-    ax2 = CairoMakie.Axis(fig[2, 1:3],
-        title="Net energy gain per shell  Σ_m T(n,m)",
-        xlabel="Shell n", ylabel="Net transfer rate")
-    colors = ifelse.(result.net_transfer .>= 0, :steelblue, :crimson)
-    CairoMakie.barplot!(ax2, 1:N_sh, result.net_transfer, color=colors)
-    CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=0.8)
+    netsub = result.net_transfer[sh]
+    ax2 = CairoMakie.Axis(fig[1, 3], title="Net transfer Σₘ T(n,m)",
+        xlabel="shell n", ylabel="net energy gain")
+    cols = [v >= 0 ? CairoMakie.RGBf(0.27,0.51,0.71) : CairoMakie.RGBf(0.84,0.15,0.16) for v in netsub]
+    CairoMakie.barplot!(ax2, collect(sh), netsub, color=cols)
+    CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=1.0)
 
     outpath = joinpath(@__DIR__, "shell_to_shell.png")
     CairoMakie.save(outpath, fig)
     println("Saved figure: $outpath")
-    println("Done.")
     return result
 end
 
