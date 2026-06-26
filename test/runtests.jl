@@ -225,6 +225,15 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = true, spectral = spectral)
             Test.@test a == 0
         end
+
+        # Generalized engine: scalar (M=1) advected by the velocity is also zero-alloc.
+        θ̂   = randn(ComplexF64, N, N, 1)
+        wsθ = FET.NonlinearTermWorkspace(θ̂, ks)
+        for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
+            FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = true, spectral = spectral, advecting_hat = û)
+            a = @allocated FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = true, spectral = spectral, advecting_hat = û)
+            Test.@test a == 0
+        end
     end
 
     # -----------------------------------------------------------------------
@@ -727,6 +736,16 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test result isa FET.SpectralFluxResult
         Test.@test eltype(result.k_shells) == Float32
         Test.@test eltype(result.transfer_spectrum) == Float32
+
+        # New diagnostics also preserve Float32 throughout.
+        θ̂ = zeros(ComplexF32, N, N)
+        rθ = FET.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing=false, spectral=FET.DirectSumBackend())
+        Test.@test eltype(rθ.transfer_spectrum) == Float32
+        b̂ = zeros(ComplexF32, N, N, 2)
+        rm = FET.calculate_mhd_energy_transfer(û, b̂, ks; binning=b, dealiasing=false, spectral=FET.DirectSumBackend())
+        Test.@test eltype(rm.total.transfer_spectrum) == Float32
+        rmh = FET.calculate_mhd_cross_helicity_transfer(û, b̂, ks; binning=b, dealiasing=false, spectral=FET.DirectSumBackend())
+        Test.@test eltype(rmh.transfer_spectrum) == Float32
     end
 
     # -----------------------------------------------------------------------
