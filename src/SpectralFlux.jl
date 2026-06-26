@@ -1,14 +1,14 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords, as_component_field
-using ..NonlinearTerm: compute_nonlinear_term!
+using ..NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_helical_partial_fluxes
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -212,6 +212,74 @@ function calculate_scalar_flux(
     θ̂ = as_component_field(scalar_hat, length(ks))
     return calculate_spectral_flux(θ̂, ks; binning=binning, dealiasing=dealiasing,
         invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral, geometry=geometry)
+end
+
+# ---------------------------------------------------------------------------
+# Helical partial energy fluxes Π^{s_k s_p s_q} (Waleffe 1992; Biferale–Musacchio–Toschi 2012)
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_helical_partial_fluxes(velocity_hat, ks; binning, dealiasing=OrszagTwoThirds(),
+        spectral=DirectSumBackend(), geometry=IsotropicShells())
+        -> (channels::Dict{NTuple{3,Int},SpectralFluxResult}, total::SpectralFluxResult, k_shells)
+
+Decompose the 3D kinetic-energy flux into the **eight helical partial fluxes** `Π^{s_k s_p s_q}(K)`,
+where each of the three modes in a triad interaction carries a definite helicity sign
+`s ∈ {+1,-1}` (Waleffe 1992; Biferale, Musacchio & Toschi 2012; Alexakis 2017). Writing the
+velocity as `u = u₊ + u₋` (see [`HelicalDecomposition`](@ref)),
+
+    T^{s_k s_p s_q}(k) = Re{ û_{s_k}*(k) · [ (u_{s_p}·∇) u_{s_q} ](k) },
+
+and `Π^{s_k s_p s_q}(K) = Σ_{k≤K} T^{s_k s_p s_q}`. The eight channels sum to the full energy flux.
+The **homochiral** channels (`s_k=s_p=s_q`, i.e. `(+++)`,`(---)`) tend to drive an inverse cascade,
+the **heterochiral** ones a forward cascade — the central result of helical turbulence.
+
+`channels` is keyed by `(s_k, s_p, s_q)` with entries `±1`. Built entirely from the package's
+helical decomposition + generalized nonlinear term; 3D only.
+"""
+function calculate_helical_partial_fluxes(
+    velocity_hat,
+    ks;
+    binning::AbstractShellBinning = _default_binning(ks),
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    geometry::AbstractShellGeometry = IsotropicShells(),
+)
+    nd = length(ks)
+    nd == 3 || throw(ArgumentError("helical partial fluxes are defined in 3D only (got nd=$nd)."))
+    FT = real(eltype(velocity_hat))
+    ns = size(velocity_hat)[1:nd]
+
+    dec = decompose_field(HelicalDecomposition(), velocity_hat, ks)
+    u = Dict(1 => dec.positive, -1 => dec.negative)
+
+    k_coord = shell_coordinate(geometry, ks)
+    edges   = shell_edges(binning, maximum(k_coord))
+    centers = collect(shell_centers(binning, maximum(k_coord)))
+    sidx    = assign_shells(k_coord, edges)
+    Nsh     = length(centers)
+
+    binflux(t) = begin
+        T = zeros(FT, Nsh)
+        @inbounds for I in CartesianIndices(ns)
+            n = sidx[I]; n == 0 && continue; T[n] += t[I]
+        end
+        SpectralFluxResult(centers, T, cumsum(T))
+    end
+
+    channels = Dict{NTuple{3,Int}, SpectralFluxResult}()
+    td = similar(velocity_hat, FT, ns...)
+    for sp in (1, -1), sq in (1, -1)
+        N̂ = compute_nonlinear_term(u[sq], ks; advecting_hat=u[sp], dealiasing=dealiasing, spectral=spectral)  # (u_{sp}·∇)u_{sq}
+        for sk in (1, -1)
+            transfer_density!(td, KineticEnergy(), u[sk], N̂, ks)
+            channels[(sk, sp, sq)] = binflux(td)
+        end
+    end
+    total = SpectralFluxResult(centers,
+        sum(c.transfer_spectrum for c in values(channels)),
+        sum(c.flux for c in values(channels)))
+    return (channels = channels, total = total, k_shells = centers)
 end
 
 # ---------------------------------------------------------------------------

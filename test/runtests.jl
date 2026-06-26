@@ -572,6 +572,32 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "Helical partial fluxes — 8 channels sum to the total energy flux" begin
+        M = 16; L = 2π
+        ks = FET.wavenumber_grid((M, M, M), (L, L, L))
+        kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        Random.seed!(91)
+        Â = randn(ComplexF64, M, M, M, 3)
+        ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
+        ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
+        ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
+        û  = cat(ûx, ûy, ûz; dims = 4)
+        b  = FET.LinearBinning(2π/L)
+
+        hp = FET.calculate_helical_partial_fluxes(û, ks; binning=b, dealiasing=FET.OrszagTwoThirds(),
+            spectral=FET.FFTBackend())
+        Test.@test length(hp.channels) == 8                              # all (s_k,s_p,s_q) present
+        sf = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+        # The 8 channels reconstruct the full KE flux. The individual channels are large and partly
+        # cancel into a smaller total, so compare at a tolerance set by the CHANNEL scale.
+        chan_scale = maximum(sqrt(sum(abs2, c.transfer_spectrum)) for c in values(hp.channels))
+        Test.@test chan_scale > 0
+        Test.@test isapprox(hp.total.transfer_spectrum, sf.transfer_spectrum; atol = 1e-10 * chan_scale)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ToroidalPoloidalDecomposition — reconstruct, div-free, toroidal has w=0" begin
         M = 8; L = 2π
         ks = FET.wavenumber_grid((M, M, M), (L, L, L))
