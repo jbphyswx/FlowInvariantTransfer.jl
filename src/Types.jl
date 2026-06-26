@@ -516,29 +516,28 @@ ShellToShellResult(c, e, T, n, a) =
     ShellToShellResult{typeof(c), typeof(T), eltype(T)}(c, e, T, n, a)
 
 """
-    ModeToModeTriadResult{I, KS, A, NT}
+    ModeToModeTriadResult{I, KS, A, S}
 
-Result of a mode-to-mode triad transfer computation `S(k|p|q)`.
+Result of a fully mode-resolved triad transfer computation.
 
 # Fields
 - `invariant::I`: The invariant that was accumulated (e.g. `KineticEnergy()`).
 - `ks::KS`: The wavenumber vectors `(kx, ky[, kz])` defining the spectral grid.
-- `net_transfer::A`: `T(k) = Σ_p S(k|p|q=k−p)` — net per-mode transfer, same
-  spatial shape as one velocity component.
-- `reductions::NT`: A `NamedTuple` of optional reductions, e.g.
-  `(; K, Q, TKQ)` for the magnitude-to-magnitude matrix `T(K,Q)` when a binning
-  was supplied, or an empty `NamedTuple` otherwise.
+- `net_transfer::A`: `T(k) = Σ_p S(k|p)` — net per-mode transfer (shape `ns`); equals the
+  spectral transfer from `calculate_spectral_flux`.
+- `transfer::S`: the resolved `S(k|p)` — energy delivered to receiver mode `k` from giver mode
+  `p` (mediated by `q=k−p`), shape `(ns..., ns...)` (receiver indices then giver indices).
+  Antisymmetric (`S(k|p)=−S(p|k)`); summed over `p` gives `net_transfer`; summed over shells
+  gives the shell-to-shell matrix.
 
 Parametric on all array/field types — GPU-array friendly.
 """
-struct ModeToModeTriadResult{I, KS, A, NT}
+struct ModeToModeTriadResult{I, KS, A, S}
     invariant::I
     ks::KS
     net_transfer::A
-    reductions::NT
+    transfer::S
 end
-ModeToModeTriadResult(invariant, ks, net_transfer) =
-    ModeToModeTriadResult(invariant, ks, net_transfer, NamedTuple())
 
 """
     TriadicOrthogonalDecompositionResult{V, A3, PM, EC, XM}

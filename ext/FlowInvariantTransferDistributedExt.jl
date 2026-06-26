@@ -3,22 +3,10 @@ module FlowInvariantTransferDistributedExt
 using Distributed: Distributed
 using SharedArrays: SharedArrays
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FlowInvariantTransfer.Types: DistributedBackend, ShellToShellResult, AbstractShellBinning, AbstractInvariant, KineticEnergy
-using FlowInvariantTransfer.Workspaces: ScaleToScaleWorkspace
+using FlowInvariantTransfer.Types: DistributedBackend, ShellToShellResult, AbstractInvariant, KineticEnergy
 using FlowInvariantTransfer.ShellBinning: assign_shells
-using FlowInvariantTransfer.Utils: dealiasing_mask
 
-# Define a custom reduced structure for mode-to-mode reduction to optimize communication
-struct ScaleToScaleReduced{A, M}
-    net_transfer::A
-    T_mat::M
-end
-
-function Base.:+(a::ScaleToScaleReduced, b::ScaleToScaleReduced)
-    return ScaleToScaleReduced(a.net_transfer .+ b.net_transfer, a.T_mat .+ b.T_mat)
-end
-
-# 1. Distributed Shell-to-Shell Transfer Implementation
+# Distributed Shell-to-Shell Transfer Implementation
 function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     result::ShellToShellResult,
     ws::FET.Workspaces.ShellToShellWorkspace,
@@ -114,81 +102,6 @@ function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, 
         col[n] = s
     end
     return col
-end
-
-# 2. Distributed Scale-to-Scale (Mode-to-Mode) Transfer Implementation
-function FET.ScaleToScaleTransfer._calculate_mode_to_mode!(
-    ws::ScaleToScaleWorkspace,
-    velocity_hat,
-    ks,
-    ::DistributedBackend;
-    binning::Union{Nothing, AbstractShellBinning},
-    invariant::AbstractInvariant,
-    dealiasing::Bool,
-)
-    nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd+1)
-    FT = real(eltype(velocity_hat))
-    
-    N_sh = binning !== nothing ? size(ws.T_mat, 1) : 0
-    mask = dealiasing ? dealiasing_mask(ns) : trues(ns...)
-    
-    # Gather indices to distribute
-    indices_list = collect(CartesianIndices(ns))
-    n_total = length(indices_list)
-    n_workers = Distributed.nworkers()
-    
-    # Divide total modes into chunks to minimize worker serialization/reduction overhead
-    chunk_size = div(n_total, n_workers)
-    rem_size = rem(n_total, n_workers)
-    
-    reduced = Distributed.@distributed (+) for c in 1:n_workers
-        start_idx = (c - 1) * chunk_size + min(c - 1, rem_size) + 1
-        end_idx = c * chunk_size + min(c, rem_size)
-        
-        local_net = zeros(FT, ns...)
-        local_T = binning !== nothing ? zeros(FT, N_sh, N_sh) : zeros(FT, 0, 0)
-        
-        for idx in start_idx:end_idx
-            k_idx = indices_list[idx]
-            if dealiasing && !mask[k_idx]
-                continue
-            end
-
-            net_k = zero(FT)
-            for p_idx in CartesianIndices(ns)
-                if dealiasing && !mask[p_idx]
-                    continue
-                end
-
-                # q = k - p
-                q_idx = CartesianIndex(Tuple(mod(k_idx[d] - p_idx[d], ns[d]) + 1 for d in 1:nd))
-                if dealiasing && !mask[q_idx]
-                    continue
-                end
-
-                S_val = FET.ScaleToScaleTransfer.compute_triad_S(invariant, velocity_hat, k_idx, p_idx, q_idx, ks, D)
-                net_k += S_val
-
-                if binning !== nothing
-                    K_sh = ws.shell_idx[k_idx]
-                    Q_sh = ws.shell_idx[p_idx]
-                    if K_sh > 0 && Q_sh > 0
-                        local_T[K_sh, Q_sh] += S_val
-                    end
-                end
-            end
-            local_net[k_idx] = net_k
-        end
-        ScaleToScaleReduced(local_net, local_T)
-    end
-    
-    # Copy reduced results into our in-place workspace
-    copyto!(ws.net_transfer, reduced.net_transfer)
-    if binning !== nothing
-        copyto!(ws.T_mat, reduced.T_mat)
-    end
 end
 
 end # module

@@ -210,7 +210,7 @@ function calculate_energy_transfer(
     kwargs...,
 )
     return calculate_mode_to_mode_transfer(velocity_hat, ks;
-        binning=method.binning, invariant=method.invariant, kwargs...)
+        invariant=method.invariant, kwargs...)
 end
 
 function calculate_energy_transfer(

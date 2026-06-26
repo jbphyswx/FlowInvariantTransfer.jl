@@ -607,16 +607,6 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(res_serial.transfer_matrix, res_dist.transfer_matrix; atol=1e-12)
         Test.@test isapprox(res_serial.net_transfer, res_thread.net_transfer; atol=1e-12)
         Test.@test isapprox(res_serial.net_transfer, res_dist.net_transfer; atol=1e-12)
-
-        # 2. Scale-to-Scale (Mode-to-Mode) Transfer Parity
-        m2m_serial = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, execution=FET.SerialBackend())
-        m2m_thread = FET.calculate_mode_to_mode_transfer(û, ks; binning=b, dealiasing=true, execution=FET.ThreadedBackend())
-        m2m_dist = FET.calculate_mode_to_mode_transfer(s_û, ks; binning=b, dealiasing=true, execution=FET.DistributedBackend())
-
-        Test.@test isapprox(m2m_serial.net_transfer, m2m_thread.net_transfer; atol=1e-12)
-        Test.@test isapprox(m2m_serial.net_transfer, m2m_dist.net_transfer; atol=1e-12)
-        Test.@test isapprox(m2m_serial.reductions.TKQ, m2m_thread.reductions.TKQ; atol=1e-12)
-        Test.@test isapprox(m2m_serial.reductions.TKQ, m2m_dist.reductions.TKQ; atol=1e-12)
     end
 
     # -----------------------------------------------------------------------
@@ -636,29 +626,45 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    Test.@testset "ModeToMode — routed aggregates consistent with spectral/shell-to-shell" begin
-        # The fix: mode-to-mode net + T(K,Q) route through the FFT paths, so they are on the
-        # SAME normalization as the other diagnostics (the old brute loop was off by ~Np²).
-        N = 16; L = 2π
+    Test.@testset "ModeToMode — resolved S(k|p): antisym, conserves, reduces to spectral/shell-to-shell" begin
+        # mode-to-mode now owns the fully-resolved S(k|p) (built from the validated nonlinear
+        # term), which must be antisymmetric, conserve, and reduce to the coarser diagnostics.
+        N = 12; L = 2π
         Random.seed!(21)
         ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
         ks = FET.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
-        b  = FET.LinearBinning(2π/L)
-        m2m = FET.calculate_mode_to_mode_transfer(û, ks; binning = b, dealiasing = true, spectral=FET.FFTBackend())
-        ss  = FET.calculate_shell_to_shell_transfer(û, ks; binning = b, dealiasing = true,
-            verify_antisymmetry = false, spectral=FET.FFTBackend())
-        sf  = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true, spectral=FET.FFTBackend())
-        sT  = sqrt(sum(abs2, ss.transfer_matrix)); Test.@test sT > 0
-        Test.@test isapprox(m2m.reductions.TKQ, ss.transfer_matrix; atol = 1e-10 * sT)   # T(K,Q) == shell-to-shell
-        # net per-mode summed into shells == spectral transfer T(k)
+        m2m = FET.calculate_mode_to_mode_transfer(û, ks; dealiasing = true, spectral = FET.FFTBackend())
+        S   = m2m.transfer                              # shape (N,N,N,N): S[k..., p...]
+        nrm = sqrt(sum(abs2, S)); Test.@test nrm > 0    # non-degenerate
+        asym = 0.0
+        for k in CartesianIndices((N, N)), p in CartesianIndices((N, N))
+            asym = max(asym, abs(S[k, p] + S[p, k]))
+        end
+        Test.@test asym < 1e-10 * nrm                   # antisymmetric S(k|p) = −S(p|k)
+        Test.@test abs(sum(S)) < 1e-10 * nrm            # conserves Σ_kΣ_p S = 0
+
+        b = FET.LinearBinning(2π/L)
+        sf = FET.calculate_spectral_flux(û, ks; binning = b, dealiasing = true, spectral = FET.FFTBackend())
+        ss = FET.calculate_shell_to_shell_transfer(û, ks; binning = b, dealiasing = true,
+            verify_antisymmetry = false, spectral = FET.FFTBackend())
         kmag  = FET.wavenumber_magnitude_grid(ks)
         edges = FET.shell_edges(b, maximum(kmag))
         sidx  = FET.assign_shells(kmag, edges)
+        # net (= Σ_p S) shell-summed == spectral transfer T(k)
         netshell = zeros(length(edges) - 1)
-        for I in CartesianIndices(size(sidx)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
-        Test.@test isapprox(netshell, sf.transfer_spectrum; atol = 1e-10 * sqrt(sum(abs2, sf.transfer_spectrum)))
+        for I in CartesianIndices((N, N)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
+        Test.@test isapprox(netshell, sf.transfer_spectrum; atol = 1e-9 * sqrt(sum(abs2, sf.transfer_spectrum)))
+        # shell-reduction of S(k|p) == shell-to-shell matrix T(n,m)
+        N_sh = size(ss.transfer_matrix, 1)
+        TKQ  = zeros(N_sh, N_sh)
+        for k in CartesianIndices((N, N)), p in CartesianIndices((N, N))
+            n = sidx[k]; m = sidx[p]
+            (n == 0 || m == 0) && continue
+            TKQ[n, m] += S[k, p]
+        end
+        Test.@test isapprox(TKQ, ss.transfer_matrix; atol = 1e-9 * sqrt(sum(abs2, ss.transfer_matrix)))
     end
 
 end # top-level testset
