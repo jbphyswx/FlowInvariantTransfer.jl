@@ -243,8 +243,11 @@ end
 """
     _temporal_block_dft_fft!(dft_col, segment_col, window, win_weight, nDFT)
 
-FFTW-accelerated temporal block DFT for a single spatial point.
-Applies window, FFT via FFTW, normalizes, and fftshifts the result.
+FFTW-accelerated temporal block DFT for a single spatial point. Applies the window, transforms
+via FFTW, and normalizes — returning the DFT in **natural (unshifted) bin order** `0,1,…,nDFT-1`,
+exactly like the direct-sum path. The caller (`triadic_orthogonal_decomposition`) applies the
+single `fftshift` to centre the spectrum; this routine must NOT shift as well, or the result is
+shifted twice (a full wrap for even `nDFT`) and `Q_hat` ends up misaligned with the frequency axis.
 """
 function FET.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     dft_col,
@@ -254,10 +257,7 @@ function FET.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     nDFT,
 )
     windowed = segment_col .* window
-    result = FFTW.fft(windowed) .* (win_weight / nDFT)
-    # fftshift
-    shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
-    dft_col .= circshift(result, shift)
+    dft_col .= FFTW.fft(windowed) .* (win_weight / nDFT)
     return dft_col
 end
 

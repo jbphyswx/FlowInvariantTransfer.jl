@@ -830,6 +830,51 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "TOD — detects a known quadratic triad (FFT == direct)" begin
+        # Regression for a double-fftshift bug in the FFTW temporal DFT: the FFT backend was
+        # shifted twice, misaligning Q_hat with the frequency axis, so genuine triads were not
+        # detected. Build a real phase-locked triad f_k+f_l=f_n (daughter = sum-frequency wave
+        # with phase φ_k+φ_l), random parent phases per block, and require BOTH backends to (a)
+        # agree, (b) make the triad a dominant peak, and (c) score it far above an unlocked control.
+        nfft = 100; nblocks = 40; nx = 12; dt = 0.1   # Δf=0.1 ⇒ f=1,2,3 land on integer bins
+        fk, fl, fn = 1.0, 2.0, 3.0
+        xs = range(0, 2π; length = nx)
+        mk = cos.(xs); ml = cos.(2 .* xs); mn = mk .* ml
+        function build_signal(locked)
+            Random.seed!(20)
+            nt = nfft * nblocks; X = zeros(nt, 1, nx)
+            for blk in 0:nblocks-1
+                φk, φl = 2π .* rand(2); φn = locked ? (φk + φl) : 2π * rand()
+                for τ in 0:nfft-1
+                    tt = τ * dt
+                    X[blk*nfft + τ + 1, 1, :] .= cos(2π*fk*tt + φk).*mk .+ cos(2π*fl*tt + φl).*ml .+
+                                                  cos(2π*fn*tt + φn).*mn
+                end
+            end
+            return X
+        end
+        Xl = build_signal(true)
+        rd = FET.triadic_orthogonal_decomposition(Xl; window=nfft, noverlap=0, nmode=1, dt=dt,
+            isreal_data=true, spectral=FET.DirectSumBackend())
+        rf = FET.triadic_orthogonal_decomposition(Xl; window=nfft, noverlap=0, nmode=1, dt=dt,
+            isreal_data=true, spectral=FET.FFTBackend())
+        f = rd.frequencies
+        Ld = copy(rd.mode_bispectrum[:, :, 1]); Ld[isnan.(Ld)] .= 0
+        Lf = copy(rf.mode_bispectrum[:, :, 1]); Lf[isnan.(Lf)] .= 0
+        li = argmin(abs.(f .- fl)); ni = argmin(abs.(f .- fn))
+        # (a) the FFT bug is fixed: backends agree (this previously diverged badly)
+        Test.@test isapprox(filter(!isnan, rd.mode_bispectrum), filter(!isnan, rf.mode_bispectrum); atol = 1e-10)
+        # (b) the genuine triad (f_l=2, f_n=3) is a dominant peak (not buried)
+        Test.@test Lf[li, ni] >= 0.5 * maximum(Lf)
+        # (c) phase-locking matters: unlocked daughter scores far lower at the same cell
+        Xu = build_signal(false)
+        ru = FET.triadic_orthogonal_decomposition(Xu; window=nfft, noverlap=0, nmode=1, dt=dt,
+            isreal_data=true, spectral=FET.FFTBackend())
+        Lu = copy(ru.mode_bispectrum[:, :, 1]); Lu[isnan.(Lu)] .= 0
+        Test.@test Lu[li, ni] < 0.3 * Lf[li, ni]
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
         # 1. Spectral flux decomposition test
         N = 8; L = 2π
