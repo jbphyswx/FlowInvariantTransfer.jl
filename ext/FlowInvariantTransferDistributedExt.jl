@@ -17,6 +17,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     dealiasing::Bool,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     N_sh = size(result.transfer_matrix, 1)
     FT = real(eltype(velocity_hat))
@@ -30,7 +31,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     # Using `Distributed.@distributed (+)` reduces the resulting N_sh x N_sh matrices.
     T_mat_reduced = Distributed.@distributed (+) for m in 1:N_sh
         # Compute column m on the worker process
-        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral)
+        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat)
         
         # Construct an array where only column m is filled
         local_T = zeros(FT, N_sh, N_sh)
@@ -66,26 +67,26 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
 end
 
 # Helper function executed on worker processes for Shell-to-Shell
-function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral)
+function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd+1)
-    
-    # Restrict velocity field to shell m
+    M  = size(velocity_hat, nd+1)   # components of the binned/carried primary field
+
+    # Restrict the primary field to shell m
     û_m = zeros(eltype(velocity_hat), size(velocity_hat)...)
     for I in CartesianIndices(ns)
         shell_idx[I] == m || continue
-        for comp in 1:D
+        for comp in 1:M
             û_m[I, comp] = velocity_hat[I, comp]
         end
     end
-    
+
     # Allocate a local NonlinearTermWorkspace.
-    # N̂_m = (u·∇)u_m: full velocity advects the band-m field (AMP 2005) — antisymmetric A[n,m]
-    # that reduces to transfer_spectrum[n] (matches serial/FFT/threaded).
+    # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field (AMP 2005) —
+    # for energy gives antisymmetric A[n,m] reducing to transfer_spectrum[n] (matches serial/FFT).
     nl_ws = FET.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
     FET.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
-        spectral=spectral, advecting_hat=velocity_hat)
+        spectral=spectral, advecting_hat=advecting_hat)
 
     # Write per-mode transfer density
     transfer_density = similar(velocity_hat, FT, ns...)

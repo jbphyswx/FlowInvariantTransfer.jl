@@ -4,7 +4,7 @@ using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, Lin
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
-using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords
+using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords, as_component_field
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
@@ -205,7 +205,7 @@ function calculate_scalar_flux(
     dealiasing::Bool = true,
     spectral::AbstractSpectralBackend = DirectSumBackend(),
 )
-    θ̂ = _as_component_field(scalar_hat, length(ks))
+    θ̂ = as_component_field(scalar_hat, length(ks))
     return calculate_spectral_flux(θ̂, ks; binning=binning, dealiasing=dealiasing,
         invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral)
 end
@@ -213,20 +213,6 @@ end
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-"""
-    _as_component_field(f, nd) -> array of rank nd+1
-
-Normalize a scalar field to the package's `(ns..., M)` component-axis convention: a rank-`nd`
-array `(ns...)` is reshaped to `(ns..., 1)`; a rank-`nd+1` array is returned unchanged.
-"""
-function _as_component_field(f, nd::Int)
-    r = ndims(f)
-    r == nd     && return reshape(f, size(f)..., 1)
-    r == nd + 1 && return f
-    throw(ArgumentError(
-        "scalar field has $r dims; expected nd=$nd (shape (ns...)) or nd+1=$(nd+1) (shape (ns...,1))."))
-end
 
 function _default_binning(ks)
     # Default linear binning with spacing = minimum non-zero wavenumber increment

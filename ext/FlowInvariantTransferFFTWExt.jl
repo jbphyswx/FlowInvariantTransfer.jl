@@ -152,43 +152,46 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     nd    = length(ks)
     ns    = size(velocity_hat)[1:nd]
-    D     = size(velocity_hat, nd+1)
+    M     = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT    = real(eltype(velocity_hat))
     N_sh  = size(result.transfer_matrix, 1)
     Np    = FT(prod(ns))
 
     # Orszag 2/3: truncate inputs before forming products (see _dealias_copy / THEORY.md §0.5).
     vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
+    ahat = dealiasing ? _dealias_copy(advecting_hat, ns, nd) : advecting_hat
 
     k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-    # Advecting field is the FULL velocity (computed once); the band-m field is what gets advected.
-    u_full_phys = [real.(FFTW.ifft(selectdim(vhat, nd+1, c))) for c in 1:D]
+    # Advecting field is the FULL velocity (computed once, spatial dirs only); the band-m primary
+    # field is what gets advected. For energy primary==velocity; for a scalar primary==θ̂.
+    u_full_phys = [real.(FFTW.ifft(selectdim(ahat, nd+1, j))) for j in 1:nd]
 
-    # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{û*·N̂_m}, N̂_m = (u·∇)u_m (full advects band-m; AMP 2005).
-    # Accumulated one mediator `m` at a time directly into result.transfer_matrix, reusing
-    # ws.nonlinear.N̂ / ws.transfer_density — peak memory O(N^D), not O(N_sh·N^D) (the old
-    # N_sh-fold allocation was a ~100 GB trap at 256³). A is antisymmetric (A[n,m]+A[m,n]=0) and
-    # reduces as Σ_m A[n,m] = transfer_spectrum[n], so NO ½(A−Aᵀ) is applied (that halves it).
+    # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{c*·N̂_m}, N̂_m = (u·∇)f_m (full velocity advects band-m;
+    # AMP 2005). Accumulated one mediator `m` at a time directly into result.transfer_matrix,
+    # reusing ws.nonlinear.N̂ / ws.transfer_density — peak memory O(N^D), not O(N_sh·N^D) (the old
+    # N_sh-fold allocation was a ~100 GB trap at 256³). For energy A is antisymmetric
+    # (A[n,m]+A[m,n]=0) and reduces as Σ_m A[n,m] = transfer_spectrum[n], so NO ½(A−Aᵀ).
     fill!(result.transfer_matrix, zero(FT))
     for m in 1:N_sh
         fill!(ws.û_m, zero(eltype(ws.û_m)))
         for I in CartesianIndices(ns)
             ws.shell_idx[I] == m || continue
-            for c in 1:D; ws.û_m[I, c] = vhat[I, c]; end
+            for c in 1:M; ws.û_m[I, c] = vhat[I, c]; end
         end
         grad_m   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(ws.û_m, nd+1, c)))
-                     for j in 1:nd] for c in 1:D]
-        N_phys_m = [sum(u_full_phys[j] .* grad_m[c][j] for j in 1:nd) for c in 1:D]
-        for c in 1:D
+                     for j in 1:nd] for c in 1:M]
+        N_phys_m = [sum(u_full_phys[j] .* grad_m[c][j] for j in 1:nd) for c in 1:M]
+        for c in 1:M
             selectdim(ws.nonlinear.N̂, nd+1, c) .= FFTW.fft(N_phys_m[c]) ./ Np
         end
         if dealiasing
             for I in CartesianIndices(ns)
                 FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
-                for c in 1:D; ws.nonlinear.N̂[I, c] = zero(eltype(ws.nonlinear.N̂)); end
+                for c in 1:M; ws.nonlinear.N̂[I, c] = zero(eltype(ws.nonlinear.N̂)); end
             end
         end
         transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)

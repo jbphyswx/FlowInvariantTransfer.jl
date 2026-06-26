@@ -30,10 +30,11 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
     dealiasing::Bool = true,
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     nd        = length(ks)
     ns        = size(velocity_hat)[1:nd]
-    D         = size(velocity_hat, nd+1)
+    M         = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT        = real(eltype(velocity_hat))
     N_sh      = size(result.transfer_matrix, 1)
     shell_idx = ws.shell_idx
@@ -47,15 +48,15 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
         fill!(û_m, zero(eltype(û_m)))
         for I in CartesianIndices(ns)
             shell_idx[I] == m || continue
-            for c in 1:D
+            for c in 1:M
                 û_m[I, c] = velocity_hat[I, c]
             end
         end
 
-        # N̂_m = (u·∇)u_m: full velocity advects the band-m field (AMP 2005) — gives an
-        # antisymmetric A[n,m] that reduces to transfer_spectrum[n] (matches serial/FFT).
+        # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field
+        # (AMP 2005) — for energy gives an antisymmetric A[n,m] reducing to transfer_spectrum[n].
         FET.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
-            dealiasing=dealiasing, spectral=spectral, advecting_hat=velocity_hat)
+            dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
         N̂_m = local_ws.N̂
 
         local_density = similar(velocity_hat, FT, ns...)

@@ -386,6 +386,32 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "ShellToShell — passive scalar T_θ(n,m): antisym, direct==FFT, reduces" begin
+        N = 16; L = 2π
+        Random.seed!(14)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
+        θ  = FFTW.fft(randn(N, N)) ./ N^2                          # scalar
+        b  = FET.LinearBinning(2π/L)
+
+        r_dir = FET.calculate_scalar_shell_to_shell_transfer(û, θ, ks; binning = b,
+            dealiasing = true, verify_antisymmetry = true, spectral = FET.DirectSumBackend())
+        r_fft = FET.calculate_scalar_shell_to_shell_transfer(û, θ, ks; binning = b,
+            dealiasing = true, verify_antisymmetry = true, spectral = FET.FFTBackend())
+
+        T_norm = sqrt(sum(abs2, r_dir.transfer_matrix))
+        Test.@test T_norm > 0                                                  # non-degenerate
+        Test.@test isapprox(r_dir.transfer_matrix, r_fft.transfer_matrix; atol = 1e-9 * T_norm)
+        Test.@test r_dir.max_antisymmetry_error < 1e-10 * T_norm               # T_θ antisymmetric
+        # Reduction: Σ_m T_θ(n,m) == scalar transfer spectrum T_θ(k).
+        sfθ = FET.calculate_scalar_flux(û, θ, ks; binning = b, dealiasing = true,
+            spectral = FET.FFTBackend())
+        Test.@test isapprox(r_fft.net_transfer, sfθ.transfer_spectrum; atol = 1e-9 * T_norm)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π

@@ -57,13 +57,14 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     dealiasing::Bool,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     dev = gpu_backend.backend
     N_sh = size(result.transfer_matrix, 1)
     FT = real(eltype(velocity_hat))
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    D = size(velocity_hat, nd+1)
+    D = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     
     # Pre-allocate output matrix on device/host matching velocity_hat type
     fill!(result.transfer_matrix, zero(FT))
@@ -93,7 +94,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
         # In a real GPU run, we expect FFTW to be replaced by a GPU FFT backend.
         # But we fall back to SerialBackend computation or a KA-compatible FFT.
         # For this KA implementation, we dispatch using compute_nonlinear_term! with Serial/FFTBackend depending on array type.
-        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=velocity_hat)
+        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
         
         # 3. Compute per-mode transfer density on GPU using KA kernel
         # Run our custom KA transfer density kernel
