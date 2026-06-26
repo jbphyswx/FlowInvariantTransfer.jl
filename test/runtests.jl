@@ -526,6 +526,33 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "ToroidalPoloidalDecomposition — reconstruct, div-free, toroidal has w=0" begin
+        M = 8; L = 2π
+        ks = FET.wavenumber_grid((M, M, M), (L, L, L))
+        kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        Random.seed!(52)
+        Â = randn(ComplexF64, M, M, M, 3)
+        ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
+        ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
+        ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
+        û  = cat(ûx, ûy, ûz; dims = 4)                     # solenoidal
+
+        dec = FET.decompose_field(FET.ToroidalPoloidalDecomposition(), û, ks)
+        tor = dec.toroidal; pol = dec.poloidal
+        Test.@test isapprox(tor .+ pol, û; atol = 1e-12 * maximum(abs, û))            # reconstruction
+        Test.@test isapprox(sum(abs2, tor) + sum(abs2, pol), sum(abs2, û); rtol = 1e-12)  # orthogonal
+        # toroidal mode is horizontal: zero vertical velocity
+        Test.@test maximum(abs, tor[:, :, :, 3]) < 1e-12 * maximum(abs, û)
+        # both divergence-free
+        for f in (tor, pol)
+            divf = kx .* f[:,:,:,1] .+ ky .* f[:,:,:,2] .+ kz .* f[:,:,:,3]
+            Test.@test maximum(abs, divf) < 1e-10 * maximum(abs, û)
+        end
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π

@@ -2,7 +2,7 @@ module Types
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
-export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
@@ -175,6 +175,23 @@ recovering the realizability bound `|H(k)| ≤ 2|k| E(k)`. Returns the two **vec
 helicity-resolved energy fluxes `Π^±(K)`.
 """
 struct HelicalDecomposition <: AbstractFieldDecomposition end
+
+"""
+    ToroidalPoloidalDecomposition <: AbstractFieldDecomposition
+
+Split a 3D solenoidal velocity into **toroidal** (horizontal/vortical) and **poloidal**
+(vertical/wave) components in the Craya–Herring frame (Craya 1958; Herring 1974; Bartello 1995).
+For each `k` with horizontal part `k_⊥ ≠ 0`, the plane `⊥ k` is spanned by
+`e⁽¹⁾ = (k × ẑ)/|k × ẑ|` (horizontal, the toroidal direction) and `e⁽²⁾ = (k × e⁽¹⁾)/|k|` (the
+poloidal direction); `û = u₁ e⁽¹⁾ + u₂ e⁽²⁾`. The toroidal part carries the vertical vorticity
+and has **zero vertical velocity**; the poloidal part carries the vertical velocity (the linear
+gravity-wave mode in stratified flow). For purely vertical `k` (`k_⊥ = 0`) the split is
+degenerate and `(x̂, ŷ)` are used as an arbitrary horizontal orthonormal pair.
+
+Returns `(toroidal = u₁ e⁽¹⁾, poloidal = u₂ e⁽²⁾)`; both are divergence-free and they sum back
+to the solenoidal part of `û`. 3D only.
+"""
+struct ToroidalPoloidalDecomposition <: AbstractFieldDecomposition end
 
 """
     SpectralFluxMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod

@@ -1,6 +1,6 @@
 module Decomposition
 
-using ..Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition
+using ..Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 
 export decompose_field, helmholtz_project_spectral!
 
@@ -95,6 +95,49 @@ function _decompose_field_spectral(::HelicalDecomposition, velocity_hat::Abstrac
         end
     end
     return (positive = up, negative = um)
+end
+
+"""
+    decompose_field(::ToroidalPoloidalDecomposition, velocity_hat, ks) -> (toroidal=u_tor, poloidal=u_pol)
+
+Split a 3D solenoidal velocity into toroidal (horizontal/vortical) and poloidal (vertical/wave)
+components in the Craya–Herring frame (see [`ToroidalPoloidalDecomposition`](@ref)). Both returned
+arrays are divergence-free and sum to the solenoidal part of `velocity_hat`.
+"""
+function _decompose_field_spectral(::ToroidalPoloidalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+    nd = length(ks)
+    nd == 3 || throw(ArgumentError("ToroidalPoloidalDecomposition is defined in 3D only (got nd=$nd)."))
+    ns = size(velocity_hat)[1:nd]
+    D  = size(velocity_hat, nd + 1)
+    D >= 3 || throw(ArgumentError("ToroidalPoloidalDecomposition needs ≥3 velocity components (got D=$D)."))
+    FT = real(eltype(velocity_hat))
+    tor = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
+    pol = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
+    ẑ = (zero(FT), zero(FT), one(FT))
+    @inbounds for I in CartesianIndices(ns)
+        kx = FT(ks[1][I[1]]); ky = FT(ks[2][I[2]]); kz = FT(ks[3][I[3]])
+        kk = sqrt(kx*kx + ky*ky + kz*kz)
+        kk == 0 && continue
+        k̂ = (kx/kk, ky/kk, kz/kk)
+        kperp = sqrt(kx*kx + ky*ky)
+        if kperp > 0
+            e1 = _cross3(k̂, ẑ)                           # horizontal, ⊥ k (toroidal dir)
+            n1 = sqrt(e1[1]^2 + e1[2]^2 + e1[3]^2)
+            e1 = (e1[1]/n1, e1[2]/n1, e1[3]/n1)
+            e2 = _cross3(k̂, e1)                          # poloidal dir, unit, ⊥ k and e1
+        else
+            e1 = (one(FT), zero(FT), zero(FT))           # k ∥ ẑ: degenerate, arbitrary horizontal pair
+            e2 = (zero(FT), one(FT), zero(FT))
+        end
+        u1 = velocity_hat[I, 1]; u2 = velocity_hat[I, 2]; u3 = velocity_hat[I, 3]
+        c1 = u1*e1[1] + u2*e1[2] + u3*e1[3]              # toroidal coefficient
+        c2 = u1*e2[1] + u2*e2[2] + u3*e2[3]              # poloidal coefficient
+        for c in 1:3
+            tor[I, c] = c1 * e1[c]
+            pol[I, c] = c2 * e2[c]
+        end
+    end
+    return (toroidal = tor, poloidal = pol)
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
