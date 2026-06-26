@@ -589,6 +589,28 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "BandToBand — smooth T(K,Q): antisymmetric, conserves, reduces" begin
+        N = 16; L = 2π
+        Random.seed!(71)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free
+        centers = [1.0, 2.0, 3.0, 4.0]
+        bands = FET.SmoothBands(centers; logwidth = 0.5)
+
+        r = FET.calculate_band_to_band_transfer(û, ks; bands = bands, dealiasing = true,
+            spectral = FET.FFTBackend())
+        T = r.transfer_matrix
+        Tn = sqrt(sum(abs2, T)); Test.@test Tn > 0
+        Test.@test r.max_antisymmetry_error < 1e-10 * Tn                     # antisymmetric
+        Test.@test abs(sum(T)) < 1e-10 * Tn                                 # conserves
+        Test.@test isapprox(r.net_transfer, vec(sum(T, dims = 2)); atol = 1e-12 * Tn)  # net = Σ_m T(n,m)
+        # net summed over bands ≈ 0 (banded transfer spectrum integrates to zero)
+        Test.@test abs(sum(r.net_transfer)) < 1e-10 * Tn
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π

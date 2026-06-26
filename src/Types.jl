@@ -6,6 +6,7 @@ export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, Rota
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
+export SmoothBands
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -394,6 +395,25 @@ User-specified shell edges.  Shell n covers wavenumbers in [edges[n], edges[n+1]
 struct CustomBinning{V<:AbstractVector} <: AbstractShellBinning
     edges::V
 end
+
+"""
+    SmoothBands(centers; logwidth=0.6)
+
+Graded (smooth) spectral bands for band-to-band transfer `T(K,Q)` (Eyink & Aluie 2009), as an
+alternative to the sharp shells of [`AbstractShellBinning`](@ref). Each band `n` weights a mode at
+coordinate `κ` by a log-Gaussian `exp(−(ln(κ/centers[n]))² / (2·logwidth²))`, renormalized across
+bands to a partition of unity (`Σ_n w_n(κ) = 1`) so the smooth bands conserve and reduce to the
+band-summed transfer spectrum. Smaller `logwidth` → sharper, more shell-like bands.
+
+# Fields
+- `centers`: band-center wavenumbers (monotonically increasing, all > 0).
+- `logwidth`: Gaussian width in `ln κ` (dimensionless); default `0.6` (≈ one octave overlap).
+"""
+struct SmoothBands{V<:AbstractVector, T}
+    centers::V
+    logwidth::T
+end
+SmoothBands(centers::AbstractVector; logwidth=0.6) = SmoothBands(centers, float(logwidth))
 
 # ---------------------------------------------------------------------------
 # Shell geometry — WHICH wavenumber coordinate the shells partition

@@ -18,6 +18,7 @@ include("SpectralFlux.jl")
 include("MHDTransfer.jl")
 include("CoarseGrainingFlux.jl")
 include("ShellToShell/ShellToShellTransfer.jl")
+include("BandTransfer.jl")
 include("ScaleToScale/TriadicOrthogonalDecomposition/TriadicOrthogonalDecomposition.jl")
 include("ScaleToScale/ScaleToScaleTransfer.jl")
 
@@ -58,6 +59,7 @@ using .Types:
     IsotropicShells,
     PerpendicularShells,
     ParallelShells,
+    SmoothBands,
     AbstractExecutionBackend,
     SerialBackend,
     ThreadedBackend,
@@ -83,6 +85,7 @@ export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, Rota
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
+export SmoothBands
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -121,6 +124,7 @@ using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculat
 using .MHDTransfer: calculate_mhd_energy_transfer, calculate_mhd_cross_helicity_transfer
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
+using .BandTransfer: calculate_band_to_band_transfer
 using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition
 
@@ -128,6 +132,7 @@ export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
 export calculate_mhd_energy_transfer, calculate_mhd_cross_helicity_transfer
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
+export calculate_band_to_band_transfer
 export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
 export triadic_orthogonal_decomposition
 export calculate_energy_transfer
