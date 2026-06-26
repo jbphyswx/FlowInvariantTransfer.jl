@@ -15,6 +15,7 @@ include("Filters.jl")
 include("Workspaces.jl")
 include("NonlinearTerm.jl")
 include("SpectralFlux.jl")
+include("MHDTransfer.jl")
 include("CoarseGrainingFlux.jl")
 include("ShellToShell/ShellToShellTransfer.jl")
 include("ScaleToScale/TriadicOrthogonalDecomposition/TriadicOrthogonalDecomposition.jl")
@@ -117,12 +118,14 @@ using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 export compute_nonlinear_term, compute_nonlinear_term!
 
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
+using .MHDTransfer: calculate_mhd_energy_transfer, calculate_mhd_cross_helicity_transfer
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition
 
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux
+export calculate_mhd_energy_transfer, calculate_mhd_cross_helicity_transfer
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer

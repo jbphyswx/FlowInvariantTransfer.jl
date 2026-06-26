@@ -553,6 +553,42 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "MHD — total energy & cross-helicity conserved; hydro limit" begin
+        N = 16; L = 2π
+        Random.seed!(61)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2     # velocity streamfunction
+        ah = FFTW.fft(randn(N, N)) ./ N^2     # magnetic flux function
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)    # div-free velocity
+        b̂  = cat(im .* ky .* ah, -im .* kx .* ah; dims = 3)    # div-free magnetic field
+        bin = FET.LinearBinning(2π/L)
+
+        e = FET.calculate_mhd_energy_transfer(û, b̂, ks; binning = bin, dealiasing = true,
+            spectral = FET.FFTBackend())
+        Test.@test e isa NamedTuple
+        sE = sum(abs, e.total.transfer_spectrum); Test.@test sE > 0
+        # total energy conserved by the nonlinear terms
+        Test.@test abs(sum(e.total.transfer_spectrum)) < 1e-9 * sE
+        # total = kinetic + magnetic exactly
+        Test.@test e.total.transfer_spectrum ≈ e.kinetic.transfer_spectrum .+ e.magnetic.transfer_spectrum
+
+        # cross-helicity conserved
+        hc = FET.calculate_mhd_cross_helicity_transfer(û, b̂, ks; binning = bin, dealiasing = true,
+            spectral = FET.FFTBackend())
+        Test.@test abs(sum(hc.transfer_spectrum)) < 1e-9 * (sum(abs, hc.transfer_spectrum) + eps())
+
+        # Pure-hydro limit: with b = 0 the MHD kinetic transfer == ordinary spectral flux.
+        b0 = zeros(ComplexF64, N, N, 2)
+        e0 = FET.calculate_mhd_energy_transfer(û, b0, ks; binning = bin, dealiasing = true,
+            spectral = FET.FFTBackend())
+        sf = FET.calculate_spectral_flux(û, ks; binning = bin, dealiasing = true, spectral = FET.FFTBackend())
+        Test.@test isapprox(e0.kinetic.transfer_spectrum, sf.transfer_spectrum;
+            atol = 1e-9 * sum(abs, sf.transfer_spectrum))
+        Test.@test maximum(abs, e0.magnetic.transfer_spectrum) < 1e-12 * (sE + eps())
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π
