@@ -5,6 +5,7 @@ export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
+export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -357,6 +358,61 @@ User-specified shell edges.  Shell n covers wavenumbers in [edges[n], edges[n+1]
 struct CustomBinning{V<:AbstractVector} <: AbstractShellBinning
     edges::V
 end
+
+# ---------------------------------------------------------------------------
+# Shell geometry — WHICH wavenumber coordinate the shells partition
+# ---------------------------------------------------------------------------
+#
+# A binning (LinearBinning, …) sets the shell *spacing*; the geometry sets the *coordinate* that
+# spacing is applied to. Isotropic shells partition |k| (spherical in 3D, annular in 2D). For
+# rotating/stratified flows the canonical anisotropic fluxes Π(k_⊥), Π(k_∥) (Alexakis & Biferale
+# 2018, §IV) partition a subset of components: k_⊥ = √(k_x²+k_y²) (cylindrical) or k_∥ = |k_z|.
+# Geometry only changes which scalar each mode is binned by — the transfer physics is identical.
+
+"""
+    AbstractShellGeometry
+
+Abstract supertype selecting the wavenumber coordinate the shells partition (isotropic `|k|`,
+or an anisotropic projection like `k_⊥`/`k_∥`). Orthogonal to the binning *spacing*
+([`AbstractShellBinning`](@ref)).
+"""
+abstract type AbstractShellGeometry end
+
+"""
+    ShellMagnitude(dims) <: AbstractShellGeometry
+
+Bin modes by the Euclidean magnitude of the wavenumber components in `dims`:
+`κ(k) = √(Σ_{d∈dims} k_d²)`. `dims === nothing` uses **all** spatial dimensions (isotropic `|k|`).
+
+Use the constructors [`IsotropicShells`](@ref), [`PerpendicularShells`](@ref),
+[`ParallelShells`](@ref) for the common cases.
+"""
+struct ShellMagnitude{D} <: AbstractShellGeometry
+    dims::D
+end
+
+"""
+    IsotropicShells() -> ShellMagnitude
+
+Isotropic shells over `|k|` (all dimensions) — the default geometry.
+"""
+IsotropicShells() = ShellMagnitude(nothing)
+
+"""
+    PerpendicularShells(dims=(1, 2)) -> ShellMagnitude
+
+Cylindrical shells over `k_⊥ = √(Σ_{d∈dims} k_d²)` (the horizontal plane by default), giving the
+anisotropic perpendicular flux `Π(k_⊥)` for rotating/stratified flows.
+"""
+PerpendicularShells(dims=(1, 2)) = ShellMagnitude(dims)
+
+"""
+    ParallelShells(dims=(3,)) -> ShellMagnitude
+
+Plane shells over `k_∥ = √(Σ_{d∈dims} k_d²)` (the vertical axis by default), giving the
+anisotropic parallel flux `Π(k_∥)`.
+"""
+ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 
 # ---------------------------------------------------------------------------
 # Backends — two orthogonal axes that compose:

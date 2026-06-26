@@ -443,6 +443,48 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "Shell geometry — isotropic / perpendicular / parallel fluxes" begin
+        M = 16; L = 2π
+        ks = FET.wavenumber_grid((M, M, M), (L, L, L))
+        kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        # shell coordinates: isotropic == |k|; perpendicular uses kx,ky; parallel uses kz
+        Test.@test FET.shell_coordinate(FET.IsotropicShells(), ks) ≈ FET.wavenumber_magnitude_grid(ks)
+        Test.@test FET.shell_coordinate(FET.PerpendicularShells(), ks) ≈ sqrt.(kx.^2 .+ ky.^2)
+        Test.@test FET.shell_coordinate(FET.ParallelShells(), ks)      ≈ abs.(kz)
+
+        # Divergence-free 3D velocity û = i k × Â (non-degenerate after dealiasing at M=16)
+        Random.seed!(41)
+        Â = randn(ComplexF64, M, M, M, 3)
+        ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
+        ûy = im .* (kz .* Â[:, :, :, 1] .- kx .* Â[:, :, :, 3])
+        ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
+        û3 = cat(ûx, ûy, ûz; dims = 4)
+        b  = FET.LinearBinning(2π/L)
+
+        r_def  = FET.calculate_spectral_flux(û3, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
+        r_iso  = FET.calculate_spectral_flux(û3, ks; binning=b, dealiasing=true,
+            spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
+        r_perp = FET.calculate_spectral_flux(û3, ks; binning=b, dealiasing=true,
+            spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
+        r_par  = FET.calculate_spectral_flux(û3, ks; binning=b, dealiasing=true,
+            spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
+
+        # Default geometry IS isotropic (backward compatible).
+        Test.@test r_iso.transfer_spectrum == r_def.transfer_spectrum
+        Test.@test all(isfinite, r_perp.transfer_spectrum)
+        Test.@test all(isfinite, r_par.transfer_spectrum)
+        sT = sqrt(sum(abs2, r_iso.transfer_spectrum)); Test.@test sT > 0   # non-degenerate
+        # Isotropic shells cover every non-DC mode (DC density = 0 here), so the isotropic flux
+        # conserves: Σ_k T(|k|) ≈ 0. (Anisotropic geometries drop a zero-coordinate plane each,
+        # so their sums need NOT vanish — geometry repartitions, it does not conserve per-axis.)
+        Test.@test abs(sum(r_iso.transfer_spectrum)) < 1e-9 * sum(abs, r_iso.transfer_spectrum)
+        # Geometry genuinely changes the partition: fewer shells along a single axis than |k|.
+        Test.@test length(r_par.transfer_spectrum) < length(r_iso.transfer_spectrum)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — CGEF loaded" begin
         # CoarseGrainingEnergyFluxes is loaded at the top of this file, so the call should succeed
         N = 4; L = 2π

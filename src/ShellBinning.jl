@@ -1,8 +1,39 @@
 module ShellBinning
 
 using ..Types: AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
+using ..Types: AbstractShellGeometry, ShellMagnitude
 
-export shell_edges, shell_centers, n_shells, assign_shells
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+
+# ---------------------------------------------------------------------------
+# Shell coordinate — the per-mode scalar the shells partition (set by geometry)
+# ---------------------------------------------------------------------------
+
+"""
+    shell_coordinate(geometry, ks) -> Array
+
+Return an array (shape `ns`) giving the wavenumber coordinate each mode is binned by under
+`geometry`. For [`ShellMagnitude`](@ref) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
+all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
+"""
+function shell_coordinate(g::ShellMagnitude, ks)
+    nd   = length(ks)
+    ns   = ntuple(d -> length(ks[d]), nd)
+    dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
+    all(d -> 1 <= d <= nd, dims) || throw(ArgumentError(
+        "ShellMagnitude dims=$(g.dims) out of range for nd=$nd spatial dimensions."))
+    FT  = float(eltype(ks[1]))
+    out = Array{FT}(undef, ns...)
+    @inbounds for I in CartesianIndices(ns)
+        s = zero(FT)
+        for d in dims
+            kd = FT(ks[d][I[d]])
+            s += kd * kd
+        end
+        out[I] = sqrt(s)
+    end
+    return out
+end
 
 # ---------------------------------------------------------------------------
 # Shell edge generation

@@ -50,6 +50,11 @@ using .Types:
     LogarithmicBinning,
     DyadicBinning,
     CustomBinning,
+    AbstractShellGeometry,
+    ShellMagnitude,
+    IsotropicShells,
+    PerpendicularShells,
+    ParallelShells,
     AbstractExecutionBackend,
     SerialBackend,
     ThreadedBackend,
@@ -74,6 +79,7 @@ export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
+export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -90,8 +96,8 @@ using .Utils:
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 
-using .ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
-export shell_edges, shell_centers, n_shells, assign_shells
+using .ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 
 using .Invariants: transfer_density, transfer_density!
 export transfer_density, transfer_density!

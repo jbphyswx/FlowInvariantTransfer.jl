@@ -1,7 +1,8 @@
 module Workspaces
 
-using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend
-using ..ShellBinning: shell_edges, assign_shells
+using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend,
+               AbstractShellGeometry, IsotropicShells
+using ..ShellBinning: shell_edges, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
@@ -100,8 +101,9 @@ end
 
 Construct a `SpectralFluxWorkspace` for the given input and binning.
 """
-function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
-    k_mag  = wavenumber_magnitude_grid(ks)
+function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
+                               geometry::AbstractShellGeometry = IsotropicShells())
+    k_mag  = shell_coordinate(geometry, ks)
     edges  = shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
@@ -149,9 +151,10 @@ end
 
 Construct a `ShellToShellWorkspace` for the given input and binning.
 """
-function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
+function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
+                               geometry::AbstractShellGeometry = IsotropicShells())
     FT        = real(eltype(velocity_hat))
-    k_mag     = wavenumber_magnitude_grid(ks)
+    k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
     N_sh      = length(edges) - 1
     shell_idx = assign_shells(k_mag, edges)

@@ -1,8 +1,8 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells
 using ..Invariants: transfer_density!
-using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
+using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid, as_component_field
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, ShellToShellWorkspace
@@ -84,9 +84,10 @@ function calculate_shell_to_shell_transfer(
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
+    geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    ws      = ShellToShellWorkspace(velocity_hat, ks, binning)
-    k_mag   = wavenumber_magnitude_grid(ks)
+    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry)
+    k_mag   = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_mag))
     centers = shell_centers(binning, maximum(k_mag))
     N_sh    = length(centers)

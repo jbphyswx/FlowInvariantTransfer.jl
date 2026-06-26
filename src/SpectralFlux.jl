@@ -1,9 +1,9 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, AbstractShellGeometry, IsotropicShells
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
-using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
+using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coords, as_component_field
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
@@ -55,10 +55,11 @@ function calculate_spectral_flux(
     decomposition::AbstractFieldDecomposition = NoDecomposition(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
+    geometry::AbstractShellGeometry = IsotropicShells(),
 )
     decomposed = decompose_field(decomposition, velocity_hat, ks)
     return _calculate_spectral_flux_decomposed(
-        decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral, advecting_hat
+        decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral, advecting_hat, geometry
     )
 end
 
@@ -71,9 +72,10 @@ function _calculate_spectral_flux_decomposed(
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
     advecting_hat,
+    geometry::AbstractShellGeometry,
 )
-    ws        = SpectralFluxWorkspace(velocity_hat, ks, binning)
-    k_mag     = wavenumber_magnitude_grid(ks)
+    ws        = SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry)
+    k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
     centers   = shell_centers(binning, maximum(k_mag))
     shell_idx = assign_shells(k_mag, edges)
@@ -100,13 +102,14 @@ function _calculate_spectral_flux_decomposed(
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
     advecting_hat,
+    geometry::AbstractShellGeometry,
 )
-    ws = SpectralFluxWorkspace(velocity_hat, ks, binning)
+    ws = SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry)
     compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing,
                             spectral=spectral, advecting_hat=advecting_hat)
     N̂ = ws.nonlinear.N̂
 
-    k_mag     = wavenumber_magnitude_grid(ks)
+    k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
     centers   = shell_centers(binning, maximum(k_mag))
     shell_idx = assign_shells(k_mag, edges)
@@ -204,10 +207,11 @@ function calculate_scalar_flux(
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::Bool = true,
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    geometry::AbstractShellGeometry = IsotropicShells(),
 )
     θ̂ = as_component_field(scalar_hat, length(ks))
     return calculate_spectral_flux(θ̂, ks; binning=binning, dealiasing=dealiasing,
-        invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral)
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral, geometry=geometry)
 end
 
 # ---------------------------------------------------------------------------
