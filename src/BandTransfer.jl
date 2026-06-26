@@ -1,6 +1,6 @@
 module BandTransfer
 
-using ..Types: SmoothBands, AbstractInvariant, KineticEnergy, AbstractSpectralBackend,
+using ..Types: SmoothBands, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds, AbstractSpectralBackend,
                DirectSumBackend, AbstractShellGeometry, IsotropicShells
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -66,7 +66,7 @@ function calculate_band_to_band_transfer(
     velocity_hat,
     ks;
     bands::SmoothBands,
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,

@@ -20,8 +20,8 @@ function run_helical_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    total = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
-    hel   = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(),
+    total = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+    hel   = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(),
         decomposition=FET.HelicalDecomposition())
 
     summed = hel.positive.flux .+ hel.negative.flux

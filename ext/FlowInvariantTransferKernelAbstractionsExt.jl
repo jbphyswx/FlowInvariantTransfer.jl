@@ -54,7 +54,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     ks,
     gpu_backend::GPUBackend,
     spectral;            # transform backend for each per-mediator nonlinear term
-    dealiasing::Bool,
+    dealiasing::FET.Types.AbstractDealiasing,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,

@@ -1,6 +1,6 @@
 module ScaleToScaleTransfer
 
-using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractInvariant, KineticEnergy,
+using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds,
                PassiveScalar, AbstractSpectralBackend, DirectSumBackend, FFTBackend
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -38,7 +38,7 @@ A guard errors when `N_modes = prod(size grid) > max_modes`; pass `force=true` t
 
 # Keyword arguments
 - `invariant::AbstractInvariant`: which quadratic invariant (default `KineticEnergy()`).
-- `dealiasing::Bool=true`: 2/3-rule dealiasing of the nonlinear term.
+- `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: 2/3-rule dealiasing of the nonlinear term.
 - `spectral::AbstractSpectralBackend`: transform (`DirectSumBackend()` default, `FFTBackend()` fast).
 - `max_modes::Int=1024`, `force::Bool=false`: resolved-tensor size guard.
 
@@ -50,7 +50,7 @@ function calculate_mode_to_mode_transfer(
     velocity_hat,
     ks;
     invariant::AbstractInvariant = KineticEnergy(),
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     max_modes::Int = 1024,
     force::Bool = false,

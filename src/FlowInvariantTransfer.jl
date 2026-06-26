@@ -60,6 +60,10 @@ using .Types:
     PerpendicularShells,
     ParallelShells,
     SmoothBands,
+    AbstractDealiasing,
+    NoDealiasing,
+    OrszagTwoThirds,
+    PaddedThreeHalves,
     AbstractExecutionBackend,
     SerialBackend,
     ThreadedBackend,
@@ -86,6 +90,7 @@ export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
+export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -254,9 +259,9 @@ PrecompileTools.@setup_workload begin
     û[1, 2, 2] = 0.5    # single mode v
 
     PrecompileTools.@compile_workload begin
-        _ = calculate_spectral_flux(û, ks; binning=LinearBinning(2π/L), dealiasing=false)
+        _ = calculate_spectral_flux(û, ks; binning=LinearBinning(2π/L), dealiasing=NoDealiasing())
         _ = calculate_shell_to_shell_transfer(û, ks;
-                binning=LinearBinning(2π/L), dealiasing=false, verify_antisymmetry=false)
+                binning=LinearBinning(2π/L), dealiasing=NoDealiasing(), verify_antisymmetry=false)
         _ = wavenumber_grid((N,N), (L,L))
         _ = dealiasing_mask((N,N))
     end

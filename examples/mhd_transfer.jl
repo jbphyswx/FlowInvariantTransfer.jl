@@ -20,8 +20,8 @@ function run_mhd_example(; N=128)
     û, b̂, ks, L = evolve_orszag_tang(; N=N)
 
     bin = FET.LinearBinning(2π / L)
-    e  = FET.calculate_mhd_energy_transfer(û, b̂, ks; binning=bin, dealiasing=true, spectral=FET.FFTBackend())
-    hc = FET.calculate_mhd_cross_helicity_transfer(û, b̂, ks; binning=bin, dealiasing=true, spectral=FET.FFTBackend())
+    e  = FET.calculate_mhd_energy_transfer(û, b̂, ks; binning=bin, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+    hc = FET.calculate_mhd_cross_helicity_transfer(û, b̂, ks; binning=bin, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
     println("peak total-energy flux Π_E = ", round(maximum(e.total.flux); sigdigits=4))
 
     # Electric current density j = ∂x b_y − ∂y b_x (physical space) — shows the Orszag–Tang sheets.

@@ -19,9 +19,9 @@ function run_anisotropic_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    iso  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
-    perp = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
-    par  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
+    iso  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
+    perp = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
+    par  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
 
     println("peak Π(|k|)=", round(maximum(iso.flux); sigdigits=3),
             "  Π(k⊥)=", round(maximum(perp.flux); sigdigits=3),

@@ -1,11 +1,12 @@
 module NonlinearTerm
 
 using LinearAlgebra: LinearAlgebra as LA
-using ..Types: AbstractSpectralBackend, DirectSumBackend, FFTBackend
+using ..Types: AbstractSpectralBackend, DirectSumBackend, FFTBackend,
+               AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 using ..Workspaces: NonlinearTermWorkspace
 
 export compute_nonlinear_term, compute_nonlinear_term!
-export _nonlinear_term_fft!   # stub overridden by FFTW extension
+export _nonlinear_term_fft!, _nonlinear_term_padded_fft!   # stubs overridden by FFTW extension
 
 # ---------------------------------------------------------------------------
 # Internal FFTW extension stub
@@ -21,6 +22,17 @@ This stub is overridden by the FFTW extension when FFTW is loaded.
 function _nonlinear_term_fft!(args...; kwargs...)
     throw(ArgumentError(
         "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+end
+
+"""
+    _nonlinear_term_padded_fft!(ws, advected_hat, ks; advecting_hat=advected_hat)
+
+Exact 3/2 zero-padded pseudospectral nonlinear term written into `ws.N̂`. Overridden by the FFTW
+extension; the stub errors when FFTW is not loaded.
+"""
+function _nonlinear_term_padded_fft!(args...; kwargs...)
+    throw(ArgumentError(
+        "PaddedThreeHalves dealiasing requires FFTW. Run `using FFTW` to load the extension."))
 end
 
 # ---------------------------------------------------------------------------
@@ -53,7 +65,7 @@ Array of size `(ns..., M)` containing `𝒩̂ᵢ(k)`.
 function compute_nonlinear_term(
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
 )
@@ -74,23 +86,34 @@ function compute_nonlinear_term!(
     ws::NonlinearTermWorkspace,
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
 )
-    _compute_nonlinear_term!(ws, velocity_hat, ks, spectral; dealiasing=dealiasing, advecting_hat=advecting_hat)
+    _compute_nonlinear_term!(ws, velocity_hat, ks, spectral, dealiasing; advecting_hat=advecting_hat)
     return ws.N̂
 end
 
-# Dispatch on the SPECTRAL (transform) backend — direct DFT vs FFT. `advecting_hat` is the velocity
+# Dispatch on (spectral transform backend, dealiasing strategy). `advecting_hat` is the velocity
 # u_j that does the advecting; `velocity_hat` is the advected field whose gradient ∂_j(·)_i is taken:
 # N_i = (u_adv)_j ∂_j (u)_i. They coincide for plain self-advection, and differ for shell-to-shell
-# mediators ((u_m·∇)u) and scalar/MHD terms.
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::DirectSumBackend; dealiasing, advecting_hat=velocity_hat) =
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
+# mediators ((u_m·∇)u) and scalar/MHD terms. The 2/3 and no-dealias paths share one implementation
+# (a `keep`/truncate flag); the exact 3/2-padding path is a separate, FFT-only routine.
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::DirectSumBackend, ::OrszagTwoThirds; advecting_hat=velocity_hat) =
+    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=true, advecting_hat=advecting_hat)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::DirectSumBackend, ::NoDealiasing; advecting_hat=velocity_hat) =
+    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=false, advecting_hat=advecting_hat)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::DirectSumBackend, ::PaddedThreeHalves; advecting_hat=velocity_hat) =
+    throw(ArgumentError(
+        "PaddedThreeHalves dealiasing requires the FFT path — pass spectral=FFTBackend() (and `using FFTW`). " *
+        "The dependency-free DirectSumBackend supports only NoDealiasing/OrszagTwoThirds."))
 
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend; dealiasing, advecting_hat=velocity_hat) =
-    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=dealiasing, advecting_hat=advecting_hat)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend, ::OrszagTwoThirds; advecting_hat=velocity_hat) =
+    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=advecting_hat)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend, ::NoDealiasing; advecting_hat=velocity_hat) =
+    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=false, advecting_hat=advecting_hat)
+_compute_nonlinear_term!(ws, velocity_hat, ks, ::FFTBackend, ::PaddedThreeHalves; advecting_hat=velocity_hat) =
+    _nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=advecting_hat)
 
 # ---------------------------------------------------------------------------
 # 2/3 dealiasing predicate (shared by input-truncation and output-zeroing)
@@ -138,7 +161,7 @@ function _compute_nonlinear_term_direct!(
     ws::NonlinearTermWorkspace,
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    truncate::Bool = true,   # apply the Orszag 2/3 input/output truncation
     advecting_hat = velocity_hat,
 )
     nd  = length(ks)
@@ -161,7 +184,7 @@ function _compute_nonlinear_term_direct!(
         for phys_I in phys_idxs
             val = zero(complex(FT))
             for spec_I in CartesianIndices(ns)
-                dealiasing && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
+                truncate && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
                 phase = zero(FT)
                 for d in 1:nd
                     xj    = FT(phys_I[d] - 1) / FT(ns[d])
@@ -182,7 +205,7 @@ function _compute_nonlinear_term_direct!(
             for phys_I in phys_idxs
                 val = zero(complex(FT))
                 for spec_I in CartesianIndices(ns)
-                    dealiasing && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
+                    truncate && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
                     kphys = ks[grad_d][spec_I[grad_d]]
                     phase = zero(FT)
                     for d in 1:nd
@@ -229,7 +252,7 @@ function _compute_nonlinear_term_direct!(
     end
 
     # --- zero output above the 2/3 cutoff (inputs already truncated above) ---
-    if dealiasing
+    if truncate
         for I in CartesianIndices(ns)
             _is_dealiased(I, ns, nd) || continue
             for comp in 1:M

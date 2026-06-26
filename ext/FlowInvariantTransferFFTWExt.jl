@@ -49,7 +49,7 @@ function FET.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, 
 end
 
 """
-    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=true, advecting_hat=velocity_hat)
+    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=velocity_hat)
 
 Allocation-free pseudospectral nonlinear term N̂ = FFT[(u_adv·∇)u] written into `ws.N̂`, using
 the pre-planned transforms / scratch in `ws.plans`. The 2/3 input truncation is folded into the
@@ -62,7 +62,7 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
     ws,
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    truncate::Bool = true,
     advecting_hat = velocity_hat,
 )
     pb   = ws.plans
@@ -79,7 +79,7 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
     # j = 1:nd (only the spatial directions of the velocity participate in (u·∇)).
     for j in 1:nd
         a_j = selectdim(advecting_hat, nd+1, j)
-        dealiasing ? (ct .= keep .* a_j) : (ct .= a_j)
+        truncate ? (ct .= keep .* a_j) : (ct .= a_j)
         mul!(ct2, pb.p_bfft, ct)
         uj = selectdim(ws.u_phys, nd+1, j)
         uj .= real.(ct2) ./ Np
@@ -89,7 +89,7 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
     for c in 1:M
         v_c = selectdim(velocity_hat, nd+1, c)
         for j in 1:nd
-            dealiasing ? (ct .= im .* pb.k_comp[j] .* keep .* v_c) :
+            truncate ? (ct .= im .* pb.k_comp[j] .* keep .* v_c) :
                          (ct .= im .* pb.k_comp[j] .* v_c)
             mul!(ct2, pb.p_bfft, ct)
             gcj = selectdim(selectdim(ws.grad_phys, nd+2, j), nd+1, c)
@@ -114,9 +114,71 @@ function FET.NonlinearTerm._nonlinear_term_fft!(
         ct .= Nc
         mul!(ct2, pb.p_fft, ct)
         Nhat_c = selectdim(ws.N̂, nd+1, c)
-        dealiasing ? (Nhat_c .= (ct2 .* keep) ./ Np) : (Nhat_c .= ct2 ./ Np)
+        truncate ? (Nhat_c .= (ct2 .* keep) ./ Np) : (Nhat_c .= ct2 ./ Np)
     end
 
+    return ws.N̂
+end
+
+# ---------------------------------------------------------------------------
+# Exact 3/2 zero-padded nonlinear term (PaddedThreeHalves)
+# ---------------------------------------------------------------------------
+
+# Smallest padded length ≥ 3N/2 with (M − N) even (so the centred block embeds symmetrically).
+function _padded_len(n::Int)
+    m = cld(3n, 2)
+    return iseven(m - n) ? m : m + 1
+end
+
+# Zero-pad an N-grid spectrum into an Ms-grid spectrum (centre the modes via fftshift).
+function _embed_spectrum(A, Ms)
+    nd = ndims(A)
+    c  = FFTW.fftshift(A)
+    B  = zeros(eltype(A), Ms...)
+    o  = ntuple(d -> (Ms[d] - size(A, d)) ÷ 2, nd)
+    B[ntuple(d -> (o[d] + 1):(o[d] + size(A, d)), nd)...] .= c
+    return FFTW.ifftshift(B)
+end
+
+# Truncate an Ms-grid spectrum back to the N-grid `ns` (inverse of `_embed_spectrum`).
+function _truncate_spectrum(A, ns)
+    nd = ndims(A)
+    c  = FFTW.fftshift(A)
+    o  = ntuple(d -> (size(A, d) - ns[d]) ÷ 2, nd)
+    return FFTW.ifftshift(c[ntuple(d -> (o[d] + 1):(o[d] + ns[d]), nd)...])
+end
+
+"""
+    _nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
+
+Exact 3/2 zero-padded pseudospectral nonlinear term `𝒩 = (u_adv·∇)f` written into `ws.N̂`. Each
+field is embedded in a `(3N/2)`-point grid, the product is formed there (so the quadratic
+generates no aliasing into the resolved band), then transformed back and truncated to the original
+`N` modes. Produces the same coefficient normalization as the 2/3 path, so it is a drop-in exact
+alternative. Not allocation-free (the opt-in accuracy mode allocates padded scratch per call).
+"""
+function FET.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
+    nd    = length(ks)
+    ns    = size(velocity_hat)[1:nd]
+    M     = size(velocity_hat, nd+1)              # advected-field components
+    FT    = real(eltype(velocity_hat))
+    Ms    = ntuple(d -> _padded_len(ns[d]), nd)   # padded grid
+    Ntot  = prod(ns); Mtot = prod(Ms)
+    scale = FT(Mtot) / FT(Ntot)^2                 # matches the package N̂ = fft(𝒩)/Ntot convention
+    kc    = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
+
+    # Advecting velocity on the padded physical grid (spatial dirs only), computed once.
+    uM = [real.(FFTW.ifft(_embed_spectrum(selectdim(advecting_hat, nd+1, j), Ms))) for j in 1:nd]
+
+    @inbounds for c in 1:M
+        v_c = selectdim(velocity_hat, nd+1, c)
+        NcM = zeros(FT, Ms...)
+        for j in 1:nd
+            gMj = real.(FFTW.ifft(_embed_spectrum(im .* kc[j] .* v_c, Ms)))
+            NcM .+= uM[j] .* gMj
+        end
+        selectdim(ws.N̂, nd+1, c) .= _truncate_spectrum(FFTW.fft(NcM), ns) .* scale
+    end
     return ws.N̂
 end
 
@@ -149,7 +211,7 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     ws::ShellToShellWorkspace,
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    dealiasing::FET.Types.AbstractDealiasing = FET.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
@@ -161,20 +223,24 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
     N_sh  = size(result.transfer_matrix, 1)
     Np    = FT(prod(ns))
 
-    # Orszag 2/3: truncate inputs before forming products (see _dealias_copy / THEORY.md §0.5).
-    vhat = dealiasing ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
-    ahat = dealiasing ? _dealias_copy(advecting_hat, ns, nd) : advecting_hat
+    do_trunc = dealiasing isa FET.Types.OrszagTwoThirds   # Orszag 2/3 truncation
+    padded   = dealiasing isa FET.Types.PaddedThreeHalves # exact 3/2 padding (per-mediator engine)
 
-    k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-    # Advecting field is the FULL velocity (computed once, spatial dirs only); the band-m primary
-    # field is what gets advected. For energy primary==velocity; for a scalar primary==θ̂.
-    u_full_phys = [real.(FFTW.ifft(selectdim(ahat, nd+1, j))) for j in 1:nd]
+    # Orszag 2/3: truncate inputs before forming products (see _dealias_copy / THEORY.md §0.5).
+    vhat = do_trunc ? _dealias_copy(velocity_hat, ns, nd) : velocity_hat
+
+    # Inline-path scratch (the full velocity advects each band-m field; spatial dirs only). The
+    # padded path instead routes each mediator through the exact 3/2 engine, so skip this there.
+    if !padded
+        ahat = do_trunc ? _dealias_copy(advecting_hat, ns, nd) : advecting_hat
+        k_comp = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
+        u_full_phys = [real.(FFTW.ifft(selectdim(ahat, nd+1, j))) for j in 1:nd]
+    end
 
     # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{c*·N̂_m}, N̂_m = (u·∇)f_m (full velocity advects band-m;
-    # AMP 2005). Accumulated one mediator `m` at a time directly into result.transfer_matrix,
-    # reusing ws.nonlinear.N̂ / ws.transfer_density — peak memory O(N^D), not O(N_sh·N^D) (the old
-    # N_sh-fold allocation was a ~100 GB trap at 256³). For energy A is antisymmetric
-    # (A[n,m]+A[m,n]=0) and reduces as Σ_m A[n,m] = transfer_spectrum[n], so NO ½(A−Aᵀ).
+    # AMP 2005). One mediator `m` at a time into result.transfer_matrix, reusing ws.nonlinear.N̂ /
+    # ws.transfer_density — peak memory O(N^D). For energy A is antisymmetric and reduces as
+    # Σ_m A[n,m] = transfer_spectrum[n], so NO ½(A−Aᵀ).
     fill!(result.transfer_matrix, zero(FT))
     for m in 1:N_sh
         fill!(ws.û_m, zero(eltype(ws.û_m)))
@@ -182,16 +248,22 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
             ws.shell_idx[I] == m || continue
             for c in 1:M; ws.û_m[I, c] = vhat[I, c]; end
         end
-        grad_m   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(ws.û_m, nd+1, c)))
-                     for j in 1:nd] for c in 1:M]
-        N_phys_m = [sum(u_full_phys[j] .* grad_m[c][j] for j in 1:nd) for c in 1:M]
-        for c in 1:M
-            selectdim(ws.nonlinear.N̂, nd+1, c) .= FFTW.fft(N_phys_m[c]) ./ Np
-        end
-        if dealiasing
-            for I in CartesianIndices(ns)
-                FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
-                for c in 1:M; ws.nonlinear.N̂[I, c] = zero(eltype(ws.nonlinear.N̂)); end
+        if padded
+            FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
+                dealiasing=FET.Types.PaddedThreeHalves(), spectral=FET.Types.FFTBackend(),
+                advecting_hat=advecting_hat)
+        else
+            grad_m   = [[real.(FFTW.ifft(im .* k_comp[j] .* selectdim(ws.û_m, nd+1, c)))
+                         for j in 1:nd] for c in 1:M]
+            N_phys_m = [sum(u_full_phys[j] .* grad_m[c][j] for j in 1:nd) for c in 1:M]
+            for c in 1:M
+                selectdim(ws.nonlinear.N̂, nd+1, c) .= FFTW.fft(N_phys_m[c]) ./ Np
+            end
+            if do_trunc
+                for I in CartesianIndices(ns)
+                    FET.NonlinearTerm._is_dealiased(I, ns, nd) || continue
+                    for c in 1:M; ws.nonlinear.N̂[I, c] = zero(eltype(ws.nonlinear.N̂)); end
+                end
             end
         end
         transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)

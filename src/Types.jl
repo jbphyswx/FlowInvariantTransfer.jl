@@ -7,6 +7,7 @@ export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
+export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
@@ -414,6 +415,53 @@ struct SmoothBands{V<:AbstractVector, T}
     logwidth::T
 end
 SmoothBands(centers::AbstractVector; logwidth=0.6) = SmoothBands(centers, float(logwidth))
+
+# ---------------------------------------------------------------------------
+# Dealiasing strategy — how the quadratic-product aliasing error is removed
+# ---------------------------------------------------------------------------
+#
+# A pseudospectral product of two N-mode fields generates wavenumbers up to 2× the maximum, which
+# alias back onto the resolved band. Two standard cures (Canuto et al. 2006; Orszag 1971):
+#   • Orszag 2/3 truncation: zero modes with |k_d| ≥ N_d/3 in the INPUTS and output. Exact on the
+#     retained band |k|<N/3, but discards N/3 ≤ |k| < N/2 — the top of the field's spectrum.
+#   • 3/2 zero-padding: embed the N-mode field in a (3N/2)-point grid, form the product there
+#     (no aliasing), transform back and truncate. Exact for the quadratic term over ALL modes to
+#     Nyquist — nothing is discarded.
+
+"""
+    AbstractDealiasing
+
+Strategy for removing aliasing from the pseudospectral quadratic product. Subtypes:
+[`NoDealiasing`](@ref), [`OrszagTwoThirds`](@ref) (the `dealiasing=true` default), and
+[`PaddedThreeHalves`](@ref) (exact 3/2 zero-padding). The `dealiasing` keyword accepts a `Bool`
+(`true`→`OrszagTwoThirds`, `false`→`NoDealiasing`) or an `AbstractDealiasing` directly.
+"""
+abstract type AbstractDealiasing end
+
+"""
+    NoDealiasing <: AbstractDealiasing
+
+No dealiasing — the raw pseudospectral product, aliasing included. (`dealiasing=false`.)
+"""
+struct NoDealiasing <: AbstractDealiasing end
+
+"""
+    OrszagTwoThirds <: AbstractDealiasing
+
+Orszag 2/3-rule truncation: zero modes with `|k_d| ≥ N_d/3` in the inputs and output. Exact on the
+retained band `|k| < N/3`. The `dealiasing=true` default.
+"""
+struct OrszagTwoThirds <: AbstractDealiasing end
+
+"""
+    PaddedThreeHalves <: AbstractDealiasing
+
+Exact 3/2 zero-padding: form the quadratic product on a `(3N/2)`-point grid so no aliasing reaches
+the resolved band, then truncate back to `N`. Exact for the quadratic nonlinear term over every
+mode up to Nyquist (nothing discarded), at ~`(3/2)^D` higher transform cost. Requires FFTW for the
+fast path.
+"""
+struct PaddedThreeHalves <: AbstractDealiasing end
 
 # ---------------------------------------------------------------------------
 # Shell geometry — WHICH wavenumber coordinate the shells partition

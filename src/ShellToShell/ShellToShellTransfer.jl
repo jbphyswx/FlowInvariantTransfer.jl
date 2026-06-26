@@ -1,6 +1,6 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid, as_component_field
@@ -47,7 +47,7 @@ Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 
 # Keyword Arguments
 - `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(1.0)`.
-- `dealiasing::Bool=true`: Apply 2/3 rule dealiasing.
+- `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 rule dealiasing.
 - `verify_antisymmetry::Bool=true`: Compute `max|T(n,m)+T(m,n)|` and store in result.
 - `spectral::AbstractSpectralBackend`: transform — `DirectSumBackend()` (default) or `FFTBackend()` (FFTW).
 - `execution::AbstractExecutionBackend`: outer (mediator-loop) parallelism — `SerialBackend()` (default),
@@ -78,7 +78,7 @@ function calculate_shell_to_shell_transfer(
     velocity_hat,
     ks;
     binning::AbstractShellBinning = _default_binning(ks),
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
@@ -113,7 +113,7 @@ function calculate_shell_to_shell_transfer!(
     ws::ShellToShellWorkspace,
     velocity_hat,
     ks;
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
@@ -177,7 +177,7 @@ function _calculate_shell_to_shell_direct!(
     ws::ShellToShellWorkspace,
     velocity_hat,
     ks;
-    dealiasing::Bool,
+    dealiasing::AbstractDealiasing,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,

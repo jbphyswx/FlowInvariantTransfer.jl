@@ -21,7 +21,7 @@ function run_mode_to_mode_example(; N=24)
     b = FET.LinearBinning(2π / L)
 
     # Fully-resolved S(k|p): O(N^{2D}); FFTBackend keeps each per-giver term O(N^D log N).
-    m2m = FET.calculate_mode_to_mode_transfer(û, ks; dealiasing=true, spectral=FET.FFTBackend())
+    m2m = FET.calculate_mode_to_mode_transfer(û, ks; dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
     S = m2m.transfer
 
     # Reduce S(k|p) over shells → T(K,Q).
@@ -36,7 +36,7 @@ function run_mode_to_mode_example(; N=24)
     end
 
     # Direct shell-to-shell T(n,m) for comparison.
-    s2s = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
+    s2s = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(),
         verify_antisymmetry=false, spectral=FET.FFTBackend())
     Tdir = s2s.transfer_matrix
     println("max|reduce(S) − T_shell| / ‖T‖ = ",

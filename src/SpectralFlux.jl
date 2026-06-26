@@ -1,6 +1,6 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, AbstractShellGeometry, IsotropicShells
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
@@ -27,7 +27,7 @@ flux Π(K) from Fourier-space velocity data.
 
 # Keyword Arguments
 - `binning::AbstractShellBinning`: Shell binning strategy; default `LinearBinning(1.0)`.
-- `dealiasing::Bool=true`: Apply 2/3 dealiasing rule when computing (u·∇)u.
+- `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 dealiasing rule when computing (u·∇)u.
 - `spectral::AbstractSpectralBackend`: transform backend — `DirectSumBackend()` (default, no deps) or `FFTBackend()` (requires FFTW extension).
 
 # Returns
@@ -50,7 +50,7 @@ function calculate_spectral_flux(
     velocity_hat,
     ks;
     binning::AbstractShellBinning = _default_binning(ks),
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     invariant::AbstractInvariant = KineticEnergy(),
     decomposition::AbstractFieldDecomposition = NoDecomposition(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
@@ -68,7 +68,7 @@ function _calculate_spectral_flux_decomposed(
     velocity_hat,
     ks,
     binning::AbstractShellBinning,
-    dealiasing::Bool,
+    dealiasing::AbstractDealiasing,
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
     advecting_hat,
@@ -98,7 +98,7 @@ function _calculate_spectral_flux_decomposed(
     velocity_hat,
     ks,
     binning::AbstractShellBinning,
-    dealiasing::Bool,
+    dealiasing::AbstractDealiasing,
     invariant::AbstractInvariant,
     spectral::AbstractSpectralBackend,
     advecting_hat,
@@ -134,7 +134,7 @@ function calculate_spectral_flux!(
     velocity_hat,
     ks,
     shell_idx::AbstractArray{Int};
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
@@ -205,7 +205,7 @@ function calculate_scalar_flux(
     scalar_hat,
     ks;
     binning::AbstractShellBinning = _default_binning(ks),
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )

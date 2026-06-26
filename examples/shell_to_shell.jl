@@ -19,7 +19,7 @@ function run_shell_to_shell_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    result = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing=true,
+    result = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(),
         verify_antisymmetry=true, spectral=FET.FFTBackend())
 
     Tn = sqrt(sum(abs2, result.transfer_matrix))

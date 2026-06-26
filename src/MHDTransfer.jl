@@ -1,7 +1,8 @@
 module MHDTransfer
 
 using ..Types: SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend,
-               DirectSumBackend, AbstractShellGeometry, IsotropicShells, KineticEnergy
+               DirectSumBackend, AbstractShellGeometry, IsotropicShells, KineticEnergy,
+               AbstractDealiasing, OrszagTwoThirds
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term
 using ..ShellBinning: shell_edges, shell_centers, assign_shells, shell_coordinate
@@ -82,7 +83,7 @@ function calculate_mhd_energy_transfer(
     magnetic_hat,
     ks;
     binning::AbstractShellBinning,
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
@@ -111,7 +112,7 @@ function calculate_mhd_cross_helicity_transfer(
     magnetic_hat,
     ks;
     binning::AbstractShellBinning,
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )

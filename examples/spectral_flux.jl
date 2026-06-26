@@ -19,7 +19,7 @@ function run_spectral_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FET.LinearBinning(2π / L)
-    result = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
+    result = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
 
     imax = argmax(result.flux)
     println("Shells: ", length(result.k_shells))

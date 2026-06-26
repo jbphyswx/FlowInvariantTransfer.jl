@@ -21,8 +21,8 @@ function run_passive_scalar_example(; N=32)
     û, θ̂, ks, L = evolve_taylor_green(; N=N, with_scalar=true)
 
     b = FET.LinearBinning(2π / L)
-    flux = FET.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing=true, spectral=FET.FFTBackend())
-    s2s  = FET.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, dealiasing=true,
+    flux = FET.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+    s2s  = FET.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, dealiasing = FET.OrszagTwoThirds(),
         verify_antisymmetry=true, spectral=FET.FFTBackend())
 
     println("Peak variance flux Π_θ = ", round(maximum(flux.flux); sigdigits=4))

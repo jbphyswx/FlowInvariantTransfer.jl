@@ -27,7 +27,7 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
     velocity_hat,
     ks,
     spectral;            # transform backend, passed to each per-mediator nonlinear term
-    dealiasing::Bool = true,
+    dealiasing::FET.Types.AbstractDealiasing = FET.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
