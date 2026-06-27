@@ -21,9 +21,10 @@ module TriadicOrthogonalDecomposition
 using LinearAlgebra: LinearAlgebra
 using ..Types: TriadicOrthogonalDecompositionMethod,
                TriadicOrthogonalDecompositionResult,
-               AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend
+               AbstractExecutionBackend, SerialBackend, ThreadedBackend,
+               AbstractSpectralBackend, DirectSumBackend, FFTBackend
 
-export triadic_orthogonal_decomposition
+export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
 # ---------------------------------------------------------------------------
 # Extension stubs — overridden by FFTW / OhMyThreads / Distributed / GPU exts
@@ -71,6 +72,39 @@ Standard Hamming window of length N: w[n] = 0.54 − 0.46·cos(2πn/(N−1)).
 """
 function hamming_window(N)
     return [0.54 - 0.46 * cospi(2 * (n - 1) / (N - 1)) for n in 1:N]
+end
+
+"""
+    hann_window(N) -> Vector{Float64}
+
+Hann (raised-cosine) window of length N: w[n] = ½(1 − cos(2πn/(N−1))). Tapers to zero at both
+ends — lower spectral leakage than Hamming. Pass to `triadic_orthogonal_decomposition` via `window`.
+"""
+function hann_window(N)
+    return [0.5 * (1 - cospi(2 * (n - 1) / (N - 1))) for n in 1:N]
+end
+
+"""
+    tukey_window(N; α=0.5) -> Vector{Float64}
+
+Tukey (tapered-cosine) window of length N: a flat middle with cosine tapers over a fraction `α` of
+the length at each end. `α = 0` is rectangular (no taper), `α = 1` is the Hann window; intermediate
+`α` trades main-lobe width against leakage.
+"""
+function tukey_window(N; α=0.5)
+    0 <= α <= 1 || throw(ArgumentError("tukey_window: α must be in [0,1] (got $α)."))
+    α == 0 && return ones(Float64, N)
+    w = ones(Float64, N)
+    edge = α * (N - 1) / 2
+    @inbounds for n in 1:N
+        x = n - 1
+        if x < edge
+            w[n] = 0.5 * (1 + cospi(x / edge - 1))
+        elseif x > (N - 1) - edge
+            w[n] = 0.5 * (1 + cospi((x - (N - 1) + edge) / edge))
+        end
+    end
+    return w
 end
 
 """
@@ -343,7 +377,8 @@ end
 # Backend dispatch for temporal DFT
 # ---------------------------------------------------------------------------
 
-function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::SerialBackend)
+# Dispatch the temporal DFT on the SPECTRAL (transform) backend.
+function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::DirectSumBackend)
     _temporal_block_dft_direct!(Q_hat_blk, segment, window, win_weight, nDFT)
 end
 
@@ -457,15 +492,12 @@ function _triadic_loop_serial!(
     end
 end
 
-# Backend dispatch for triad loop
-function _dispatch_triadic_loop!(args_tuple...; backend::AbstractExecutionBackend=SerialBackend(), kwargs...)
-    _dispatch_triadic_loop_impl!(backend, args_tuple...; kwargs...)
+# Dispatch the triad loop on the EXECUTION (parallelism) backend.
+function _dispatch_triadic_loop!(args_tuple...; execution::AbstractExecutionBackend=SerialBackend(), kwargs...)
+    _dispatch_triadic_loop_impl!(execution, args_tuple...; kwargs...)
 end
 
 _dispatch_triadic_loop_impl!(::SerialBackend, args...; kwargs...) =
-    _triadic_loop_serial!(args...; kwargs...)
-
-_dispatch_triadic_loop_impl!(::FFTBackend, args...; kwargs...) =
     _triadic_loop_serial!(args...; kwargs...)
 
 _dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
@@ -505,8 +537,9 @@ strength per frequency triad), convective/recipient modes, and a modal energy bu
 - `mean_type`: `:zero` (default), `:blockwise`, or an array (long-time mean to subtract).
 - `return_coefficients::Bool=false`: Also compute expansion coefficients.
 - `return_auxiliary_modes::Bool=false`: Also compute donor/catalyst modes.
-- `backend::AbstractExecutionBackend=SerialBackend()`: Computation backend.
-  `FFTBackend()` uses FFTW for the temporal DFT (much faster).
+- `spectral::AbstractSpectralBackend=DirectSumBackend()`: temporal-DFT transform.
+  `FFTBackend()` uses FFTW (much faster; requires `using FFTW`).
+- `execution::AbstractExecutionBackend=SerialBackend()`: triad-loop parallelism.
   `ThreadedBackend()` parallelises the triad loop (requires OhMyThreads).
 
 # Returns
@@ -536,7 +569,8 @@ function triadic_orthogonal_decomposition(
     mean_type=:zero,
     return_coefficients=false,
     return_auxiliary_modes=false,
-    backend::AbstractExecutionBackend=SerialBackend(),
+    spectral::AbstractSpectralBackend=DirectSumBackend(),
+    execution::AbstractExecutionBackend=SerialBackend(),
 )
     # --- Problem dimensions ---
     dims = size(X)
@@ -590,8 +624,8 @@ function triadic_orthogonal_decomposition(
     # Temporary for block DFT
     Q_hat_blk = zeros(ComplexF64, nDFT, nVar * nx)
 
-    # Determine which backend to use for temporal DFT
-    dft_backend = backend isa FFTBackend ? FFTBackend() : SerialBackend()
+    # Temporal-DFT transform is chosen by the spectral backend.
+    dft_backend = spectral
 
     for iBlk in 1:nBlks
         # Time indices for this block
@@ -663,7 +697,7 @@ function triadic_orthogonal_decomposition(
         weights, nBlks, nFreq, nState, nx, nmode_val,
         Q, LHS,
         return_coefficients, return_auxiliary_modes;
-        backend=backend
+        execution=execution
     )
 
     return TriadicOrthogonalDecompositionResult(

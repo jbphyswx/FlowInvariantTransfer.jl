@@ -204,7 +204,7 @@ function _nufft_type2(scaled_coords::Tuple, û_list::Vector, ms::Tuple, tol::Flo
     return result
 end
 
-function _build_k_component_nufft(ks_1d::Tuple, d::Int, ms::Tuple)
+function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
     nd = length(ms)
     kc = zeros(Float64, ms...)
     for I in CartesianIndices(ms)

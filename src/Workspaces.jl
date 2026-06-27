@@ -1,54 +1,77 @@
 module Workspaces
 
-using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend
-using ..ShellBinning: shell_edges, assign_shells
+using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend,
+               AbstractShellGeometry, IsotropicShells
+using ..ShellBinning: shell_edges, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 
-export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, ScaleToScaleWorkspace
+export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
 # NonlinearTermWorkspace
 # ---------------------------------------------------------------------------
 
 """
-    NonlinearTermWorkspace{CA, RA}
+    _make_fft_plans(velocity_hat, ks)
 
-Preallocated buffers for computing the nonlinear advection term N̂(k) = FFT[(u·∇)u].
+Hook returning an FFT plan/scratch bundle stored in `NonlinearTermWorkspace.plans`, or
+`nothing`. The core returns `nothing` (the direct-DFT path needs no plans); the FFTW
+extension overrides this to build pre-planned transforms + scratch buffers so the
+FFT-accelerated hot path allocates nothing.
+"""
+_make_fft_plans(velocity_hat, ks) = nothing
+
+"""
+    NonlinearTermWorkspace{CA, RA, GA, P}
+
+Preallocated buffers for the generalized pseudospectral nonlinear term
+`𝒩(k) = FFT[(u·∇)f]`, where the advecting velocity `u` has `nd` advecting (spatial)
+components and the advected field `f` has `M` components. For the momentum term `f = u`
+(`M = D`); for passive-scalar / vector-potential advection `f = θ`/`a` (`M = 1`).
 
 # Fields
-- `u_phys::RA`:    `(ns..., D)` real physical-space velocities.
-- `grad_phys::RA`: `(ns..., D, nd)` real physical-space velocity gradients ∂u_i/∂x_j.
-- `N_phys::RA`:    `(ns..., D)` real physical-space nonlinear term.
-- `N̂::CA`:         `(ns..., D)` complex spectral output buffer.
+- `u_phys::RA`:    `(ns..., nd)` real physical-space advecting velocity (rank `nd+1`); only the
+  `nd` spatial directions of the velocity participate in `(u·∇)`, so this never depends on `D`.
+- `grad_phys::GA`: `(ns..., M, nd)` real physical-space gradients ∂f_i/∂x_j (rank `nd+2`).
+- `N_phys::RA`:    `(ns..., M)` real physical-space nonlinear term (rank `nd+1`).
+- `N̂::CA`:         `(ns..., M)` complex spectral output buffer (rank `nd+1`).
+- `plans::P`:      FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
 
-Parametric on array types `CA` (complex) and `RA` (real) — no element-type bounds.
+Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), `GA`
+(real gradient buffer, rank `nd+2`), and the plan-bundle type `P` — no element-type bounds,
+and each field is concretely typed (`grad_phys` has a separate parameter because its rank
+differs from the others; `u_phys` and `N_phys` share `RA` — same rank/eltype, possibly
+different trailing extent).
 """
-struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray}
+struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray, P}
     u_phys::RA
-    grad_phys::RA
+    grad_phys::GA
     N_phys::RA
     N̂::CA
+    plans::P
 end
 
 """
-    NonlinearTermWorkspace(velocity_hat, ks)
+    NonlinearTermWorkspace(advected_hat, ks)
 
-Construct a `NonlinearTermWorkspace` sized for `velocity_hat` and wavenumber tuple `ks`.
+Construct a `NonlinearTermWorkspace` sized for advecting an `M`-component field `advected_hat`
+(shape `(ns..., M)`) by a velocity, on wavenumber tuple `ks` (length `nd`). The advecting
+velocity needs only its `nd` spatial components, so `u_phys` is `(ns..., nd)` regardless of how
+many components the velocity carries. For the momentum self-advection term pass the velocity
+itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned transforms.
 """
-function NonlinearTermWorkspace(velocity_hat, ks)
-    FT  = real(eltype(velocity_hat))
-    CT  = eltype(velocity_hat)   # complex type
-    ns  = size(velocity_hat)[1:length(ks)]
-    D   = size(velocity_hat, ndims(velocity_hat))
+function NonlinearTermWorkspace(advected_hat, ks)
+    FT  = real(eltype(advected_hat))
     nd  = length(ks)
-    RA  = Array{FT}
-    CA  = Array{CT}
-    return NonlinearTermWorkspace{CA, RA}(
-        RA(undef, ns..., D),       # u_phys
-        RA(undef, ns..., D, nd),   # grad_phys
-        RA(undef, ns..., D),       # N_phys
-        CA(undef, ns..., D),       # N̂
-    )
+    ns  = size(advected_hat)[1:nd]
+    M   = size(advected_hat, nd + 1)              # advected-field component count
+    # `similar` propagates the array kind (CPU Array, CuArray, …) — GPU-generic.
+    u_phys    = similar(advected_hat, FT, ns..., nd)    # advecting velocity, spatial dirs only
+    grad_phys = similar(advected_hat, FT, ns..., M, nd)
+    N_phys    = similar(advected_hat, FT, ns..., M)
+    N̂         = similar(advected_hat, ns..., M)         # keeps complex eltype
+    plans     = _make_fft_plans(advected_hat, ks)
+    return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
 end
 
 # ---------------------------------------------------------------------------
@@ -78,17 +101,18 @@ end
 
 Construct a `SpectralFluxWorkspace` for the given input and binning.
 """
-function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
-    k_mag  = wavenumber_magnitude_grid(ks)
+function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
+                               geometry::AbstractShellGeometry = IsotropicShells())
+    k_mag  = shell_coordinate(geometry, ks)
     edges  = shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
     ns     = size(velocity_hat)[1:length(ks)]
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
-        Vector{FT}(undef, N_sh),
-        Vector{FT}(undef, N_sh),
-        Array{FT}(undef, ns...),
+        similar(velocity_hat, FT, N_sh),     # T_spec
+        similar(velocity_hat, FT, N_sh),     # flux
+        similar(velocity_hat, FT, ns...),    # transfer_density
     )
 end
 
@@ -127,9 +151,10 @@ end
 
 Construct a `ShellToShellWorkspace` for the given input and binning.
 """
-function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
+function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
+                               geometry::AbstractShellGeometry = IsotropicShells())
     FT        = real(eltype(velocity_hat))
-    k_mag     = wavenumber_magnitude_grid(ks)
+    k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
     N_sh      = length(edges) - 1
     shell_idx = assign_shells(k_mag, edges)
@@ -137,56 +162,11 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning)
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks),
         similar(velocity_hat),                   # û_m
-        Matrix{FT}(undef, N_sh, N_sh),           # T_mat
-        Vector{FT}(undef, N_sh),                 # net_transfer
+        similar(velocity_hat, FT, N_sh, N_sh),   # T_mat
+        similar(velocity_hat, FT, N_sh),         # net_transfer
         shell_idx,
-        Array{FT}(undef, ns...),
+        similar(velocity_hat, FT, ns...),        # transfer_density
     )
-end
-
-# ---------------------------------------------------------------------------
-# ScaleToScaleWorkspace
-# ---------------------------------------------------------------------------
-
-"""
-    ScaleToScaleWorkspace{M, V, IA}
-
-Preallocated buffers for `calculate_mode_to_mode_transfer!`.
-
-# Fields
-- `T_mat::M`:        Output transfer matrix (N_sh × N_sh), written in-place.
-- `net_transfer::V`: Net per-mode transfer buffer.
-- `shell_idx::IA`:   Integer shell-index array.
-"""
-struct ScaleToScaleWorkspace{M<:AbstractMatrix, V<:AbstractArray, IA<:AbstractArray{Int}}
-    T_mat::M
-    net_transfer::V
-    shell_idx::IA
-end
-
-"""
-    ScaleToScaleWorkspace(velocity_hat, ks, binning)
-
-Construct a `ScaleToScaleWorkspace` for the given input and binning.
-"""
-function ScaleToScaleWorkspace(velocity_hat, ks, binning)
-    FT        = real(eltype(velocity_hat))
-    nd        = length(ks)
-    ns        = size(velocity_hat)[1:nd]
-    k_mag     = wavenumber_magnitude_grid(ks)
-
-    if !isnothing(binning)
-        edges     = shell_edges(binning, maximum(k_mag))
-        N_sh      = length(edges) - 1
-        shell_idx = assign_shells(k_mag, edges)
-        T_mat     = Matrix{FT}(undef, N_sh, N_sh)
-    else
-        shell_idx = zeros(Int, ns...)
-        T_mat     = Matrix{FT}(undef, 0, 0)
-    end
-
-    net_transfer = Array{FT}(undef, ns...)
-    return ScaleToScaleWorkspace(T_mat, net_transfer, shell_idx)
 end
 
 end # module Workspaces

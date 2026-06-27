@@ -21,15 +21,18 @@ FINUFFT = "d8beea63-0952-562e-9c6a-8e8ef7364055"
 FlowFieldSpectra = "e5f08a8b-40ae-41d5-97fc-c483fb8f16ad"
 HelmholtzDecomposition = "10a91b07-9549-4913-979d-72f12272cfcc"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 NUFSHT = "e99b67a3-9706-455a-90e2-85b195a33206"
 OhMyThreads = "67456a42-1dca-4109-a031-0a68de7e3ad5"
+PencilArrays = "0e08944d-e94e-41b1-9406-dcf66b6a9d2e"
+PencilFFTs = "4a48f351-57a6-4416-9ec4-c37015456aae"
 SharedArrays = "1a1011a3-84de-559e-8e89-a11a2f7dc383"
 
 [sources]
-CoarseGrainingEnergyFluxes = {subdir = "julia/CoarseGrainingEnergyFluxes.jl", url = "https://github.com/jbphyswx/CoarseGrainingEnergyFluxes.git"}
+CoarseGrainingEnergyFluxes = {url = "https://github.com/jbphyswx/CoarseGrainingEnergyFluxes.jl.git"}
 HelmholtzDecomposition = {url = "https://github.com/jbphyswx/HelmholtzDecomposition.jl.git"}
-FlowFieldSpectra = {path = "../FlowFieldSpectra.jl"}
-NUFSHT = {path = "../NUFSHT.jl"}
+FlowFieldSpectra = {url = "https://github.com/jbphyswx/FlowFieldSpectra.jl.git"}
+NUFSHT = {url = "https://github.com/jbphyswx/NUFSHT.jl.git"}
 
 [extensions]
 FlowInvariantTransferCGEFExt = "CoarseGrainingEnergyFluxes"
@@ -41,8 +44,10 @@ FlowInvariantTransferFlowFieldSpectraExt = "FlowFieldSpectra"
 FlowInvariantTransferFSHExt = "FastSphericalHarmonics"
 FlowInvariantTransferHelmholtzDecompositionExt = "HelmholtzDecomposition"
 FlowInvariantTransferKernelAbstractionsExt = "KernelAbstractions"
+FlowInvariantTransferMPIExt = "MPI"
 FlowInvariantTransferNUFSHTExt = "NUFSHT"
 FlowInvariantTransferOhMyThreadsExt = "OhMyThreads"
+FlowInvariantTransferPencilFFTsExt = ["MPI", "PencilFFTs", "PencilArrays"]
 
 [compat]
 CairoMakie = "0.15"
@@ -56,11 +61,14 @@ FlowFieldSpectra = "0.1"
 HelmholtzDecomposition = "0.1"
 KernelAbstractions = "0.9"
 LinearAlgebra = "1"
+MPI = "0.20"
 NUFSHT = "0.1"
 OhMyThreads = "0.8"
-PrecompileTools = "1.3"
+PencilArrays = "0.19, 0.20"
+PencilFFTs = "0.15"
+PrecompileTools = "1.2, 1.3"
 SharedArrays = "1"
-julia = "1.9"
+julia = "1.11"
 
 [extras]
 CoarseGrainingEnergyFluxes = "a8c2fbc6-778a-4d2b-8a8c-9c98efc7e8cf"

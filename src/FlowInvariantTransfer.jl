@@ -6,17 +6,18 @@ using PrecompileTools: PrecompileTools
 # Submodule includes
 # ---------------------------------------------------------------------------
 
-include("types.jl")
-include("utils.jl")
+include("Types.jl")
+include("Utils.jl")
 include("Invariants.jl")
 include("Decomposition.jl")
-include("ShellToShell/ShellBinning.jl")
+include("ShellBinning.jl")
 include("Filters.jl")
 include("Workspaces.jl")
 include("NonlinearTerm.jl")
 include("SpectralFlux.jl")
 include("CoarseGrainingFlux.jl")
 include("ShellToShell/ShellToShellTransfer.jl")
+include("BandTransfer.jl")
 include("ScaleToScale/TriadicOrthogonalDecomposition/TriadicOrthogonalDecomposition.jl")
 include("ScaleToScale/ScaleToScaleTransfer.jl")
 
@@ -35,11 +36,14 @@ using .Types:
     KineticEnergy,
     Helicity,
     Enstrophy,
+    PassiveScalar,
     AbstractFieldDecomposition,
     NoDecomposition,
     HelmholtzDecomposition,
     RotationalDecomposition,
     DivergentDecomposition,
+    HelicalDecomposition,
+    ToroidalPoloidalDecomposition,
     AbstractFilter,
     SharpSpectralFilter,
     GaussianFilter,
@@ -49,12 +53,24 @@ using .Types:
     LogarithmicBinning,
     DyadicBinning,
     CustomBinning,
+    AbstractShellGeometry,
+    ShellMagnitude,
+    IsotropicShells,
+    PerpendicularShells,
+    ParallelShells,
+    SmoothBands,
+    AbstractDealiasing,
+    NoDealiasing,
+    OrszagTwoThirds,
+    PaddedThreeHalves,
     AbstractExecutionBackend,
     SerialBackend,
     ThreadedBackend,
     DistributedBackend,
     GPUBackend,
     AutoBackend,
+    AbstractSpectralBackend,
+    DirectSumBackend,
     FFTBackend,
     NUFFTBackend,
     SHTBackend,
@@ -67,11 +83,15 @@ using .Types:
     TriadicOrthogonalDecompositionResult
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
-export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
-export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition
+export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
+export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
+export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
+export SmoothBands
+export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
+export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
 using .Utils:
@@ -86,8 +106,8 @@ using .Utils:
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 
-using .ShellBinning: shell_edges, shell_centers, n_shells, shell_mask, assign_shells
-export shell_edges, shell_centers, n_shells, shell_mask, assign_shells
+using .ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 
 using .Invariants: transfer_density, transfer_density!
 export transfer_density, transfer_density!
@@ -104,18 +124,71 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 export compute_nonlinear_term, compute_nonlinear_term!
 
-using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!
+using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
-using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
-using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!
-using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition
+using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
+using .BandTransfer: calculate_band_to_band_transfer
+using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
+using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
-export calculate_spectral_flux, calculate_spectral_flux!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
 export calculate_coarse_graining_flux
-export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
-export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!
-export triadic_orthogonal_decomposition
+export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
+export calculate_band_to_band_transfer
+export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
+export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 export calculate_energy_transfer
+
+# ---------------------------------------------------------------------------
+# Extension stubs for MPI / PencilFFTs (distributed)
+# ---------------------------------------------------------------------------
+
+"""
+    mpi_batch_map(f, items; comm=MPI.COMM_WORLD, reduce=:gather, root=0)
+
+Distribute an embarrassingly-parallel **batch** of independent inputs across MPI ranks: each
+rank applies `f` to a round-robin subset of `items` (e.g. snapshots of a time series), then the
+per-item outputs are combined. With `reduce=:gather` (default) the results are **collated** into
+one `Vector` in the original order of `items`, returned on every rank; `reduce=:sum`/`:mean`
+returns the element-wise reduction (the outputs of `f` must support `+`, and `/` for `:mean`); a
+callable `reduce` is applied as a binary combiner. This is the "batch axis" of distribution —
+orthogonal to the pencil axis ([`pencil_spectral_flux`](@ref)), which splits a single grid.
+
+Requires `using MPI` to load the extension.
+"""
+function mpi_batch_map(args...; kwargs...)
+    throw(ArgumentError("mpi_batch_map requires MPI. Run `using MPI` to load the extension."))
+end
+
+"""
+    pencil_spectral_flux(u_phys, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant) -> (centers, transfer_spectrum, flux)
+
+Distributed spectral transfer/flux for a single grid split across MPI ranks along the **pencil
+axis**: `u_phys` is the physical-space velocity held as a `PencilArray` (each rank owns a pencil
+of the global grid). The pseudospectral nonlinear term is evaluated with a transpose-based
+distributed FFT (PencilFFTs), the transfer density is shell-binned locally, and the per-shell
+spectrum is `MPI.Allreduce`d to a global result identical on every rank (matching the serial
+[`calculate_spectral_flux`](@ref) on the same field). Use this when one snapshot's grid is too
+large for a single node; for many independent snapshots use [`mpi_batch_map`](@ref) instead.
+
+Requires `using MPI, PencilFFTs, PencilArrays` to load the extension.
+"""
+function pencil_spectral_flux(args...; kwargs...)
+    throw(ArgumentError("pencil_spectral_flux requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+"""
+    build_pencil_plan(ns, comm=MPI.COMM_WORLD; T=Float64) -> PencilFFTPlan
+
+Convenience constructor for the distributed complex-to-complex FFT plan used by
+[`pencil_spectral_flux`](@ref), with an auto-balanced MPI process grid. Requires
+`using MPI, PencilFFTs, PencilArrays`.
+"""
+function build_pencil_plan(args...; kwargs...)
+    throw(ArgumentError("build_pencil_plan requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+export mpi_batch_map, pencil_spectral_flux, build_pencil_plan
 
 # ---------------------------------------------------------------------------
 # Extension stubs for CairoMakie
@@ -175,7 +248,7 @@ result = calculate_energy_transfer(SpectralFluxMethod(LinearBinning(2π/L)), û,
 function calculate_energy_transfer(
     method::SpectralFluxMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_spectral_flux(velocity_hat, ks; binning=method.binning, kwargs...)
@@ -194,7 +267,7 @@ end
 function calculate_energy_transfer(
     method::ShellToShellTransferMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_shell_to_shell_transfer(velocity_hat, ks; binning=method.binning, kwargs...)
@@ -203,11 +276,11 @@ end
 function calculate_energy_transfer(
     method::ModeToModeTransferMethod,
     velocity_hat::AbstractArray{<:Complex},
-    ks::Tuple;
+    ks;
     kwargs...,
 )
     return calculate_mode_to_mode_transfer(velocity_hat, ks;
-        binning=method.binning, invariant=method.invariant, kwargs...)
+        invariant=method.invariant, kwargs...)
 end
 
 function calculate_energy_transfer(
@@ -234,9 +307,9 @@ PrecompileTools.@setup_workload begin
     û[1, 2, 2] = 0.5    # single mode v
 
     PrecompileTools.@compile_workload begin
-        _ = calculate_spectral_flux(û, ks; binning=LinearBinning(2π/L), dealiasing=false)
+        _ = calculate_spectral_flux(û, ks; binning=LinearBinning(2π/L), dealiasing=NoDealiasing())
         _ = calculate_shell_to_shell_transfer(û, ks;
-                binning=LinearBinning(2π/L), dealiasing=false, verify_antisymmetry=false)
+                binning=LinearBinning(2π/L), dealiasing=NoDealiasing(), verify_antisymmetry=false)
         _ = wavenumber_grid((N,N), (L,L))
         _ = dealiasing_mask((N,N))
     end

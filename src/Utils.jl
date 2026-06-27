@@ -4,6 +4,25 @@ using LinearAlgebra: LinearAlgebra as LA
 
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
+export as_component_field
+
+# ---------------------------------------------------------------------------
+# Component-axis normalization
+# ---------------------------------------------------------------------------
+
+"""
+    as_component_field(f, nd) -> array of rank nd+1
+
+Normalize a field to the package's `(ns..., M)` component-axis convention: a rank-`nd` array
+`(ns...)` (e.g. a scalar) is reshaped to `(ns..., 1)`; a rank-`nd+1` array is returned unchanged.
+"""
+function as_component_field(f, nd::Int)
+    r = ndims(f)
+    r == nd     && return reshape(f, size(f)..., 1)
+    r == nd + 1 && return f
+    throw(ArgumentError(
+        "field has $r dims; expected nd=$nd (shape (ns...)) or nd+1=$(nd+1) (shape (ns...,1))."))
+end
 
 # ---------------------------------------------------------------------------
 # Wavenumber grid construction (matches FFTW fftfreq convention)
@@ -94,6 +113,12 @@ function dealiasing_mask(ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
     return mask
 end
 
+"""
+    dealiasing_mask!(mask, ns; rule=:twothirds) -> mask
+
+In-place version of [`dealiasing_mask`](@ref): write the keep/discard Bool mask for grid shape `ns`
+into `mask` (`rule = :twothirds` for the Orszag 2/3 cutoff, otherwise the Nyquist half).
+"""
 function dealiasing_mask!(mask::AbstractArray{Bool}, ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
     threshold = rule === :twothirds ? 1.0/3.0 : 0.5
     for I in CartesianIndices(ns)

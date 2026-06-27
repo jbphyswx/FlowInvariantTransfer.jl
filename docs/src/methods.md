@@ -59,34 +59,34 @@ The net energy gain of shell n is ``\sum_m T(n,m)``.
 
 ---
 
-## Mode-to-Mode Triad Transfer S(k|p|q)
+## Mode-to-Mode Triad Transfer S(k|p)
 
-The mode-to-mode triad transfer is the **most fundamental** scale-to-scale diagnostic.
-It gives the energy transferred *to* receiver mode ``\mathbf{k}`` *from* giver ``\mathbf{p}``,
-mediated by ``\mathbf{q}``, with the triad closure constraint ``\mathbf{k} = \mathbf{p} + \mathbf{q}``:
+The mode-to-mode transfer is the **finest** scale-to-scale object: the rate at which the invariant
+is delivered *to* receiver mode ``\mathbf{k}`` *from* giver mode ``\mathbf{p}`` (mediated by
+``\mathbf{q}=\mathbf{k}-\mathbf{p}``). It is built directly from the validated pseudospectral
+nonlinear term — for each giver mode ``\mathbf{p}``, ``\hat{N}_{\mathbf p}=\widehat{(u\cdot\nabla)u_{\mathbf p}}``
+(the full velocity advecting the single-mode field ``u_{\mathbf p}``), and
 
 ```math
-S(\mathbf{k}|\mathbf{p}|\mathbf{q}) = -\text{Im}\bigl\{
-    [\mathbf{k} \cdot \hat{\mathbf{u}}(\mathbf{q})] \,
-    [\hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{\mathbf{u}}(\mathbf{p})]
-\bigr\}
+S(\mathbf{k}|\mathbf{p}) = \text{Re}\bigl\{ \hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{N}_{\mathbf p}(\mathbf{k}) \bigr\}
 ```
 
+(generalized per invariant via `transfer_density`). This construction is exact and inherits the
+correct structure (all verified by tests).
+
 ### Properties
-- **Giver/receiver antisymmetry:** ``S(\mathbf{k}|\mathbf{p}|\mathbf{q}) = -S(\mathbf{p}|\mathbf{k}|\mathbf{q})``
-- **Net transfer:** ``T(\mathbf{k}) = \sum_{\mathbf{p}} S(\mathbf{k}|\mathbf{p}|\mathbf{q}=\mathbf{k}-\mathbf{p})``
-- **Conservation:** ``\sum_{\mathbf{k}} T(\mathbf{k}) = 0``
+- **Reduces:** ``\sum_{\mathbf p} S(\mathbf{k}|\mathbf{p}) = T(\mathbf{k})`` — the spectral transfer
+- **Antisymmetric:** ``S(\mathbf{k}|\mathbf{p}) = -S(\mathbf{p}|\mathbf{k})`` (incompressible)
+- **Conserves:** ``\sum_{\mathbf{k}}\sum_{\mathbf p} S(\mathbf{k}|\mathbf{p}) = 0``
+
+The result carries `net_transfer` (``T(k)``) and `transfer` (the resolved ``S(k|p)``, shape
+`(ns..., ns...)`). Summed over shells it gives the shell-to-shell matrix ``T(n,m)``.
 
 ### Reduction Hierarchy
 
-All other diagnostics are reductions of the mode-to-mode tensor:
-
 ```
-S(k|p|q)   delta in vector k   most fundamental, O(N^{2D})
-   │  sum over directions on |k|=K, |p|=Q
-   ▼
-T(K,Q)     delta in |k|        magnitude-to-magnitude
-   │  finite shell width
+S(k|p)     resolved triads      finest, O(N^{2D})
+   │  sum over shells (k,p)
    ▼
 T(n,m)     sharp Fourier shells (shell-to-shell)
    │  sum over givers
@@ -96,10 +96,12 @@ T(k), Π(K) spectral flux
 
 ### Computational Cost
 
-The full tensor requires ``O(N^{2D})`` operations — exact but expensive. With a binning
-strategy, the code also computes the shell-reduced matrix ``T(K,Q)`` simultaneously.
+Resolving every receiver/giver pair is ``O(N_\text{modes})`` nonlinear-term evaluations —
+``O(N_\text{modes}\,N^D\log N)`` with `FFTBackend` and an ``O(N_\text{modes}^2)`` result tensor; a
+mode-count guard errors above `max_modes` (pass `force=true` to override). For the aggregates prefer
+the cheaper `calculate_spectral_flux` / `calculate_shell_to_shell_transfer`.
 
-**References:** Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book).
+**References:** Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book); Alexakis & Biferale (2018).
 
 ---
 
@@ -114,10 +116,17 @@ by the `invariant` keyword argument.
 | `KineticEnergy()` | ``E = \tfrac{1}{2}\int |\mathbf{u}|^2`` | ``\sum_c \text{Re}[\hat{u}_c^* \hat{N}_c]`` | Forward (3D), inverse (2D) |
 | `Helicity()` | ``H = \int \mathbf{u}\cdot\boldsymbol{\omega}`` (3D) | ``\sum_c \text{Re}[\hat{\omega}_c^* \hat{N}_c]``, ``\hat{\boldsymbol{\omega}} = i\mathbf{k}\times\hat{\mathbf{u}}`` | Forward, co-directional with ``E`` |
 | `Enstrophy()` | ``\Omega = \tfrac{1}{2}\int \omega^2`` (2D) | ``\text{Re}[\hat{\omega}^* \hat{N}_\omega]``, scalar vorticity | Forward, counter-directional to ``E`` |
+| `PassiveScalar()` | ``E_\theta = \tfrac{1}{2}\int \theta^2`` | ``\text{Re}[\hat{\theta}^* \hat{N}_\theta]``, ``\hat{N}_\theta=\widehat{(u\cdot\nabla)\theta}`` | Forward (any D); conserved |
 
 In 2D turbulence, kinetic energy cascades *inversely* (upscale) while enstrophy cascades
 *forward* (downscale) — the Kraichnan–Batchelor dual cascade. In 3D, energy and helicity
 both cascade forward (co-directional).
+
+A **passive scalar** ``\theta`` advected by the velocity is handled by the same engine (it is the
+*advected* field, the velocity merely advects it); the convenience wrappers `calculate_scalar_flux`,
+`calculate_scalar_shell_to_shell_transfer`, and `calculate_scalar_mode_to_mode_transfer` set
+`invariant=PassiveScalar()` and `advecting_hat=velocity`. The identical path computes the buoyancy /
+available-potential-energy variance and the QG potential enstrophy — pass that field as the scalar.
 
 **References:** Kraichnan (1967); Alexakis & Biferale (2018), §3.5–3.6.
 
@@ -153,9 +162,38 @@ The decomposition is backed by `HelmholtzDecomposition.jl` and supports both phy
 !!! note "Helmholtz ≠ helical ≠ toroidal/poloidal"
     Helmholtz separates divergent from rotational flow. The **helical ±** decomposition
     splits the rotational part into curl-eigenmode chiralities. **Toroidal/poloidal**
-    splits the solenoidal part by geometry. These are distinct decompositions.
+    splits the solenoidal part by geometry. These are distinct decompositions, all available as
+    `decomposition=` (`HelmholtzDecomposition`, `HelicalDecomposition`, `ToroidalPoloidalDecomposition`).
+
+### Per-component partial fluxes
+
+`calculate_partial_fluxes(...; decomposition=...)` resolves the flux by the component of *each* of
+the three fields in a triad: with ``u=\sum_s u_s``,
+``T^{s_k s_p s_q}(k)=\text{Re}\{\hat{u}_{s_k}^*\cdot\widehat{(u_{s_p}\cdot\nabla)u_{s_q}}\}``, giving
+``n^3`` channels that sum to the full flux. With `HelicalDecomposition` these are the **eight
+helical channels** — the homochiral ones (``s_k=s_p=s_q``) drive the inverse cascade, the
+heterochiral the forward (Waleffe 1992; Biferale, Musacchio & Toschi 2012; Alexakis 2017);
+`calculate_helical_partial_fluxes` is the shortcut. With `HelmholtzDecomposition` the off-diagonal
+channels are the **rotational↔divergent cross-flux** (zero for incompressible flow).
 
 **References:** Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023).
+
+---
+
+## Anisotropic geometry, smooth bands, and dealiasing
+
+**Shell geometry** (`geometry=`) sets which wavenumber coordinate the shells partition: isotropic
+``|k|`` ([`IsotropicShells`](@ref)), or the anisotropic ``k_\perp`` / ``k_\parallel``
+([`PerpendicularShells`](@ref) / [`ParallelShells`](@ref)) that give the directional fluxes
+``\Pi(k_\perp)``, ``\Pi(k_\parallel)`` for rotating/stratified flows (Alexakis & Biferale 2018, §IV).
+
+**Smooth band-to-band** ``T(K,Q)`` ([`calculate_band_to_band_transfer`](@ref), [`SmoothBands`](@ref))
+replaces the sharp shell indicator with a graded log-Gaussian partition of unity (Eyink & Aluie
+2009); it is antisymmetric, conserves, and reduces to the band-summed transfer spectrum.
+
+**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; exact
+on ``|k|<N/3``), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
+that is alias-free over every retained mode to Nyquist (FFT path).
 
 ---
 

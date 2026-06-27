@@ -25,14 +25,16 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
     result,
     ws,
     velocity_hat,
-    ks::Tuple;
-    dealiasing::Bool = true,
+    ks,
+    spectral;            # transform backend, passed to each per-mediator nonlinear term
+    dealiasing::FET.Types.AbstractDealiasing = FET.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     nd        = length(ks)
     ns        = size(velocity_hat)[1:nd]
-    D         = size(velocity_hat, nd+1)
+    M         = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT        = real(eltype(velocity_hat))
     N_sh      = size(result.transfer_matrix, 1)
     shell_idx = ws.shell_idx
@@ -46,16 +48,18 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
         fill!(û_m, zero(eltype(û_m)))
         for I in CartesianIndices(ns)
             shell_idx[I] == m || continue
-            for c in 1:D
+            for c in 1:M
                 û_m[I, c] = velocity_hat[I, c]
             end
         end
 
+        # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field
+        # (AMP 2005) — for energy gives an antisymmetric A[n,m] reducing to transfer_spectrum[n].
         FET.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
-            dealiasing=dealiasing, backend=FET.SerialBackend())
+            dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
         N̂_m = local_ws.N̂
 
-        local_density = Array{FT}(undef, ns...)
+        local_density = similar(velocity_hat, FT, ns...)
         FET.Invariants.transfer_density!(local_density, invariant, velocity_hat, N̂_m, ks)
 
         for n in 1:N_sh
@@ -160,61 +164,6 @@ function FET.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
                     Xi_out[(fi_l, fi_n)] = (donor=donor_mode[:, 1:nm], catalyst=catalyst_mode[:, 1:nm])
                 end
             end
-        end
-    end
-end
-
-# ---------------------------------------------------------------------------
-# Thread-parallel mode-to-mode transfer
-# ---------------------------------------------------------------------------
-
-function FET.ScaleToScaleTransfer._mode_to_mode_threaded!(
-    ws,
-    velocity_hat,
-    ks::Tuple;
-    binning,
-    invariant,
-    dealiasing,
-)
-    nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd+1)
-    FT = real(eltype(velocity_hat))
-
-    fill!(ws.net_transfer, zero(FT))
-    if binning !== nothing
-        fill!(ws.T_mat, zero(FT))
-    end
-
-    mask = dealiasing ? FET.Utils.dealiasing_mask(ns) : trues(ns...)
-    lk = ReentrantLock()
-
-    OhMyThreads.@tasks for k_idx in CartesianIndices(ns)
-        if !dealiasing || mask[k_idx]
-            net_k = zero(FT)
-            for p_idx in CartesianIndices(ns)
-                if !dealiasing || mask[p_idx]
-                    # q = k - p
-                    q_idx = CartesianIndex(Tuple(mod(k_idx[d] - p_idx[d], ns[d]) + 1 for d in 1:nd))
-                    if !dealiasing || mask[q_idx]
-                        S_val = FET.ScaleToScaleTransfer.compute_triad_S(invariant, velocity_hat, k_idx, p_idx, q_idx, ks, D)
-                        net_k += S_val
-
-                        if binning !== nothing
-                            K_sh = ws.shell_idx[k_idx]
-                            Q_sh = ws.shell_idx[p_idx]
-                            if K_sh > 0 && Q_sh > 0
-                                lock(lk) do
-                                    ws.T_mat[K_sh, Q_sh] += S_val
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            ws.net_transfer[k_idx] = net_k
-        else
-            ws.net_transfer[k_idx] = zero(FT)
         end
     end
 end

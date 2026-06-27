@@ -1,8 +1,39 @@
 module ShellBinning
 
 using ..Types: AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
+using ..Types: AbstractShellGeometry, ShellMagnitude
 
-export shell_edges, shell_centers, shell_mask, n_shells, assign_shells
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+
+# ---------------------------------------------------------------------------
+# Shell coordinate — the per-mode scalar the shells partition (set by geometry)
+# ---------------------------------------------------------------------------
+
+"""
+    shell_coordinate(geometry, ks) -> Array
+
+Return an array (shape `ns`) giving the wavenumber coordinate each mode is binned by under
+`geometry`. For [`ShellMagnitude`](@ref) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
+all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
+"""
+function shell_coordinate(g::ShellMagnitude, ks)
+    nd   = length(ks)
+    ns   = ntuple(d -> length(ks[d]), nd)
+    dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
+    all(d -> 1 <= d <= nd, dims) || throw(ArgumentError(
+        "ShellMagnitude dims=$(g.dims) out of range for nd=$nd spatial dimensions."))
+    FT  = float(eltype(ks[1]))
+    out = Array{FT}(undef, ns...)
+    @inbounds for I in CartesianIndices(ns)
+        s = zero(FT)
+        for d in dims
+            kd = FT(ks[d][I[d]])
+            s += kd * kd
+        end
+        out[I] = sqrt(s)
+    end
+    return out
+end
 
 # ---------------------------------------------------------------------------
 # Shell edge generation
@@ -39,7 +70,7 @@ function shell_edges(b::LogarithmicBinning, k_max::Real)
 end
 
 function shell_edges(b::DyadicBinning, k_max::Real)
-    return shell_edges(LogarithmicBinning(b.k₀, 2.0), k_max)
+    return shell_edges(LogarithmicBinning(b.k₀, oftype(b.k₀, 2)), k_max)
 end
 
 function shell_edges(b::CustomBinning, k_max::Real)
@@ -84,31 +115,13 @@ function n_shells(b::AbstractShellBinning, k_max::Real)
 end
 
 """
-    shell_mask(k_mag, edges, n) -> BitArray
-
-Return a boolean array the same shape as `k_mag` indicating which grid points
-fall in shell n: `edges[n] <= |k| < edges[n+1]`.
-
-# Arguments
-- `k_mag::AbstractArray`: Wavenumber magnitude at each grid point.
-- `edges::AbstractVector`: Shell edge vector (from `shell_edges`).
-- `n::Int`: 1-based shell index.
-"""
-function shell_mask(k_mag::AbstractArray, edges::AbstractVector, n::Int)
-    1 <= n <= length(edges) - 1 ||
-        throw(BoundsError(edges, n+1))
-    lo = edges[n]
-    hi = edges[n+1]
-    return @. lo <= k_mag < hi
-end
-
-"""
     assign_shells(k_mag, edges) -> Array{Int}
 
 Return an integer array (same shape as `k_mag`) where `[I] = n` if
 `edges[n] <= k_mag[I] < edges[n+1]`, and `0` if the mode falls outside all shells.
 
-Single allocation; replaces `[shell_mask(k_mag, edges, n) for n in 1:N_sh]`.
+One integer per mode (single allocation, cache-friendly): the canonical shell-membership
+representation used by every transfer accumulation kernel.
 """
 function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
     idx  = similar(k_mag, Int)

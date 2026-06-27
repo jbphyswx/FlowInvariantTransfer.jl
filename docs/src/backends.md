@@ -1,228 +1,286 @@
-# Backends & Extensions
+# Backends, Dealiasing & Extensions
 
-This page documents each execution backend, when to use it, and how extensions are loaded.
+Transfer diagnostics are configured along **two orthogonal axes**, plus a dealiasing
+strategy. This page documents each, when to use it, and how extensions are loaded.
 
-## Backend Overview
+## Two backend axes
 
-| Backend | Dependency | Best For |
-|---------|-----------|----------|
-| [`SerialBackend`](@ref) | None | Reference results, debugging, small grids |
-| [`FFTBackend`](@ref) | `FFTW` | Production spectral diagnostics (spectral flux, shell-to-shell, TOD) |
-| [`ThreadedBackend`](@ref) | `OhMyThreads` | Multi-core parallelism for shell/mode loops and TOD |
-| [`DistributedBackend`](@ref) | `Distributed` + `SharedArrays` | Multi-node or many-process parallelism |
-| [`GPUBackend`](@ref) | `KernelAbstractions` + `CUDA` | Large-grid shell-to-shell and mode-to-mode on CUDA GPUs |
-| [`AutoBackend`](@ref) | Varies | Automatic best-available selection |
-| [`NUFFTBackend`](@ref) | `FINUFFT` | Irregular Cartesian grids |
-| [`SHTBackend`](@ref) | `FastSphericalHarmonics` | Regular spherical grids |
-| [`NUFSHTBackend`](@ref) | `NUFSHT` | Scattered spherical data |
+The package never conflates *which transform* it uses with *how that work is run*:
 
----
+- **Spectral backend** (`spectral::AbstractSpectralBackend`) — **which transform** computes the
+  pseudospectral nonlinear term: [`DirectSumBackend`](@ref) (direct DFT, no deps, the correctness
+  oracle), [`FFTBackend`](@ref) (FFTW, the `O(Nᴰ log N)` workhorse), [`NUFFTBackend`](@ref)
+  (FINUFFT, scattered Cartesian), [`SHTBackend`](@ref) (regular spherical), [`NUFSHTBackend`](@ref)
+  (scattered spherical).
+- **Execution backend** (`execution::AbstractExecutionBackend`) — **how the outer work** (shell/mode
+  loops and reductions) is parallelised: [`SerialBackend`](@ref), [`ThreadedBackend`](@ref)
+  (OhMyThreads), [`DistributedBackend`](@ref) (`Distributed`/`SharedArrays`),
+  [`GPUBackend`](@ref)`{B}` (KernelAbstractions), [`AutoBackend`](@ref) (best-available).
 
-## SerialBackend
-
-The reference implementation. Uses direct O(N²) summation for the nonlinear term and
-all accumulation loops. No external dependencies.
+They compose: e.g. `spectral = FFTBackend(), execution = ThreadedBackend()` runs FFT nonlinear
+terms with a threaded mediator loop. A typical call:
 
 ```julia
-result = calculate_spectral_flux(û, ks;
-    binning = LinearBinning(1.0),
-    backend = SerialBackend())
-```
-
-**When to use:** Debugging, correctness verification, very small grids (N ≤ 16).
-
----
-
-## FFTBackend
-
-Production fast path using FFTW for all Fourier transforms. Reduces the nonlinear term
-computation from O(N²) to O(N log N) via pseudospectral evaluation:
-
-1. IFFT velocity and derivatives to physical space
-2. Multiply pointwise (physical-space products)
-3. FFT back to spectral space
-4. Apply 2/3 dealiasing mask
-
-```julia
-using FFTW  # loads the extension automatically
-
-result = calculate_spectral_flux(û, ks;
-    binning = LinearBinning(1.0),
-    backend = FFTBackend())
-```
-
-**When to use:** Standard production runs. Dominant speedup for spectral flux and
-shell-to-shell transfer on grids N ≥ 32.
-
-**Supports:** Spectral flux, shell-to-shell transfer, TOD.
-
----
-
-## ThreadedBackend
-
-Multi-threaded parallelism via OhMyThreads. Parallelises the outer loop over mediator
-shells (shell-to-shell), receiver modes (mode-to-mode), and time blocks (TOD).
-
-```julia
-using OhMyThreads  # loads the extension
+using FFTW, OhMyThreads   # load the two extensions
 
 result = calculate_shell_to_shell_transfer(û, ks;
-    binning = LinearBinning(1.0),
-    backend = ThreadedBackend())
+    binning   = LinearBinning(1.0),
+    dealiasing = OrszagTwoThirds(),
+    spectral  = FFTBackend(),
+    execution = ThreadedBackend())
 ```
 
-**When to use:** Multi-core machines, especially for shell-to-shell with many shells
-or mode-to-mode triads with moderate grid sizes.
+| Spectral backend | Dependency | Best for |
+|---|---|---|
+| [`DirectSumBackend`](@ref) | None | Reference results, debugging, tiny grids (the oracle) |
+| [`FFTBackend`](@ref) | `FFTW` | Production spectral diagnostics on regular periodic grids |
+| [`NUFFTBackend`](@ref) | `FINUFFT` | Scattered / non-uniform Cartesian data |
+| [`SHTBackend`](@ref) | `FastSphericalHarmonics` | Regular latitude–longitude grids |
+| [`NUFSHTBackend`](@ref) | `NUFSHT` | Scattered spherical observations |
 
-**Supports:** Shell-to-shell, mode-to-mode, TOD, spectral flux.
+| Execution backend | Dependency | Best for |
+|---|---|---|
+| [`SerialBackend`](@ref) | None | Default; small/medium grids |
+| [`ThreadedBackend`](@ref) | `OhMyThreads` | Multi-core mediator/triad loops |
+| [`DistributedBackend`](@ref) | `Distributed` + `SharedArrays` | Many-process single-node |
+| [`GPUBackend`](@ref) | `KernelAbstractions` + vendor pkg | Large grids on GPU (CUDA validated) |
+| [`AutoBackend`](@ref) | Varies | Automatic best-available execution |
 
 ---
 
-## DistributedBackend
+## Dealiasing
 
-Multi-process parallelism using Julia's `Distributed` standard library with
-`SharedArrays` for conflict-free parallel writing. Uses `@distributed (+)` reduction
-over mediator shells (shell-to-shell) or mode chunks (mode-to-mode).
+Pseudospectral products alias high wavenumbers back onto resolved modes. Every nonlinear-term
+entry point takes a `dealiasing::AbstractDealiasing` strategy (a **type**, so dispatch — not a
+boolean — selects the path):
+
+- [`OrszagTwoThirds`](@ref) **(default)** — zero the upper third of every input field *before*
+  forming the product (exact on retained modes `|k| < N/3`). Works with any spectral backend.
+- [`PaddedThreeHalves`](@ref) — exact `3/2` zero-padding: embed into a `3/2`-sized grid, multiply,
+  truncate back. No aliasing at all on any retained mode. **FFT-only** (`DirectSumBackend +
+  PaddedThreeHalves` throws).
+- [`NoDealiasing`](@ref) — raw product; only for analytic single-triad tests where no aliasing
+  can occur.
 
 ```julia
-using Distributed
-using SharedArrays
-addprocs(4)
-@everywhere using FlowInvariantTransfer
-
-# Convert velocity to SharedArray for worker access
-s_û = SharedArray(û)
-
-result = calculate_shell_to_shell_transfer(s_û, ks;
-    binning = LinearBinning(1.0),
-    backend = DistributedBackend())
+calculate_spectral_flux(û, ks; dealiasing = PaddedThreeHalves(), spectral = FFTBackend())
 ```
 
-**When to use:** Large grids where the computation exceeds single-machine threading,
-or multi-node cluster environments.
-
-**Supports:** Shell-to-shell, mode-to-mode.
+Aliasing breaks conservation (`Σ_k T(k) ≈ 0`), so the test suite asserts conservation under the
+dealiased paths.
 
 ---
 
-## GPUBackend
+## Spectral backends
 
-Device-generic GPU execution via KernelAbstractions. Implements custom `@kernel`
-functions for transfer density computation, shell accumulation, and triad loops.
-Uses `@atomic` for concurrent writes to the shell-to-shell matrix.
+### DirectSumBackend
+
+The reference implementation: direct `O(N²)` summation for the nonlinear term. No external
+dependencies, always available, and the oracle every fast path is tested against.
 
 ```julia
-using KernelAbstractions
-using CUDA
-
-# Transfer data to GPU
-û_gpu = CuArray(û)
-ks_gpu = map(CuArray, ks)
-
-result = calculate_shell_to_shell_transfer(û_gpu, ks_gpu;
-    binning = LinearBinning(1.0),
-    backend = GPUBackend(CUDABackend()))
+calculate_spectral_flux(û, ks; binning = LinearBinning(1.0), spectral = DirectSumBackend())
 ```
 
-**When to use:** Large 2D/3D grids where the parallelism of shell-to-shell or
-mode-to-mode loops maps well to GPU architectures.
+**When to use:** debugging, correctness verification, very small grids (N ≤ 16).
 
-**Currently supports:** CUDA only. AMDGPU and Metal are deferred.
+### FFTBackend
 
-**Supports:** Shell-to-shell, mode-to-mode (both with all three invariants).
-
----
-
-## AutoBackend
-
-Automatically selects the best available backend at call time, checking in order:
-distributed → threaded → serial. Transform fast-paths (FFT) are chosen independently
-based on whether their extensions are loaded.
+Production fast path via FFTW. Reduces the nonlinear term from `O(N²)` to `O(Nᴰ log N)`:
+IFFT to physical space → pointwise product → FFT back → apply the dealiasing strategy. Plans are
+stored in the workspace and applied with `mul!`/`ldiv!`.
 
 ```julia
-result = calculate_spectral_flux(û, ks;
-    binning = LinearBinning(1.0),
-    backend = AutoBackend())
+using FFTW   # loads the extension automatically
+calculate_spectral_flux(û, ks; binning = LinearBinning(1.0), spectral = FFTBackend())
 ```
 
----
+**When to use:** standard production runs on regular periodic grids (N ≥ 32). Also the only backend
+that supports `PaddedThreeHalves` dealiasing.
 
-## NUFFTBackend
+### NUFFTBackend / SHTBackend / NUFSHTBackend
 
-Non-uniform fast Fourier transform for irregular Cartesian grids, backed by FINUFFT.
-Computes regular Fourier coefficients from scattered data, then delegates to the
-standard spectral diagnostics.
-
-```julia
-using FINUFFT
-result = calculate_coarse_graining_flux(velocity_fields, coords, ℓ, filter;
-    backend = NUFFTBackend())
-```
-
----
-
-## SHTBackend
-
-Spherical harmonic transform front-end for regular latitude-longitude grids, backed
-by FastSphericalHarmonics. Transforms physical-space velocity components to spherical
-harmonic coefficients, then delegates to the core spectral calculations.
+Front-ends for non-uniform Cartesian (FINUFFT), regular spherical (FastSphericalHarmonics), and
+scattered spherical (NUFSHT) data. They transform input data to regular Fourier/spherical-harmonic
+coefficients, then delegate to the core spectral diagnostics.
 
 ```julia
 using FastSphericalHarmonics
-
-# velocity_fields = (u, v) on a regular spherical grid
-# coords = (θ, φ) coordinate vectors
 result = calculate_energy_transfer(
     SpectralFluxMethod(LinearBinning(1.0)),
-    velocity_fields, coords, (Nθ,);
-    backend = SHTBackend())
+    velocity_fields, coords, (Nθ,); spectral = SHTBackend())
 ```
 
 ---
 
-## NUFSHTBackend
+## Execution backends
 
-Non-uniform spherical harmonic transform for scattered spherical data, backed by
-NUFSHT.jl. Handles observations at arbitrary (θ, φ) locations.
+### SerialBackend
+
+Single-threaded, no dependencies. The default `execution` for every diagnostic.
+
+### ThreadedBackend
+
+Multi-threaded via OhMyThreads with thread-local accumulators (no locks). Parallelises the outer
+loop over mediator shells (shell-to-shell), receiver modes (mode-to-mode), and triads (TOD).
 
 ```julia
-using NUFSHT
-
-result = calculate_energy_transfer(
-    SpectralFluxMethod(LinearBinning(1.0)),
-    velocity_fields, coords, (lmax+1,);
-    backend = NUFSHTBackend(), tol=1e-8)
+using OhMyThreads
+calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(1.0),
+    spectral = FFTBackend(), execution = ThreadedBackend())
 ```
+
+!!! note "FFTW intra-transform threads ≠ `ThreadedBackend`"
+    `ThreadedBackend` parallelises the **outer** shell/mode loop. FFTW also has its own
+    **intra-transform** multithreading, set globally with `FFTW.set_num_threads(n)`, which speeds
+    up each individual FFT. The two are orthogonal and compose; enabling FFTW threads never changes
+    results (asserted by the test suite). Don't oversubscribe — with `execution = ThreadedBackend()`
+    each task already runs a transform, so leave FFTW at one thread (or partition cores between the
+    two levels).
+
+### DistributedBackend
+
+Multi-process via `Distributed` + `SharedArrays`, using `@distributed (+)` reduction over mediator
+shells / mode chunks.
+
+```julia
+using Distributed, SharedArrays
+addprocs(4); @everywhere using FlowInvariantTransfer
+calculate_shell_to_shell_transfer(SharedArray(û), ks;
+    binning = LinearBinning(1.0), execution = DistributedBackend())
+```
+
+### GPUBackend
+
+Device-generic GPU execution via KernelAbstractions — custom `@kernel` functions for transfer
+density, shell accumulation (`Atomix.@atomic` scatter-add), and triad loops; all buffers allocated
+with `similar(velocity_hat, …)` so they follow the input array type.
+
+```julia
+using KernelAbstractions, CUDA
+û_gpu = CuArray(û); ks_gpu = map(CuArray, ks)
+calculate_shell_to_shell_transfer(û_gpu, ks_gpu;
+    binning = LinearBinning(1.0), execution = GPUBackend(CUDABackend()))
+```
+
+The device kernels (transfer density for KE/helicity/enstrophy, shell reduction) and their dispatch
+are **validated on the KernelAbstractions CPU backend** (`GPUBackend(KA.CPU())`) against the serial
+reference to machine precision — so the parallel logic is correct independent of hardware. The only
+piece that needs a real GPU is the on-device FFT: pass `spectral = FFTBackend()` with a `CuArray`
+input so cuFFT rides `AbstractFFTs`. AMDGPU/Metal run the same kernels but are not yet
+hardware-validated.
+
+```julia
+using KernelAbstractions
+result = calculate_shell_to_shell_transfer(û, ks;
+    binning = LinearBinning(1.0), execution = GPUBackend(KA.CPU()))  # CPU backend: same kernels, no GPU
+```
+
+### AutoBackend
+
+Selects the best available execution backend at call time (distributed → threaded → serial). The
+spectral fast path is chosen independently from whichever spectral extension is loaded.
+
+---
+
+## Distributed with MPI — two axes
+
+The single-node `DistributedBackend` above shares one array across processes. For genuine
+**multi-process / multi-node** work there are two distinct ways to distribute, and the package
+provides one entry point for each (loaded by `using MPI` — the pencil axis also needs
+`PencilFFTs, PencilArrays`). MPI.jl bundles its own `mpiexec`, so a launcher works out of the box;
+both paths are validated single-machine with `mpiexec -n 2`.
+
+### Batch axis — many independent inputs ([`mpi_batch_map`](@ref))
+
+When you have *many* snapshots (a time series) that each fit in one node's memory, distribute the
+**set of inputs**: each rank applies `f` to a round-robin subset, then results are **collated** in
+original order (default) or reduced. No communication during each item's computation — embarrassingly
+parallel. This is the common post-processing mode.
+
+```julia
+using FlowInvariantTransfer, FFTW, MPI
+MPI.Init()
+
+f(û) = calculate_spectral_flux(û, ks; binning = LinearBinning(dk), spectral = FFTBackend()).flux
+
+series = mpi_batch_map(f, snapshots)                 # Vector of per-snapshot fluxes, in order
+mean_Π = mpi_batch_map(f, snapshots; reduce = :mean) # ensemble average instead of collation
+```
+
+`reduce` accepts `:gather` (default), `:sum`, `:mean`, or a binary combiner function; the combined
+result is returned on every rank.
+
+### Pencil axis — one grid too big for a node ([`pencil_spectral_flux`](@ref))
+
+When a *single* snapshot's grid doesn't fit on one node, split **that grid** into pencils (one slab
+per rank). The pseudospectral nonlinear term then needs transpose/all-to-all communication, handled
+by a PencilFFTs distributed FFT. The per-shell KE transfer is `MPI.Allreduce`d to a global result
+identical on every rank — equal to the serial `calculate_spectral_flux` on the same field (validated
+to machine precision).
+
+```julia
+using FlowInvariantTransfer, MPI, PencilFFTs, PencilArrays
+MPI.Init()
+
+plan = build_pencil_plan((N, N), MPI.COMM_WORLD)     # auto-balanced process grid
+u    = ntuple(_ -> allocate_input(plan), 2)          # fill each rank's LOCAL portion of u, v
+res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
+```
+
+The two axes are complementary and compose (a batch of large grids = batch axis over pencil-axis
+groups). The pencil path currently covers kinetic energy on isotropic `|k|` shells.
 
 ---
 
 ## Backend Support Matrix
 
-| Diagnostic | Serial | FFT | Threaded | Distributed | GPU |
-|-----------|--------|-----|----------|-------------|-----|
-| Spectral flux Π(K) | ✓ | ✓ | ✓ | — | — |
-| Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode S(k\|p\|q) | ✓ | — | ✓ | ✓ | ✓ |
-| Coarse-graining Π_ℓ(x) | — | — | — | — | — |
-| TOD | ✓ | ✓ | ✓ | — | — |
+`spectral` ∈ {DirectSum, FFT}; `execution` ∈ {Serial, Threaded, Distributed, GPU}.
 
-Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes extension
-and has its own parallelism model.
+Spectral axis = which transform builds the nonlinear term (every diagnostic supports
+DirectSum + FFT). Execution axis = which parallelism runs the outer loop; only the diagnostics with
+an outer loop over shells/triads expose it (the rest run serially over the single FFT path).
+
+| Diagnostic | DirectSum | FFT | Serial | Threaded | Distributed | GPU |
+|-----------|:---------:|:---:|:------:|:--------:|:-----------:|:---:|
+| Spectral flux Π(K) | ✓ | ✓ | ✓ | — | — | — |
+| Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | — | — | — |
+| Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | — | — | — |
+| Partial / decomposed fluxes | ✓ | ✓ | ✓ | — | — | — |
+| TOD | ✓ | ✓ | ✓ | ✓ | — | — |
+| Coarse-graining Π_ℓ(x) | — | — | — | — | — | — |
+| Distributed (MPI) | — | ✓ | — | — | batch + pencil | — |
+
+Notes: the net per-mode transfer `T(k)` and the magnitude matrix `T(K,Q)` are routed through the
+fast FFT spectral-flux / shell-to-shell paths (exact, `O(Nᴰ log N)`); the fully mode-resolved
+`S(k|p)` tensor is the only query that needs the `O(N^{2D})` brute loop (guarded by a mode-count
+limit, `force=true` to override). The single-machine `execution = Threaded/Distributed/GPU` axis
+applies to the diagnostics with an outer loop (shell-to-shell, TOD); spectral flux / mode-to-mode /
+band-to-band run serially over one FFT pass. MPI (batch + pencil axes) is a separate distribution
+layer documented above. Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes
+extension and has its own parallelism model.
 
 ---
 
 ## Extension Loading
 
-Extensions are loaded automatically when you `using` their trigger package:
+Extensions load automatically when you `using` their trigger package:
 
 ```julia
-using FlowInvariantTransfer  # lean core only
-using FFTW                   # → FFTWExt loaded, FFTBackend available
-using OhMyThreads            # → OhMyThreadsExt loaded, ThreadedBackend available
-using HelmholtzDecomposition # → HelmholtzDecompositionExt loaded, decompose_field works
+using FlowInvariantTransfer  # lean core only (DirectSumBackend, SerialBackend)
+using FFTW                   # → FFTBackend, PaddedThreeHalves
+using OhMyThreads            # → ThreadedBackend
+using KernelAbstractions     # → GPUBackend (+ a vendor pkg, e.g. CUDA)
+using MPI                    # → mpi_batch_map (batch axis)
+using PencilFFTs, PencilArrays  # (+ MPI) → pencil_spectral_flux / build_pencil_plan (pencil axis)
+using HelmholtzDecomposition # → decompose_field / Helmholtz partial fluxes
+using FINUFFT                # → NUFFTBackend
+using FastSphericalHarmonics # → SHTBackend
+using NUFSHT                 # → NUFSHTBackend
 ```
 
-If you call a backend whose extension isn't loaded, you get a clear error message:
+Calling a backend whose extension isn't loaded gives a clear error:
 
 ```
 ArgumentError: Threaded mode-to-mode transfer requires OhMyThreads. Run `using OhMyThreads` to load the extension.

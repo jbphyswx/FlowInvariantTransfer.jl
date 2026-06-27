@@ -1,13 +1,14 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, FFTBackend, ThreadedBackend, AbstractInvariant, KineticEnergy
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 using ..Invariants: transfer_density!
-using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
-using ..Utils: wavenumber_magnitude_grid
+using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+using ..Utils: wavenumber_magnitude_grid, as_component_field
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, ShellToShellWorkspace
 
-export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!
+export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!,
+       calculate_scalar_shell_to_shell_transfer
 
 # ---------------------------------------------------------------------------
 # Internal FFTW-path stub (overridden by FlowInvariantTransferFFTWExt)
@@ -34,7 +35,8 @@ end
 
 """
     calculate_shell_to_shell_transfer(velocity_hat, ks;
-        binning, dealiasing=true, verify_antisymmetry=true, backend=nothing)
+        binning, dealiasing=OrszagTwoThirds(), verify_antisymmetry=true,
+        spectral=DirectSumBackend(), execution=SerialBackend())
         -> ShellToShellResult
 
 Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
@@ -46,9 +48,11 @@ Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 
 # Keyword Arguments
 - `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(1.0)`.
-- `dealiasing::Bool=true`: Apply 2/3 rule dealiasing.
+- `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 rule dealiasing.
 - `verify_antisymmetry::Bool=true`: Compute `max|T(n,m)+T(m,n)|` and store in result.
-- `backend::AbstractExecutionBackend`: `SerialBackend()` (default), `FFTBackend()` (requires FFTW), or `ThreadedBackend()` (requires OhMyThreads).
+- `spectral::AbstractSpectralBackend`: transform — `DirectSumBackend()` (default) or `FFTBackend()` (FFTW).
+- `execution::AbstractExecutionBackend`: outer (mediator-loop) parallelism — `SerialBackend()` (default),
+  `ThreadedBackend()` (OhMyThreads), `DistributedBackend()`, or `GPUBackend(...)`.
 
 # Returns
 `ShellToShellResult` with:
@@ -73,15 +77,18 @@ O(N_shells² · N^D log N^D) with FFTW; O(N_shells² · N^{2D}) direct-sum.
 """
 function calculate_shell_to_shell_transfer(
     velocity_hat,
-    ks::Tuple;
+    ks;
     binning::AbstractShellBinning = _default_binning(ks),
-    dealiasing::Bool = true,
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
+    advecting_hat = velocity_hat,
+    geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    ws      = ShellToShellWorkspace(velocity_hat, ks, binning)
-    k_mag   = wavenumber_magnitude_grid(ks)
+    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry)
+    k_mag   = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_mag))
     centers = shell_centers(binning, maximum(k_mag))
     N_sh    = length(centers)
@@ -90,8 +97,9 @@ function calculate_shell_to_shell_transfer(
     net     = Vector{FT}(undef, N_sh)
     # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, backend;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
+    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, execution, spectral;
+        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
+        advecting_hat=advecting_hat)
     return ShellToShellResult(centers, edges, T_mat, net, max_asym)
 end
 
@@ -105,25 +113,50 @@ function calculate_shell_to_shell_transfer!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple;
-    dealiasing::Bool = true,
+    ks;
+    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
-    backend::AbstractExecutionBackend = SerialBackend(),
+    spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
+    advecting_hat = velocity_hat,
 )
-    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, backend;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant)
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution, spectral;
+        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
+        advecting_hat=advecting_hat)
     return result
 end
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend; kwargs...) =
+"""
+    calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ShellToShellResult
+
+Shell-to-shell transfer of passive-scalar **variance** `T_θ(n,m)`: the rate at which scalar
+variance is transferred from scalar-shell `m` to scalar-shell `n`, mediated by the velocity:
+
+    T_θ(n,m) = Σ_{k∈S_n} Re{ θ̂*(k) · 𝒩̂_m(k) },   𝒩̂_m = FFT[(u·∇)θ_m],   θ_m = θ̂·χ_m.
+
+The scalar field is band-filtered and carried; the velocity advects it. Thin wrapper over
+[`calculate_shell_to_shell_transfer`](@ref) with `invariant = PassiveScalar()` and
+`advecting_hat = velocity_hat`. `scalar_hat` may be `(ns...)` or `(ns..., 1)`. As with energy,
+`T_θ(n,m)` is antisymmetric for incompressible `u` and reduces to `T_θ(k)` over mediators.
+"""
+function calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...)
+    θ̂ = as_component_field(scalar_hat, length(ks))
+    return calculate_shell_to_shell_transfer(θ̂, ks;
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
+end
+
+# Dispatch on (execution, spectral). Serial loop: direct vs the optimized FFT path; the
+# threaded/distributed/GPU execution backends (extensions) parallelise the mediator loop and
+# pass the spectral backend down to each per-mediator nonlinear term.
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend, spectral::DirectSumBackend; kwargs...) =
     _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; kwargs...)
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::FFTBackend; kwargs...) =
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend, spectral::FFTBackend; kwargs...) =
     _shell_to_shell_fft!(result, ws, velocity_hat, ks; kwargs...)
 
-_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend; kwargs...) =
-    _shell_to_shell_threaded!(result, ws, velocity_hat, ks; kwargs...)
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend, spectral::AbstractSpectralBackend; kwargs...) =
+    _shell_to_shell_threaded!(result, ws, velocity_hat, ks, spectral; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Direct reference implementation
@@ -144,14 +177,15 @@ function _calculate_shell_to_shell_direct!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
-    ks::Tuple;
-    dealiasing::Bool,
+    ks;
+    dealiasing::AbstractDealiasing,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
+    advecting_hat = velocity_hat,
 )
     nd    = length(ks)
     ns    = size(velocity_hat)[1:nd]
-    D     = size(velocity_hat, nd+1)
+    M     = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT    = real(eltype(velocity_hat))
     N_sh  = size(result.transfer_matrix, 1)
 
@@ -162,20 +196,23 @@ function _calculate_shell_to_shell_direct!(
         fill!(ws.û_m, zero(eltype(ws.û_m)))
         for I in CartesianIndices(ns)
             ws.shell_idx[I] == m || continue
-            for comp in 1:D
+            for comp in 1:M
                 ws.û_m[I, comp] = velocity_hat[I, comp]
             end
         end
 
-        # Compute N̂_m = FFT[(u_m·∇)u] into ws.nonlinear.N̂
+        # N̂_m = (u·∇)u_m: the FULL velocity advects the band-m field (Alexakis–Mininni–Pouquet
+        # 2005). This makes A[n,m] = Σ_{k∈S_n} Re{û*·N̂_m} both antisymmetric (A[n,m]+A[m,n]=0)
+        # and correctly reducing (Σ_m A[n,m] = transfer_spectrum[n]) — no ½(A−Aᵀ) needed.
         compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-                                dealiasing=dealiasing, backend=SerialBackend())
+                                dealiasing=dealiasing, spectral=DirectSumBackend(),
+                                advecting_hat=advecting_hat)
         N̂_m = ws.nonlinear.N̂
 
         # Write per-mode transfer density into ws.transfer_density
         transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂_m, ks)
 
-        # Accumulate T(n,m) for all receiver shells n
+        # Accumulate A(n,m) = Σ_{k∈S_n} Re{û*·N̂_m} for all receiver shells n
         for n in 1:N_sh
             s = zero(FT)
             for I in CartesianIndices(ns)

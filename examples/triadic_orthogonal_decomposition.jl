@@ -1,118 +1,92 @@
 """
 Triadic Orthogonal Decomposition Example — FlowInvariantTransfer.jl
 
-Demonstrates `triadic_orthogonal_decomposition` on a simulated multi-modal signal
-with a known triadic interaction (resonance condition f_k + f_l = f_n).
+Builds a signal with ONE genuine quadratic triad and shows TOD finds it.
+
+Temporal modes live at f_k=1, f_l=2, f_n=3 Hz (so f_k+f_l=f_n), plus an UNCOUPLED control wave at
+f_u=4 Hz. The f_n mode is a phase-locked sum-frequency wave (phase φ_k+φ_l — a real quadratic
+interaction), and every block draws fresh random parent phases, so the daughter's biphase stays
+consistent while the control and all accidental pairs have random biphase and average away. The
+mode bispectrum λ(f_l, f_n) therefore lights up on the triad family {1,2,3} (marked) and stays
+dark at the uncoupled control; the recovered recipient mode matches the imposed shape m_n=m_k·m_l.
 
 Run from the repo root:
     julia --project=examples examples/triadic_orthogonal_decomposition.jl
 """
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FFTW: FFTW
+using FFTW: FFTW          # loads the FFTW extension so spectral=FFTBackend() works
 using CairoMakie: CairoMakie
 using Random: Random
-using Statistics: Statistics
 
-function run_tod_example(; nt=512, nx=64, dt=0.02, seed=42)
+function run_tod_example(; nfft=100, nblocks=64, nx=64, dt=0.1, seed=42)
     println("--- Triadic Orthogonal Decomposition Example ---")
     Random.seed!(seed)
 
-    t = collect(0:nt-1) .* dt
+    fk, fl, fn, fu = 1.0, 2.0, 3.0, 4.0          # f_k + f_l = f_n; f_u is an uncoupled control
+    x  = range(0, 2π; length=nx)
+    mk = cos.(x); ml = cos.(2x); mu = sin.(x)
+    mn = mk .* ml                                # daughter spatial shape = product of parents
 
-    # Define three resonant frequencies satisfying: f_k + f_l = f_n
-    # Let f_k = 2.0 Hz, f_l = 3.0 Hz, then f_n = 5.0 Hz
-    fk_res, fl_res, fn_res = 2.0, 3.0, 5.0
-
-    # Build simulated spatial patterns for the convective/recipient modes
-    x = range(0, 2π; length=nx)
-    mode_k = sin.(2x)
-    mode_l = cos.(3x)
-    mode_n = sin.(5x)
-
-    # Construct the data array of size (nt, nvar, nx)
-    # Here nvar = 1
-    X = zeros(nt, 1, nx)
-    for it in 1:nt
-        # A simple triadic coupling model:
-        # Each frequency has a corresponding spatial mode modulated in time
-        X[it, 1, :] .= (
-            1.2 * sin(2π * fk_res * t[it]) .* mode_k .+
-            0.8 * cos(2π * fl_res * t[it]) .* mode_l .+
-            1.5 * sin(2π * fn_res * t[it]) .* mode_n
-        )
+    nt = nfft * nblocks
+    X  = zeros(nt, 1, nx)
+    for blk in 0:nblocks-1
+        φk, φl, φu = 2π .* rand(3)               # fresh random phases each block
+        for τ in 0:nfft-1
+            tt = τ * dt
+            an = cos(2π*fn*tt + φk + φl)         # daughter: sum-frequency wave, phase LOCKED to parents
+            X[blk*nfft + τ + 1, 1, :] .= cos(2π*fk*tt + φk).*mk .+ cos(2π*fl*tt + φl).*ml .+
+                                          an.*mn .+ cos(2π*fu*tt + φu).*mu
+        end
     end
 
-    # --- Compute TOD ---
-    # We specify:
-    # - nfft = 128 (window block length)
-    # - noverlap = 64 (50% overlap)
-    # - nmode = 2 (retain top 2 modes per triad)
-    # - backend = FFTBackend() (use FFTW for temporal DFTs)
-    method = FET.TriadicOrthogonalDecompositionMethod(nfft=128, noverlap=64, nmode=2)
+    method = FET.TriadicOrthogonalDecompositionMethod(nfft=nfft, noverlap=0, nmode=1)
+    result = FET.calculate_energy_transfer(method, X; dt=dt, isreal_data=true, spectral=FET.FFTBackend())
 
-    result = FET.calculate_energy_transfer(method, X;
-        dt=dt,
-        isreal_data=true,
-        backend=FET.FFTBackend())
-
-    # Find the indices corresponding to our resonant frequencies
     freqs = result.frequencies
-    fl_idx = argmin(abs.(freqs .- fl_res))
-    fn_idx = argmin(abs.(freqs .- fn_res))
+    λ = copy(result.mode_bispectrum[:, :, 1]); λ[isnan.(λ)] .= 0.0
+    pk = argmax(λ)
+    println("bispectrum peak at (f_l, f_n) = (", round(freqs[pk[1]]; digits=2), ", ",
+            round(freqs[pk[2]]; digits=2), ") Hz, f_k = ", round(freqs[pk[2]] - freqs[pk[1]]; digits=2),
+            "  (a member of the {1,2,3} triad family)")
 
-    println("Target f_l: ", freqs[fl_idx], " Hz (idx: ", fl_idx, ")")
-    println("Target f_n: ", freqs[fn_idx], " Hz (idx: ", fn_idx, ")")
+    li = argmin(abs.(freqs .- fl)); ni = argmin(abs.(freqs .- fn))
+    psi = real.(result.modes[(li, ni)].recipient[:, 1])
 
-    # Singular values for the strongest mode at the target triad
-    coupling_strength = result.mode_bispectrum[fl_idx, fn_idx, 1]
-    println("Mode 1 coupling strength at target triad: ", coupling_strength)
+    # ── plot ──────────────────────────────────────────────────────────────────
+    posn = findall(>=(0), freqs)                 # f_n ≥ 0 for real data
+    band = findall(ff -> -4.5 <= ff <= 4.5, freqs)
+    fl_ax = freqs[band]; fn_ax = freqs[posn]
+    λsub = λ[band, posn]
+    fig = CairoMakie.Figure(size=(1180, 520), fontsize=14)
+    CairoMakie.Label(fig[0, 1:3], "Triadic Orthogonal Decomposition — detecting a known quadratic triad",
+        fontsize=17, font=:bold, tellwidth=false)
 
-    # Extract the convective and recipient modes for this triad
-    modes_pair = result.modes[(fl_idx, fn_idx)]
-    # convective mode: modes_pair.convective[:, 1]
-    # recipient mode: modes_pair.recipient[:, 1]
-    phi = real.(modes_pair.convective[:, 1])
-    psi = real.(modes_pair.recipient[:, 1])
+    ax1 = CairoMakie.Axis(fig[1, 1], title="Mode bispectrum λ(f_l, f_n)   (bright ⇒ triadic coupling)",
+        xlabel="f_l  (Hz)", ylabel="f_n  (Hz)")
+    hm = CairoMakie.heatmap!(ax1, fl_ax, fn_ax, λsub,
+        colormap=CairoMakie.cgrad([:white, :gold, :orangered, :darkred]), colorrange=(0, maximum(λsub)))
+    CairoMakie.Colorbar(fig[1, 2], hm, label="coupling strength")
+    # the triad family f_k+f_l=f_n with {|f_k|,|f_l|,|f_n|}={1,2,3}
+    triad_cells = [(2.0,3.0), (1.0,3.0), (-1.0,2.0), (3.0,2.0), (-2.0,1.0), (3.0,1.0)]
+    CairoMakie.scatter!(ax1, first.(triad_cells), last.(triad_cells); marker=:rect, markersize=15,
+        color=:transparent, strokecolor=:dodgerblue, strokewidth=2.5)
+    CairoMakie.scatter!(ax1, [4.0], [4.0]; marker=:xcross, markersize=14, color=:gray,
+        strokecolor=:gray, strokewidth=2)   # control (should stay dark)
+    CairoMakie.text!(ax1, -4.3, 4.0; text="□ triad members   ✕ uncoupled control",
+        color=:black, fontsize=11, align=(:left, :center))
 
-    # --- Plot the results ---
-    fig = CairoMakie.Figure(size=(1000, 750), fontsize=14)
-    CairoMakie.Label(fig[0, 1:2],
-        "Triadic Orthogonal Decomposition — Simulated Resonant Triad",
-        fontsize=18, font=:bold)
-
-    # 1. Mode Bispectrum Heatmap (mode 1)
-    ax_bispec = CairoMakie.Axis(fig[1, 1],
-        title="Mode Bispectrum λ(f_l, f_n) — Mode 1",
-        xlabel="f_l (Hz)", ylabel="f_n (Hz)")
-    
-    # We only plot positive frequencies
-    pos_idxs = findall(>=(0), freqs)
-    f_pos = freqs[pos_idxs]
-    bispec_pos = result.mode_bispectrum[pos_idxs, pos_idxs, 1]
-    
-    # Replace NaNs with 0 for plotting
-    bispec_plot = copy(bispec_pos)
-    bispec_plot[isnan.(bispec_plot)] .= 0.0
-
-    hm = CairoMakie.heatmap!(ax_bispec, f_pos, f_pos, bispec_plot, colormap=:viridis)
-    CairoMakie.Colorbar(fig[1, 2], hm, label="Singular Value (coupling)")
-
-    # 2. Spatial Modes at the resonant triad
-    ax_modes = CairoMakie.Axis(fig[2, 1:2],
-        title="TOD Spatial Modes at Triad ($fl_res, $fn_res) Hz",
-        xlabel="x", ylabel="Amplitude")
-
-    CairoMakie.lines!(ax_modes, x, phi ./ maximum(abs, phi),
-        label="Convective Mode (normalized)", color=:steelblue, linewidth=2.5)
-    CairoMakie.lines!(ax_modes, x, psi ./ maximum(abs, psi),
-        label="Recipient Mode (normalized)", color=:crimson, linewidth=2.5)
-    CairoMakie.axislegend(ax_modes)
+    ax2 = CairoMakie.Axis(fig[1, 3], title="Recipient mode at (f_l=2, f_n=3): recovered vs imposed",
+        xlabel="x", ylabel="amplitude")
+    nrm(v) = v ./ maximum(abs, v)
+    s = sign(sum(nrm(psi) .* nrm(mn)))           # fix the arbitrary sign of the SVD mode
+    CairoMakie.lines!(ax2, x, s .* nrm(psi), label="recovered (TOD)", color=:crimson, linewidth=3)
+    CairoMakie.lines!(ax2, x, nrm(mn), label="imposed m_n = m_k·m_l", color=:black, linewidth=2, linestyle=:dash)
+    CairoMakie.axislegend(ax2; position=:rb)
 
     outpath = joinpath(@__DIR__, "triadic_orthogonal_decomposition.png")
     CairoMakie.save(outpath, fig)
     println("Saved figure: $outpath")
-    println("Done.")
     return result
 end
 
