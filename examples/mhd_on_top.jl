@@ -7,10 +7,12 @@ hard-code any particular physical system. This example shows how a downstream do
 incompressible **magnetohydrodynamics** — is assembled entirely from the package's *public*
 primitives, with the MHD-specific physics living here, not in the package.
 
-Incompressible MHD: ∂_t u = −(u·∇)u + (b·∇)b − ∇P,  ∂_t b = −(u·∇)b + (b·∇)u. The total energy
-½⟨|u|²+|b|²⟩ and cross-helicity ⟨u·b⟩ are built from the four advection terms (all from
-`compute_nonlinear_term` with `advecting_hat`), and magnetic helicity ⟨a·b⟩ needs one extra,
-genuinely MHD-specific term computed right here — the EMF `u×b`.
+Incompressible MHD: ∂_t u = −(u·∇)u + (b·∇)b − ∇P,  ∂_t b = −(u·∇)b + (b·∇)u. This example builds
+the **total-energy budget** ½⟨|u|²+|b|²⟩: the kinetic and magnetic flux contributions come from the
+four advection terms (all from `compute_nonlinear_term` with `advecting_hat`) combined with the MHD
+sign bookkeeping below. Other MHD invariants follow the same recipe from the same primitives —
+cross-helicity ⟨u·b⟩ from the cross `transfer_density`, and magnetic helicity ⟨a·b⟩ from one extra,
+genuinely MHD-specific term (the EMF `u×b`) — they are noted here but not computed in this script.
 
 Run from the repo root:
     julia --project=examples examples/mhd_on_top.jl
