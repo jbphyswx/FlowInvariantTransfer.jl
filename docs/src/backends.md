@@ -163,8 +163,18 @@ calculate_shell_to_shell_transfer(û_gpu, ks_gpu;
     binning = LinearBinning(1.0), execution = GPUBackend(CUDABackend()))
 ```
 
-**Currently validated on CUDA.** AMDGPU/Metal ride the same KernelAbstractions kernels but are not
-yet hardware-validated.
+The device kernels (transfer density for KE/helicity/enstrophy, shell reduction) and their dispatch
+are **validated on the KernelAbstractions CPU backend** (`GPUBackend(KA.CPU())`) against the serial
+reference to machine precision — so the parallel logic is correct independent of hardware. The only
+piece that needs a real GPU is the on-device FFT: pass `spectral = FFTBackend()` with a `CuArray`
+input so cuFFT rides `AbstractFFTs`. AMDGPU/Metal run the same kernels but are not yet
+hardware-validated.
+
+```julia
+using KernelAbstractions
+result = calculate_shell_to_shell_transfer(û, ks;
+    binning = LinearBinning(1.0), execution = GPUBackend(KA.CPU()))  # CPU backend: same kernels, no GPU
+```
 
 ### AutoBackend
 
@@ -227,21 +237,29 @@ groups). The pencil path currently covers kinetic energy on isotropic `|k|` shel
 
 `spectral` ∈ {DirectSum, FFT}; `execution` ∈ {Serial, Threaded, Distributed, GPU}.
 
+Spectral axis = which transform builds the nonlinear term (every diagnostic supports
+DirectSum + FFT). Execution axis = which parallelism runs the outer loop; only the diagnostics with
+an outer loop over shells/triads expose it (the rest run serially over the single FFT path).
+
 | Diagnostic | DirectSum | FFT | Serial | Threaded | Distributed | GPU |
 |-----------|:---------:|:---:|:------:|:--------:|:-----------:|:---:|
-| Spectral flux Π(K) | ✓ | ✓ | ✓ | ✓ | — | — |
+| Spectral flux Π(K) | ✓ | ✓ | ✓ | — | — | — |
 | Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | — | — | — |
-| Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | — | — | — |
 | Partial / decomposed fluxes | ✓ | ✓ | ✓ | — | — | — |
 | TOD | ✓ | ✓ | ✓ | ✓ | — | — |
 | Coarse-graining Π_ℓ(x) | — | — | — | — | — | — |
+| Distributed (MPI) | — | ✓ | — | — | batch + pencil | — |
 
 Notes: the net per-mode transfer `T(k)` and the magnitude matrix `T(K,Q)` are routed through the
 fast FFT spectral-flux / shell-to-shell paths (exact, `O(Nᴰ log N)`); the fully mode-resolved
 `S(k|p)` tensor is the only query that needs the `O(N^{2D})` brute loop (guarded by a mode-count
-limit, `force=true` to override). Coarse-graining flux is provided entirely by the
-CoarseGrainingEnergyFluxes extension and has its own parallelism model.
+limit, `force=true` to override). The single-machine `execution = Threaded/Distributed/GPU` axis
+applies to the diagnostics with an outer loop (shell-to-shell, TOD); spectral flux / mode-to-mode /
+band-to-band run serially over one FFT pass. MPI (batch + pencil axes) is a separate distribution
+layer documented above. Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes
+extension and has its own parallelism model.
 
 ---
 

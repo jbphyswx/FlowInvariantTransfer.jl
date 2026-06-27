@@ -7,6 +7,7 @@ using LinearAlgebra: LinearAlgebra
 using Distributed: Distributed
 using SharedArrays: SharedArrays
 using OhMyThreads: OhMyThreads
+using KernelAbstractions: KernelAbstractions as KA
 using MPI: MPI
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using HelmholtzDecomposition: HelmholtzDecomposition
@@ -1103,6 +1104,37 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             TKQ[n, m] += S[k, p]
         end
         Test.@test isapprox(TKQ, ss.transfer_matrix; atol = 1e-9 * sqrt(sum(abs2, ss.transfer_matrix)))
+    end
+
+    # -----------------------------------------------------------------------
+    # GPU kernels validated on the KernelAbstractions CPU backend (GPUBackend(KA.CPU())).
+    # This exercises the exact device kernels + dispatch used on CUDA/ROC/Metal — the only
+    # part that needs real hardware is the on-device FFT, not the transfer-density/reduction
+    # logic asserted here. Results must match the serial reference to machine precision.
+    Test.@testset "GPU kernels via KA CPU backend" begin
+        L = 2π
+        # KE (2D)
+        N = 16
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(Random.MersenneTwister(5), N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FET.LinearBinning(2π / L)
+        ref = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.SerialBackend())
+        ka  = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.GPUBackend(KA.CPU()))
+        Test.@test isapprox(ka.transfer_matrix, ref.transfer_matrix; atol=1e-12 * (maximum(abs, ref.transfer_matrix)+eps()))
+        Test.@test isapprox(ka.net_transfer, ref.net_transfer; atol=1e-12 * (maximum(abs, ref.net_transfer)+eps()))
+
+        # Helicity (3D) and Enstrophy (2D) device kernels
+        ks3 = FET.wavenumber_grid((8, 8, 8), (L, L, L))
+        û3  = randn(Random.MersenneTwister(7), ComplexF64, 8, 8, 8, 3) .* 0.1
+        rh = FET.calculate_shell_to_shell_transfer(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), execution=FET.SerialBackend(), invariant=FET.Helicity())
+        gh = FET.calculate_shell_to_shell_transfer(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), execution=FET.GPUBackend(KA.CPU()), invariant=FET.Helicity())
+        Test.@test isapprox(gh.transfer_matrix, rh.transfer_matrix; atol=1e-12 * (maximum(abs, rh.transfer_matrix)+eps()))
+
+        re = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.SerialBackend(), invariant=FET.Enstrophy())
+        ge = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.GPUBackend(KA.CPU()), invariant=FET.Enstrophy())
+        Test.@test isapprox(ge.transfer_matrix, re.transfer_matrix; atol=1e-12 * (maximum(abs, re.transfer_matrix)+eps()))
     end
 
     # -----------------------------------------------------------------------
