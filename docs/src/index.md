@@ -144,16 +144,54 @@ calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral = FFTBackend()) 
 
 ---
 
-## Example figure
+## Gallery
 
-Shell-to-shell `T(n,m)`, net transfer per shell, and a kinetic-energy slice for a **3D
-Taylor–Green vortex** (N=32³, evolved to t≈5 by pseudospectral Navier–Stokes). The antisymmetric
-near-diagonal band and the low-shell-gain / high-shell-loss net transfer are the canonical
-**forward energy cascade** of 3D turbulence.
+Every figure is produced by a script in `examples/` run on a **canonical evolved flow** (not random
+noise), so the physics is verifiable by eye. Run any with `julia --project=examples examples/<name>.jl`.
 
-![3D TGV shell-to-shell energy transfer](assets/energy_transfer.png)
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
+`k`; the cumulative flux `Π(K) > 0` across the inertial range is the 3D forward cascade.
 
-Cascade development from t=0 to t=10:
+![Spectral energy transfer](assets/spectral_flux.png)
+
+**Shell-to-shell `T(n,m)` (3D TGV).** Antisymmetric near-diagonal band (blue gain / red loss) and the
+low-shell-gain / high-shell-loss net transfer — the cascade resolved scale-by-scale.
+
+![Shell-to-shell transfer](assets/shell_to_shell.png)
+
+**Mode-to-mode `S(k|p)` reduces to shell-to-shell `T(n,m)` (2D turbulence).** The resolved tensor
+summed over shells (left) reproduces the directly-computed `T(n,m)` (right) — the reduction hierarchy.
+
+![Mode-to-mode reduces to shell-to-shell](assets/mode_to_mode.png)
+
+**Helicity-resolved flux `Π±` (3D TGV).** `Π⁺ ≈ Π⁻` and `Π⁺+Π⁻ = Π` because the TGV is non-helical.
+
+![Helicity-resolved flux](assets/helical_flux.png)
+
+**Isotropic vs. anisotropic flux (3D TGV).** `Π(|k|)` vs. perpendicular `Π(k⊥)` and parallel
+`Π(k∥)` directional fluxes from the anisotropic shell geometry.
+
+![Anisotropic flux](assets/anisotropic_flux.png)
+
+**Passive-scalar variance transfer (scalar stirred by a 3D TGV).** The same engine on a different
+quadratic invariant: `T_θ(k)`, `Π_θ(K)`, and the scalar shell-to-shell matrix.
+
+![Passive-scalar variance transfer](assets/passive_scalar.png)
+
+**Triadic Orthogonal Decomposition — detecting a known quadratic triad.** The bispectrum lights up on
+the imposed triad family (control stays dark); the recipient mode is recovered.
+
+![Triadic Orthogonal Decomposition](assets/triadic_orthogonal_decomposition.png)
+
+**MHD diagnostics built _on top_ of the public API (2D Orszag–Tang).** Total/kinetic/magnetic energy
+fluxes assembled from public primitives, `total = kinetic + magnetic` — magnetism is not in the core.
+
+![MHD on the public API](assets/mhd_on_top.png)
+
+## Cascade animation
+
+Shell-to-shell `T(n,m)`, net transfer, and a KE slice for a 3D TGV (N=32³) developing from t=0 to
+t=10 — the forward cascade building in time.
 
 ![3D TGV cascade animation](assets/energy_transfer.gif)
 
