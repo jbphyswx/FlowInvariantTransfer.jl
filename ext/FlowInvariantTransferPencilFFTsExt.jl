@@ -7,7 +7,7 @@ using LinearAlgebra: mul!, ldiv!
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
 using FlowInvariantTransfer.Types: AbstractShellBinning, AbstractInvariant, KineticEnergy,
                                    AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
-                                   AbstractShellGeometry, ShellMagnitude
+                                   AbstractShellGeometry, ShellMagnitude, IsotropicShells
 using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, assign_shells
 
 # ---------------------------------------------------------------------------
