@@ -8,7 +8,7 @@ using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coor
 using ..NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_helical_partial_fluxes
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -219,39 +219,41 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    calculate_helical_partial_fluxes(velocity_hat, ks; binning, dealiasing=OrszagTwoThirds(),
-        spectral=DirectSumBackend(), geometry=IsotropicShells())
-        -> (channels::Dict{NTuple{3,Int},SpectralFluxResult}, total::SpectralFluxResult, k_shells)
+    calculate_partial_fluxes(velocity_hat, ks; decomposition=HelicalDecomposition(), binning,
+        dealiasing=OrszagTwoThirds(), spectral=DirectSumBackend(), geometry=IsotropicShells())
+        -> (channels::Dict{NTuple{3,Symbol},SpectralFluxResult}, total::SpectralFluxResult, k_shells)
 
-Decompose the 3D kinetic-energy flux into the **eight helical partial fluxes** `Π^{s_k s_p s_q}(K)`,
-where each of the three modes in a triad interaction carries a definite helicity sign
-`s ∈ {+1,-1}` (Waleffe 1992; Biferale, Musacchio & Toschi 2012; Alexakis 2017). Writing the
-velocity as `u = u₊ + u₋` (see [`HelicalDecomposition`](@ref)),
+Decompose the kinetic-energy flux into **per-component partial fluxes** `Π^{s_k s_p s_q}(K)`,
+where each of the three fields in a triad interaction is one component of a velocity decomposition
+`u = Σ_s u_s` (e.g. `±`-helical via [`HelicalDecomposition`](@ref), or rotational/divergent via
+[`HelmholtzDecomposition`](@ref)):
 
-    T^{s_k s_p s_q}(k) = Re{ û_{s_k}*(k) · [ (u_{s_p}·∇) u_{s_q} ](k) },
+    T^{s_k s_p s_q}(k) = Re{ û_{s_k}*(k) · [ (u_{s_p}·∇) u_{s_q} ](k) },   Π = Σ_{k≤K} T.
 
-and `Π^{s_k s_p s_q}(K) = Σ_{k≤K} T^{s_k s_p s_q}`. The eight channels sum to the full energy flux.
-The **homochiral** channels (`s_k=s_p=s_q`, i.e. `(+++)`,`(---)`) tend to drive an inverse cascade,
-the **heterochiral** ones a forward cascade — the central result of helical turbulence.
-
-`channels` is keyed by `(s_k, s_p, s_q)` with entries `±1`. Built entirely from the package's
-helical decomposition + generalized nonlinear term; 3D only.
+With an `n`-component decomposition this gives `n³` channels that sum to the full energy flux. For
+helical components the **homochiral** channels (`s_k=s_p=s_q`) drive the inverse cascade and the
+heterochiral ones the forward cascade (Biferale–Musacchio–Toschi 2012); for the Helmholtz split
+the off-diagonal channels are the **rotational↔divergent cross-flux** (zero for incompressible
+flow, since `u_div = 0`). `channels` is keyed by the component-name triple `(s_k, s_p, s_q)`.
+Built from the decomposition + generalized nonlinear term, so it inherits all backends/dealiasing.
 """
-function calculate_helical_partial_fluxes(
+function calculate_partial_fluxes(
     velocity_hat,
     ks;
+    decomposition::AbstractFieldDecomposition = HelicalDecomposition(),
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    nd = length(ks)
-    nd == 3 || throw(ArgumentError("helical partial fluxes are defined in 3D only (got nd=$nd)."))
-    FT = real(eltype(velocity_hat))
-    ns = size(velocity_hat)[1:nd]
-
-    dec = decompose_field(HelicalDecomposition(), velocity_hat, ks)
-    u = Dict(1 => dec.positive, -1 => dec.negative)
+    nd  = length(ks)
+    FT  = real(eltype(velocity_hat))
+    ns  = size(velocity_hat)[1:nd]
+    comps = decompose_field(decomposition, velocity_hat, ks)
+    comps isa NamedTuple || throw(ArgumentError(
+        "calculate_partial_fluxes needs a decomposition that splits u into ≥2 named components " *
+        "(e.g. HelicalDecomposition or HelmholtzDecomposition); got $(typeof(decomposition))."))
+    names = keys(comps)
 
     k_coord = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_coord))
@@ -267,12 +269,12 @@ function calculate_helical_partial_fluxes(
         SpectralFluxResult(centers, T, cumsum(T))
     end
 
-    channels = Dict{NTuple{3,Int}, SpectralFluxResult}()
+    channels = Dict{NTuple{3,Symbol}, SpectralFluxResult}()
     td = similar(velocity_hat, FT, ns...)
-    for sp in (1, -1), sq in (1, -1)
-        N̂ = compute_nonlinear_term(u[sq], ks; advecting_hat=u[sp], dealiasing=dealiasing, spectral=spectral)  # (u_{sp}·∇)u_{sq}
-        for sk in (1, -1)
-            transfer_density!(td, KineticEnergy(), u[sk], N̂, ks)
+    for sp in names, sq in names
+        N̂ = compute_nonlinear_term(comps[sq], ks; advecting_hat=comps[sp], dealiasing=dealiasing, spectral=spectral)  # (u_{sp}·∇)u_{sq}
+        for sk in names
+            transfer_density!(td, KineticEnergy(), comps[sk], N̂, ks)
             channels[(sk, sp, sq)] = binflux(td)
         end
     end
@@ -281,6 +283,17 @@ function calculate_helical_partial_fluxes(
         sum(c.flux for c in values(channels)))
     return (channels = channels, total = total, k_shells = centers)
 end
+
+"""
+    calculate_helical_partial_fluxes(velocity_hat, ks; kwargs...)
+
+The eight **helical** partial energy fluxes `Π^{s_k s_p s_q}(K)`, `s ∈ {positive, negative}` —
+[`calculate_partial_fluxes`](@ref) with `decomposition = HelicalDecomposition()` (3D only).
+Homochiral channels drive the inverse cascade, heterochiral the forward (Waleffe 1992;
+Biferale–Musacchio–Toschi 2012; Alexakis 2017).
+"""
+calculate_helical_partial_fluxes(velocity_hat, ks; kwargs...) =
+    calculate_partial_fluxes(velocity_hat, ks; decomposition=HelicalDecomposition(), kwargs...)
 
 # ---------------------------------------------------------------------------
 # Internal helpers

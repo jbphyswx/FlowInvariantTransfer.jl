@@ -598,6 +598,33 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "Helmholtz partial fluxes — incompressible ⇒ rotational channel only" begin
+        # Same generic machinery, Helmholtz (rot/div) decomposition. For a divergence-free field the
+        # divergent component vanishes, so only the (rotational,rotational,rotational) channel is
+        # non-zero and it equals the full flux; the rot↔div cross channels are ≈ 0.
+        N = 16; L = 2π
+        Random.seed!(92)
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free (rotational only)
+        b  = FET.LinearBinning(2π/L)
+
+        hp = FET.calculate_partial_fluxes(û, ks; decomposition=FET.HelmholtzDecomposition(),
+            binning=b, dealiasing=FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+        Test.@test length(hp.channels) == 8
+        sf = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing=FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+        sT = sqrt(sum(abs2, sf.transfer_spectrum)); Test.@test sT > 0
+        rrr = hp.channels[(:rotational, :rotational, :rotational)]
+        Test.@test isapprox(rrr.transfer_spectrum, sf.transfer_spectrum; atol = 1e-9 * sT)
+        # every channel touching the (empty) divergent component is ≈ 0
+        for key in keys(hp.channels)
+            any(==(:divergent), key) || continue
+            Test.@test maximum(abs, hp.channels[key].transfer_spectrum) < 1e-9 * sT
+        end
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ToroidalPoloidalDecomposition — reconstruct, div-free, toroidal has w=0" begin
         M = 8; L = 2π
         ks = FET.wavenumber_grid((M, M, M), (L, L, L))
