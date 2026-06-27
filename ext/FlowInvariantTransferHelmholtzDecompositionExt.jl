@@ -30,14 +30,17 @@ function FET.Decomposition._decompose_field_physical(
                               
     # Decompose
     res = HelmholtzDecomposition.helmholtz_decompose(u, v, grid)
-    
-    # Return requested components
+
+    # HelmholtzResult stores component-last stacked velocities (ns..., 2); this physical path is
+    # contracted to return an (x, y) component tuple, so split them back out.
+    rot = (res.u_rot[:, :, 1], res.u_rot[:, :, 2])
+    div = (res.u_div[:, :, 1], res.u_div[:, :, 2])
     if decomp isa HelmholtzDecompType
-        return (; rotational = (res.u_rot, res.v_rot), divergent = (res.u_div, res.v_div))
+        return (; rotational = rot, divergent = div)
     elseif decomp isa RotationalDecomposition
-        return (res.u_rot, res.v_rot)
+        return rot
     elseif decomp isa DivergentDecomposition
-        return (res.u_div, res.v_div)
+        return div
     else
         throw(ArgumentError("Unknown decomposition type: $decomp"))
     end
@@ -86,15 +89,15 @@ function FET.Decomposition._decompose_field_spectral(
     u_hat = velocity_hat[:, :, 1]
     v_hat = velocity_hat[:, :, 2]
     res = HelmholtzDecomposition.helmholtz_project_spectral(u_hat, v_hat, grid)
-    
+
+    # SpectralCartesianResult already stores component-last stacked fields (ns..., 2) — exactly the
+    # (ns..., D) convention FIT's spectral decompositions return, so use them directly.
     if decomp isa HelmholtzDecompType
-        û_rot = cat(res.u_rot, res.v_rot; dims=3)
-        û_div = cat(res.u_div, res.v_div; dims=3)
-        return (; rotational = û_rot, divergent = û_div)
+        return (; rotational = res.u_rot, divergent = res.u_div)
     elseif decomp isa RotationalDecomposition
-        return cat(res.u_rot, res.v_rot; dims=3)
+        return res.u_rot
     elseif decomp isa DivergentDecomposition
-        return cat(res.u_div, res.v_div; dims=3)
+        return res.u_div
     else
         throw(ArgumentError("Unknown decomposition type: $decomp"))
     end

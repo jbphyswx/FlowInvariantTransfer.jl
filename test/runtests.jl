@@ -217,6 +217,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "NonlinearTerm — allocation-free in-place hot path" begin
         # The !-variant must allocate nothing per call: FFT path uses pre-planned transforms
         # (ws.plans) + mul! into preallocated buffers; direct path is pure loops.
+        # NOTE: coverage instrumentation (`Pkg.test(coverage=true)`, as julia-actions/julia-runtest
+        # uses in CI) adds per-line allocations, so `@allocated == 0` is only meaningful without it —
+        # skip the assertion under coverage rather than report a false failure.
+        cov = Base.JLOptions().code_coverage != 0
         N = 16; L = 2π
         ks = FET.wavenumber_grid((N, N), (L, L))
         Random.seed!(3)
@@ -225,7 +229,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
             FET.compute_nonlinear_term!(ws, û, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral)  # warmup
             a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral)
-            Test.@test a == 0
+            Test.@test a == 0 skip = cov
         end
 
         # Generalized engine: scalar (M=1) advected by the velocity is also zero-alloc.
@@ -234,7 +238,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
             FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral, advecting_hat = û)
             a = @allocated FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral, advecting_hat = û)
-            Test.@test a == 0
+            Test.@test a == 0 skip = cov
         end
     end
 
