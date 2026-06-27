@@ -48,6 +48,14 @@ calculate_helical_partial_fluxes
 calculate_coarse_graining_flux
 ```
 
+## Distributed (MPI)
+
+```@docs
+mpi_batch_map
+pencil_spectral_flux
+build_pencil_plan
+```
+
 ## Triadic Orthogonal Decomposition
 
 ```@docs

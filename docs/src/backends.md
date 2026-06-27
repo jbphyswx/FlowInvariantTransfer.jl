@@ -173,6 +173,56 @@ spectral fast path is chosen independently from whichever spectral extension is 
 
 ---
 
+## Distributed with MPI — two axes
+
+The single-node `DistributedBackend` above shares one array across processes. For genuine
+**multi-process / multi-node** work there are two distinct ways to distribute, and the package
+provides one entry point for each (loaded by `using MPI` — the pencil axis also needs
+`PencilFFTs, PencilArrays`). MPI.jl bundles its own `mpiexec`, so a launcher works out of the box;
+both paths are validated single-machine with `mpiexec -n 2`.
+
+### Batch axis — many independent inputs ([`mpi_batch_map`](@ref))
+
+When you have *many* snapshots (a time series) that each fit in one node's memory, distribute the
+**set of inputs**: each rank applies `f` to a round-robin subset, then results are **collated** in
+original order (default) or reduced. No communication during each item's computation — embarrassingly
+parallel. This is the common post-processing mode.
+
+```julia
+using FlowInvariantTransfer, FFTW, MPI
+MPI.Init()
+
+f(û) = calculate_spectral_flux(û, ks; binning = LinearBinning(dk), spectral = FFTBackend()).flux
+
+series = mpi_batch_map(f, snapshots)                 # Vector of per-snapshot fluxes, in order
+mean_Π = mpi_batch_map(f, snapshots; reduce = :mean) # ensemble average instead of collation
+```
+
+`reduce` accepts `:gather` (default), `:sum`, `:mean`, or a binary combiner function; the combined
+result is returned on every rank.
+
+### Pencil axis — one grid too big for a node ([`pencil_spectral_flux`](@ref))
+
+When a *single* snapshot's grid doesn't fit on one node, split **that grid** into pencils (one slab
+per rank). The pseudospectral nonlinear term then needs transpose/all-to-all communication, handled
+by a PencilFFTs distributed FFT. The per-shell KE transfer is `MPI.Allreduce`d to a global result
+identical on every rank — equal to the serial `calculate_spectral_flux` on the same field (validated
+to machine precision).
+
+```julia
+using FlowInvariantTransfer, MPI, PencilFFTs, PencilArrays
+MPI.Init()
+
+plan = build_pencil_plan((N, N), MPI.COMM_WORLD)     # auto-balanced process grid
+u    = ntuple(_ -> allocate_input(plan), 2)          # fill each rank's LOCAL portion of u, v
+res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
+```
+
+The two axes are complementary and compose (a batch of large grids = batch axis over pencil-axis
+groups). The pencil path currently covers kinetic energy on isotropic `|k|` shells.
+
+---
+
 ## Backend Support Matrix
 
 `spectral` ∈ {DirectSum, FFT}; `execution` ∈ {Serial, Threaded, Distributed, GPU}.
@@ -204,6 +254,8 @@ using FlowInvariantTransfer  # lean core only (DirectSumBackend, SerialBackend)
 using FFTW                   # → FFTBackend, PaddedThreeHalves
 using OhMyThreads            # → ThreadedBackend
 using KernelAbstractions     # → GPUBackend (+ a vendor pkg, e.g. CUDA)
+using MPI                    # → mpi_batch_map (batch axis)
+using PencilFFTs, PencilArrays  # (+ MPI) → pencil_spectral_flux / build_pencil_plan (pencil axis)
 using HelmholtzDecomposition # → decompose_field / Helmholtz partial fluxes
 using FINUFFT                # → NUFFTBackend
 using FastSphericalHarmonics # → SHTBackend

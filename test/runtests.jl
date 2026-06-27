@@ -7,6 +7,7 @@ using LinearAlgebra: LinearAlgebra
 using Distributed: Distributed
 using SharedArrays: SharedArrays
 using OhMyThreads: OhMyThreads
+using MPI: MPI
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using HelmholtzDecomposition: HelmholtzDecomposition
 
@@ -1102,6 +1103,21 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             TKQ[n, m] += S[k, p]
         end
         Test.@test isapprox(TKQ, ss.transfer_matrix; atol = 1e-9 * sqrt(sum(abs2, ss.transfer_matrix)))
+    end
+
+    # -----------------------------------------------------------------------
+    # Distributed (MPI) extensions — launched single-machine via MPI's bundled mpiexec.
+    # Batch axis: independent snapshots gathered/reduced across ranks.
+    # Pencil axis: one grid split across ranks (PencilFFTs transpose-based FFT) vs serial.
+    Test.@testset "MPI distributed (mpiexec -n 2)" begin
+        mpiexec_path = MPI.mpiexec()
+        proj = Base.active_project()
+        for script in ("batch_test.jl", "pencil_test.jl")
+            path = joinpath(@__DIR__, "mpi", script)
+            cmd  = `$(mpiexec_path) -n 2 $(Base.julia_cmd()) --project=$(proj) $(path)`
+            p = run(pipeline(ignorestatus(cmd); stdout = stdout, stderr = stderr))
+            Test.@test success(p)
+        end
     end
 
 end # top-level testset

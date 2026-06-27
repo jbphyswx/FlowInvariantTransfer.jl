@@ -140,6 +140,57 @@ export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_wind
 export calculate_energy_transfer
 
 # ---------------------------------------------------------------------------
+# Extension stubs for MPI / PencilFFTs (distributed)
+# ---------------------------------------------------------------------------
+
+"""
+    mpi_batch_map(f, items; comm=MPI.COMM_WORLD, reduce=:gather, root=0)
+
+Distribute an embarrassingly-parallel **batch** of independent inputs across MPI ranks: each
+rank applies `f` to a round-robin subset of `items` (e.g. snapshots of a time series), then the
+per-item outputs are combined. With `reduce=:gather` (default) the results are **collated** into
+one `Vector` in the original order of `items`, returned on every rank; `reduce=:sum`/`:mean`
+returns the element-wise reduction (the outputs of `f` must support `+`, and `/` for `:mean`); a
+callable `reduce` is applied as a binary combiner. This is the "batch axis" of distribution —
+orthogonal to the pencil axis ([`pencil_spectral_flux`](@ref)), which splits a single grid.
+
+Requires `using MPI` to load the extension.
+"""
+function mpi_batch_map(args...; kwargs...)
+    throw(ArgumentError("mpi_batch_map requires MPI. Run `using MPI` to load the extension."))
+end
+
+"""
+    pencil_spectral_flux(u_phys, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant) -> (centers, transfer_spectrum, flux)
+
+Distributed spectral transfer/flux for a single grid split across MPI ranks along the **pencil
+axis**: `u_phys` is the physical-space velocity held as a `PencilArray` (each rank owns a pencil
+of the global grid). The pseudospectral nonlinear term is evaluated with a transpose-based
+distributed FFT (PencilFFTs), the transfer density is shell-binned locally, and the per-shell
+spectrum is `MPI.Allreduce`d to a global result identical on every rank (matching the serial
+[`calculate_spectral_flux`](@ref) on the same field). Use this when one snapshot's grid is too
+large for a single node; for many independent snapshots use [`mpi_batch_map`](@ref) instead.
+
+Requires `using MPI, PencilFFTs, PencilArrays` to load the extension.
+"""
+function pencil_spectral_flux(args...; kwargs...)
+    throw(ArgumentError("pencil_spectral_flux requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+"""
+    build_pencil_plan(ns, comm=MPI.COMM_WORLD; T=Float64) -> PencilFFTPlan
+
+Convenience constructor for the distributed complex-to-complex FFT plan used by
+[`pencil_spectral_flux`](@ref), with an auto-balanced MPI process grid. Requires
+`using MPI, PencilFFTs, PencilArrays`.
+"""
+function build_pencil_plan(args...; kwargs...)
+    throw(ArgumentError("build_pencil_plan requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+export mpi_batch_map, pencil_spectral_flux, build_pencil_plan
+
+# ---------------------------------------------------------------------------
 # Extension stubs for CairoMakie
 # ---------------------------------------------------------------------------
 
