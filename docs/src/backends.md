@@ -130,6 +130,14 @@ calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(1.0),
     spectral = FFTBackend(), execution = ThreadedBackend())
 ```
 
+!!! note "FFTW intra-transform threads ≠ `ThreadedBackend`"
+    `ThreadedBackend` parallelises the **outer** shell/mode loop. FFTW also has its own
+    **intra-transform** multithreading, set globally with `FFTW.set_num_threads(n)`, which speeds
+    up each individual FFT. The two are orthogonal and compose; enabling FFTW threads never changes
+    results (asserted by the test suite). Don't oversubscribe — with `execution = ThreadedBackend()`
+    each task already runs a transform, so leave FFTW at one thread (or partition cores between the
+    two levels).
+
 ### DistributedBackend
 
 Multi-process via `Distributed` + `SharedArrays`, using `@distributed (+)` reduction over mediator

@@ -1017,6 +1017,36 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    # W10 — FFTW *intra-transform* threads (orthogonal to ThreadedBackend, which
+    # parallelises the outer shell loop). FFTW's own multi-threading is a global
+    # setting; turning it on must not change any result. Validated single-machine.
+    Test.@testset "FFTW intra-transform threads — correctness invariance" begin
+        Random.seed!(7)
+        N = 24; L = 2π
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)   # incompressible 2D field
+        b  = FET.LinearBinning(2π / L)
+
+        nthr0 = FFTW.get_num_threads()
+        try
+            FFTW.set_num_threads(1)
+            flux1  = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend())
+            s2s1   = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend())
+            FFTW.set_num_threads(4)
+            flux4  = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend())
+            s2s4   = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend())
+
+            Test.@test isapprox(flux1.flux, flux4.flux; atol=1e-12, rtol=1e-10)
+            Test.@test isapprox(flux1.transfer_spectrum, flux4.transfer_spectrum; atol=1e-12, rtol=1e-10)
+            Test.@test isapprox(s2s1.transfer_matrix, s2s4.transfer_matrix; atol=1e-12, rtol=1e-10)
+        finally
+            FFTW.set_num_threads(nthr0)   # restore global FFTW thread count
+        end
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "ModeToMode — invariant/dimension guards" begin
         L = 2π
         # 2D field + Helicity() must error (Helicity is 3D-only); routed via transfer_density.
