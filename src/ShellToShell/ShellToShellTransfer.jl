@@ -35,7 +35,8 @@ end
 
 """
     calculate_shell_to_shell_transfer(velocity_hat, ks;
-        binning, dealiasing=true, verify_antisymmetry=true, backend=nothing)
+        binning, dealiasing=OrszagTwoThirds(), verify_antisymmetry=true,
+        spectral=DirectSumBackend(), execution=SerialBackend())
         -> ShellToShellResult
 
 Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).

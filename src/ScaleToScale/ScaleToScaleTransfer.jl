@@ -10,7 +10,7 @@ using ..Utils: as_component_field
 export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
 
 """
-    calculate_mode_to_mode_transfer(velocity_hat, ks; invariant=KineticEnergy(), dealiasing=true,
+    calculate_mode_to_mode_transfer(velocity_hat, ks; invariant=KineticEnergy(), dealiasing=OrszagTwoThirds(),
                                     spectral=DirectSumBackend(), max_modes=1024, force=false)
         -> ModeToModeTriadResult
 

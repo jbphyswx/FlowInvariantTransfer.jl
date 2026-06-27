@@ -13,7 +13,7 @@ export _nonlinear_term_fft!, _nonlinear_term_padded_fft!   # stubs overridden by
 # ---------------------------------------------------------------------------
 
 """
-    _nonlinear_term_fft!(ws, velocity_hat, ks; dealiasing=true, advecting_hat=velocity_hat)
+    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=velocity_hat)
 
 FFT-accelerated, allocation-free computation of N̂(k) = FFT[(u_adv·∇)u] into `ws.N̂`,
 using the pre-planned transforms and scratch buffers in `ws.plans`.
@@ -40,7 +40,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    compute_nonlinear_term(advected_hat, ks; dealiasing=true,
+    compute_nonlinear_term(advected_hat, ks; dealiasing=OrszagTwoThirds(),
                            spectral=DirectSumBackend(), advecting_hat=advected_hat)
 
 Compute the pseudospectral nonlinear term `𝒩̂ᵢ(k) = F̂[(uⱼ ∂fᵢ/∂xⱼ)]` — the advection of an
@@ -53,7 +53,7 @@ self-advection term pass the velocity as both (the default), giving `N̂ᵢ = F�
 - `ks`: Tuple of 1D wavenumber vectors (length `nd`), one per spatial dimension.
 
 # Keyword Arguments
-- `dealiasing::Bool=true`: Apply the Orszag 2/3 rule (truncate inputs *and* output).
+- `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: dealiasing strategy (NoDealiasing / OrszagTwoThirds / PaddedThreeHalves).
 - `spectral::AbstractSpectralBackend`: `DirectSumBackend()` (default, no deps) or `FFTBackend()`
   (requires the FFTW extension) for the O(N log N) path.
 - `advecting_hat`: the advecting velocity `u` (shape `(ns..., D)`, `D ≥ nd`); defaults to
@@ -76,7 +76,7 @@ function compute_nonlinear_term(
 end
 
 """
-    compute_nonlinear_term!(ws, advected_hat, ks; dealiasing=true,
+    compute_nonlinear_term!(ws, advected_hat, ks; dealiasing=OrszagTwoThirds(),
                             spectral=DirectSumBackend(), advecting_hat=advected_hat)
 
 In-place version of `compute_nonlinear_term`. Writes result into `ws.N̂`.
@@ -145,7 +145,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; dealiasing=true)
+    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=true)
 
 Reference O(N²) direct-sum computation of the nonlinear advection term.
 Uses pre-allocated buffers from `ws::NonlinearTermWorkspace` — no heap allocation.

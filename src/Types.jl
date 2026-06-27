@@ -429,17 +429,16 @@ SmoothBands(centers::AbstractVector; logwidth=0.6) = SmoothBands(centers, float(
 """
     AbstractDealiasing
 
-Strategy for removing aliasing from the pseudospectral quadratic product. Subtypes:
-[`NoDealiasing`](@ref), [`OrszagTwoThirds`](@ref) (the `dealiasing=true` default), and
-[`PaddedThreeHalves`](@ref) (exact 3/2 zero-padding). The `dealiasing` keyword accepts a `Bool`
-(`true`→`OrszagTwoThirds`, `false`→`NoDealiasing`) or an `AbstractDealiasing` directly.
+Strategy for removing aliasing from the pseudospectral quadratic product, passed as the
+`dealiasing` keyword. Subtypes: [`NoDealiasing`](@ref), [`OrszagTwoThirds`](@ref) (the default),
+and [`PaddedThreeHalves`](@ref) (exact 3/2 zero-padding).
 """
 abstract type AbstractDealiasing end
 
 """
     NoDealiasing <: AbstractDealiasing
 
-No dealiasing — the raw pseudospectral product, aliasing included. (`dealiasing=false`.)
+No dealiasing — the raw pseudospectral product, aliasing included.
 """
 struct NoDealiasing <: AbstractDealiasing end
 
@@ -447,7 +446,7 @@ struct NoDealiasing <: AbstractDealiasing end
     OrszagTwoThirds <: AbstractDealiasing
 
 Orszag 2/3-rule truncation: zero modes with `|k_d| ≥ N_d/3` in the inputs and output. Exact on the
-retained band `|k| < N/3`. The `dealiasing=true` default.
+retained band `|k| < N/3`; the default `dealiasing`.
 """
 struct OrszagTwoThirds <: AbstractDealiasing end
 

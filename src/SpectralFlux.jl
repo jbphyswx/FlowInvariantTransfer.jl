@@ -15,7 +15,7 @@ export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux,
 # ---------------------------------------------------------------------------
 
 """
-    calculate_spectral_flux(velocity_hat, ks; binning, dealiasing=true) -> SpectralFluxResult
+    calculate_spectral_flux(velocity_hat, ks; binning, dealiasing=OrszagTwoThirds()) -> SpectralFluxResult
 
 Compute the spectral energy transfer spectrum T(k) and the cumulative energy
 flux Π(K) from Fourier-space velocity data.
@@ -184,7 +184,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    calculate_scalar_flux(velocity_hat, scalar_hat, ks; binning, dealiasing=true, spectral) -> SpectralFluxResult
+    calculate_scalar_flux(velocity_hat, scalar_hat, ks; binning, dealiasing=OrszagTwoThirds(), spectral) -> SpectralFluxResult
 
 Compute the passive-scalar **variance** transfer spectrum `T_θ(k)` and flux `Π_θ(K)`, for a
 scalar `θ` advected by the velocity `u` (`∂_tθ + (u·∇)θ = κ∇²θ`):

@@ -47,7 +47,7 @@ function _band_weights(centers, logwidth, k_coord)
 end
 
 """
-    calculate_band_to_band_transfer(velocity_hat, ks; bands::SmoothBands, dealiasing=true,
+    calculate_band_to_band_transfer(velocity_hat, ks; bands::SmoothBands, dealiasing=OrszagTwoThirds(),
         invariant=KineticEnergy(), spectral=DirectSumBackend(), advecting_hat=velocity_hat,
         geometry=IsotropicShells())
         -> (centers, transfer_matrix, net_transfer, max_antisymmetry_error)
