@@ -879,6 +879,24 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "TOD windows — Hann / Tukey generators" begin
+        n = 64
+        h = FET.hann_window(n)
+        Test.@test length(h) == 64
+        Test.@test h[1] < 1e-12 && h[end] < 1e-12        # tapers to zero at both ends
+        Test.@test 0.99 < maximum(h) <= 1.0              # ≈unity at centre (exact 1 falls between samples for even N)
+        # Tukey limits: α=0 is rectangular, α=1 is Hann
+        Test.@test FET.tukey_window(n; α=0.0) ≈ ones(n)
+        Test.@test isapprox(FET.tukey_window(n; α=1.0), h; atol=1e-12)
+        Test.@test_throws ArgumentError FET.tukey_window(n; α=1.5)
+        # a custom window flows through TOD
+        X = zeros(128, 1, 4)
+        for ix in 1:4; X[:, 1, ix] = sin.(2π * 2.0 .* (0:127) .* 0.05); end
+        r = FET.triadic_orthogonal_decomposition(X; dt=0.05, window=FET.hann_window(64), noverlap=32)
+        Test.@test r isa FET.TriadicOrthogonalDecompositionResult
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "TOD — detects a known quadratic triad (FFT == direct)" begin
         # Regression for a double-fftshift bug in the FFTW temporal DFT: the FFT backend was
         # shifted twice, misaligning Q_hat with the frequency axis, so genuine triads were not

@@ -24,7 +24,7 @@ using ..Types: TriadicOrthogonalDecompositionMethod,
                AbstractExecutionBackend, SerialBackend, ThreadedBackend,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
 
-export triadic_orthogonal_decomposition
+export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
 # ---------------------------------------------------------------------------
 # Extension stubs — overridden by FFTW / OhMyThreads / Distributed / GPU exts
@@ -72,6 +72,39 @@ Standard Hamming window of length N: w[n] = 0.54 − 0.46·cos(2πn/(N−1)).
 """
 function hamming_window(N)
     return [0.54 - 0.46 * cospi(2 * (n - 1) / (N - 1)) for n in 1:N]
+end
+
+"""
+    hann_window(N) -> Vector{Float64}
+
+Hann (raised-cosine) window of length N: w[n] = ½(1 − cos(2πn/(N−1))). Tapers to zero at both
+ends — lower spectral leakage than Hamming. Pass to `triadic_orthogonal_decomposition` via `window`.
+"""
+function hann_window(N)
+    return [0.5 * (1 - cospi(2 * (n - 1) / (N - 1))) for n in 1:N]
+end
+
+"""
+    tukey_window(N; α=0.5) -> Vector{Float64}
+
+Tukey (tapered-cosine) window of length N: a flat middle with cosine tapers over a fraction `α` of
+the length at each end. `α = 0` is rectangular (no taper), `α = 1` is the Hann window; intermediate
+`α` trades main-lobe width against leakage.
+"""
+function tukey_window(N; α=0.5)
+    0 <= α <= 1 || throw(ArgumentError("tukey_window: α must be in [0,1] (got $α)."))
+    α == 0 && return ones(Float64, N)
+    w = ones(Float64, N)
+    edge = α * (N - 1) / 2
+    @inbounds for n in 1:N
+        x = n - 1
+        if x < edge
+            w[n] = 0.5 * (1 + cospi(x / edge - 1))
+        elseif x > (N - 1) - edge
+            w[n] = 0.5 * (1 + cospi((x - (N - 1) + edge) / edge))
+        end
+    end
+    return w
 end
 
 """
