@@ -113,6 +113,12 @@ function dealiasing_mask(ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
     return mask
 end
 
+"""
+    dealiasing_mask!(mask, ns; rule=:twothirds) -> mask
+
+In-place version of [`dealiasing_mask`](@ref): write the keep/discard Bool mask for grid shape `ns`
+into `mask` (`rule = :twothirds` for the Orszag 2/3 cutoff, otherwise the Nyquist half).
+"""
 function dealiasing_mask!(mask::AbstractArray{Bool}, ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
     threshold = rule === :twothirds ? 1.0/3.0 : 0.5
     for I in CartesianIndices(ns)

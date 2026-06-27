@@ -54,7 +54,7 @@ end
 
 Smooth band-to-band transfer `T(n,m)` of a quadratic invariant between the graded spectral
 `bands` (Eyink & Aluie 2009) — the smooth-filter analogue of
-[`calculate_shell_to_shell_transfer`](@ref). For incompressible flow `T` is antisymmetric
+`calculate_shell_to_shell_transfer`. For incompressible flow `T` is antisymmetric
 (`T(n,m) = −T(m,n)`), conserves (`Σ T = 0`), and `Σ_m T(n,m)` is the band-summed transfer
 spectrum. Like the sharp version it accepts an `advecting_hat` (so the primary field can be a
 passive scalar advected by the velocity) and an anisotropic `geometry`.

@@ -83,7 +83,7 @@ using .Types:
     TriadicOrthogonalDecompositionResult
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
-export AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning

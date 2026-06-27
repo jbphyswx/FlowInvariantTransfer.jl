@@ -1,4 +1,4 @@
-# Architecture: Design & Implementation
+# Architecture
 
 This document explains how FlowInvariantTransfer.jl is organized internally and how
 computations are dispatched.
@@ -139,7 +139,7 @@ AbstractFilter (abstract)
 ```
 SpectralFluxResult{V}                           # k_shells, T(k), Π(K)
 ShellToShellResult{V, M, E}                     # T(n,m) matrix, net transfer
-ModeToModeTriadResult{I, KS, A, NT}             # net T(k), optional T(K,Q) reductions
+ModeToModeTriadResult{I, KS, A, S}              # net_transfer T(k), resolved S(k|p)
 CoarseGrainingFluxResult{S, A}                  # Π_ℓ(x) field
 CoarseGrainingFluxResultWithDiagnostics{S, A}   # + stress/strain tensors
 TriadicOrthogonalDecompositionResult{V, A3, PM} # mode bispectrum, modes, energy budget
@@ -155,7 +155,6 @@ numbers, and Unitful quantities.
 NonlinearTermWorkspace    # FFT plans, physical-space buffers, N̂
 SpectralFluxWorkspace     # T_spec, flux accumulators
 ShellToShellWorkspace     # Shell-filtered velocity, shell_idx
-ScaleToScaleWorkspace     # net_transfer, T_mat, shell_idx
 ```
 
 Workspaces **own all temporaries** for their respective computations. Preallocate once,

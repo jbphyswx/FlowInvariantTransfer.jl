@@ -148,7 +148,12 @@ function _decompose_field_spectral(decomp::AbstractFieldDecomposition, velocity_
     ))
 end
 
-# Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
+"""
+    helmholtz_project_spectral!(args...; kwargs...)
+
+In-place spectral Helmholtz projection of a velocity field into its rotational/divergent parts.
+Provided by the `HelmholtzDecomposition.jl` extension; this core stub errors until it is loaded.
+"""
 function helmholtz_project_spectral!(args...; kwargs...)
     throw(ArgumentError(
         "helmholtz_project_spectral! requires HelmholtzDecomposition.jl. " *

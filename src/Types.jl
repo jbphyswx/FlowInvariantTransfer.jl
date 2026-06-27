@@ -24,8 +24,23 @@ Concrete subtypes dispatch `calculate_energy_transfer` to specific algorithms.
 """
 abstract type AbstractEnergyTransferMethod end
 
-# Declare abstract types needed as type parameters before the structs that use them
+# Declare abstract types needed as type parameters before the structs that use them.
+
+"""
+    AbstractShellBinning
+
+Supertype for shell *spacing* strategies (how wavenumber space is partitioned into shells):
+[`LinearBinning`](@ref), [`LogarithmicBinning`](@ref), [`DyadicBinning`](@ref),
+[`CustomBinning`](@ref). Orthogonal to the shell *coordinate* ([`AbstractShellGeometry`](@ref)).
+"""
 abstract type AbstractShellBinning end
+
+"""
+    AbstractFilter
+
+Supertype for spectral filter kernels used by coarse-graining: [`SharpSpectralFilter`](@ref),
+[`GaussianFilter`](@ref), [`TopHatFilter`](@ref).
+"""
 abstract type AbstractFilter end
 
 # ---------------------------------------------------------------------------

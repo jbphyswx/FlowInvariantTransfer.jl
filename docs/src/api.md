@@ -11,6 +11,7 @@ calculate_energy_transfer
 ```@docs
 calculate_spectral_flux
 calculate_spectral_flux!
+calculate_scalar_flux
 ```
 
 ## Shell-to-Shell Transfer
@@ -18,13 +19,27 @@ calculate_spectral_flux!
 ```@docs
 calculate_shell_to_shell_transfer
 calculate_shell_to_shell_transfer!
+calculate_scalar_shell_to_shell_transfer
 ```
 
 ## Mode-to-Mode Triad Transfer
 
 ```@docs
 calculate_mode_to_mode_transfer
-calculate_mode_to_mode_transfer!
+calculate_scalar_mode_to_mode_transfer
+```
+
+## Smooth Band-to-Band Transfer
+
+```@docs
+calculate_band_to_band_transfer
+```
+
+## Partial Fluxes (decomposition-resolved)
+
+```@docs
+calculate_partial_fluxes
+calculate_helical_partial_fluxes
 ```
 
 ## Coarse-Graining Flux
@@ -37,6 +52,9 @@ calculate_coarse_graining_flux
 
 ```@docs
 triadic_orthogonal_decomposition
+hamming_window
+hann_window
+tukey_window
 ```
 
 ## Nonlinear Term
@@ -78,6 +96,7 @@ AbstractInvariant
 KineticEnergy
 Helicity
 Enstrophy
+PassiveScalar
 ```
 
 ## Decomposition Types
@@ -88,6 +107,17 @@ NoDecomposition
 HelmholtzDecomposition
 RotationalDecomposition
 DivergentDecomposition
+HelicalDecomposition
+ToroidalPoloidalDecomposition
+```
+
+## Dealiasing Strategies
+
+```@docs
+AbstractDealiasing
+NoDealiasing
+OrszagTwoThirds
+PaddedThreeHalves
 ```
 
 ## Result Types
@@ -107,7 +137,6 @@ TriadicOrthogonalDecompositionResult
 NonlinearTermWorkspace
 SpectralFluxWorkspace
 ShellToShellWorkspace
-ScaleToScaleWorkspace
 ```
 
 ## Wavenumber Utilities
@@ -119,13 +148,14 @@ dealiasing_mask
 dealiasing_mask!
 ```
 
-## Shell Binning
+## Shell Binning & Geometry
 
 ```@docs
 assign_shells
 shell_edges
 shell_centers
 n_shells
+shell_coordinate
 ```
 
 ## Binning Types
@@ -136,24 +166,42 @@ LinearBinning
 LogarithmicBinning
 DyadicBinning
 CustomBinning
+SmoothBands
 ```
 
-## Backend Types
+## Shell Geometry
 
 ```@docs
-AbstractExecutionBackend
-SerialBackend
+AbstractShellGeometry
+ShellMagnitude
+IsotropicShells
+PerpendicularShells
+ParallelShells
+```
+
+## Spectral (Transform) Backends
+
+```@docs
+AbstractSpectralBackend
+DirectSumBackend
 FFTBackend
-ThreadedBackend
-DistributedBackend
-GPUBackend
-AutoBackend
 NUFFTBackend
 SHTBackend
 NUFSHTBackend
 ```
 
-## Filter Types
+## Execution (Parallelism) Backends
+
+```@docs
+AbstractExecutionBackend
+SerialBackend
+ThreadedBackend
+DistributedBackend
+GPUBackend
+AutoBackend
+```
+
+## Filters
 
 ```@docs
 AbstractFilter
