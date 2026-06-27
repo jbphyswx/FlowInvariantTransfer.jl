@@ -168,16 +168,61 @@ developed cascades:
 `anisotropic_flux` · `triadic_orthogonal_decomposition` · `mhd_on_top` (a domain model built on the
 public API).
 
-### Example figure
+### Gallery
 
-Shell-to-shell `T(n,m)`, net transfer per shell, and a kinetic-energy slice for a **3D
-Taylor–Green vortex** (N=32³, evolved to t≈5 by a pseudospectral Navier–Stokes solver). The
-antisymmetric near-diagonal band and the low-shell-gain / high-shell-loss net transfer are the
-canonical **forward energy cascade** of 3D turbulence.
+Every figure below is produced by a script in [`examples/`](examples/) run on a **canonical evolved
+flow** (not random noise) — so the physics is verifiable by eye. Run any of them with
+`julia --project=examples examples/<name>.jl`.
 
-![3D TGV shell-to-shell energy transfer](docs/src/assets/energy_transfer.png)
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
+`k`; the cumulative flux `Π(K) > 0` across the inertial range is the textbook 3D forward cascade.
 
-Cascade development from t=0 to t=10:
+![Spectral energy transfer](docs/src/assets/spectral_flux.png)
+
+**Shell-to-shell `T(n,m)` (3D TGV).** The antisymmetric near-diagonal band (blue gain / red loss)
+and the low-shell-gain / high-shell-loss net transfer are the cascade resolved scale-by-scale.
+
+![Shell-to-shell transfer](docs/src/assets/shell_to_shell.png)
+
+**Mode-to-mode `S(k|p)` reduces to shell-to-shell `T(n,m)` (2D turbulence).** The resolved
+mode-to-mode tensor summed over shells (left) reproduces the directly-computed `T(n,m)` (right) —
+the reduction hierarchy, validated visually.
+
+![Mode-to-mode reduces to shell-to-shell](docs/src/assets/mode_to_mode.png)
+
+**Helicity-resolved flux `Π±` (3D TGV).** Energy flux split onto positive/negative-helicity
+components; `Π⁺ ≈ Π⁻` and `Π⁺+Π⁻ = Π` because the TGV is non-helical — a check the decomposition is
+correct.
+
+![Helicity-resolved flux](docs/src/assets/helical_flux.png)
+
+**Isotropic vs. anisotropic flux (3D TGV).** `Π(|k|)` vs. the perpendicular `Π(k⊥)` and parallel
+`Π(k∥)` directional fluxes from the anisotropic shell geometry.
+
+![Anisotropic flux](docs/src/assets/anisotropic_flux.png)
+
+**Passive-scalar variance transfer (scalar stirred by a 3D TGV).** The same machinery applied to a
+different quadratic invariant: variance transfer `T_θ(k)`, flux `Π_θ(K)`, and the scalar
+shell-to-shell matrix.
+
+![Passive-scalar variance transfer](docs/src/assets/passive_scalar.png)
+
+**Triadic Orthogonal Decomposition — detecting a known quadratic triad.** The mode bispectrum lights
+up exactly on the imposed `{f_l, f_n}` triad family (control stays dark), and the recipient mode is
+recovered to the imposed shape.
+
+![Triadic Orthogonal Decomposition](docs/src/assets/triadic_orthogonal_decomposition.png)
+
+**MHD diagnostics built _on top_ of the public API (2D Orszag–Tang).** Magnetism is not in the
+core — this current-sheet flow's total/kinetic/magnetic energy fluxes are assembled entirely from
+the package's public primitives, with `total = kinetic + magnetic`.
+
+![MHD on the public API](docs/src/assets/mhd_on_top.png)
+
+### Cascade animation
+
+Shell-to-shell `T(n,m)`, net transfer per shell, and a KE slice for a 3D TGV (N=32³) developing
+from t=0 to t=10 — the forward cascade building in time.
 
 ![3D TGV cascade animation](docs/src/assets/energy_transfer.gif)
 
@@ -192,13 +237,17 @@ Two orthogonal axes that compose:
 - **Execution (parallelism):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
   `DistributedBackend` · `GPUBackend{B}` (KernelAbstractions).
 
+Every diagnostic supports both spectral transforms (Direct + FFT). The execution axis
+(Threaded/Distributed/GPU) applies to the diagnostics with an outer loop over shells/triads; the
+rest run serially over one FFT pass. MPI (batch + pencil axes) is a separate distribution layer.
+
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
-| Spectral flux | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Spectral flux | ✓ | ✓ | — | — | — |
 | Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Band-to-band | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Partial fluxes | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mode-to-mode | ✓ | ✓ | — | — | — |
+| Band-to-band | ✓ | ✓ | — | — | — |
+| Partial fluxes | ✓ | ✓ | — | — | — |
 | TOD | ✓ | ✓ | ✓ | — | — |
 
 (Diagnostics that delegate to the nonlinear-term engine inherit every backend; `PaddedThreeHalves`
