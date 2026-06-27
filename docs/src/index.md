@@ -59,7 +59,7 @@ Two orthogonal axes: **spectral** (transform: [`DirectSumBackend`](@ref), [`FFTB
 | Partial fluxes | ✓ | ✓ | ✓ | ✓ | ✓ |
 | TOD | ✓ | ✓ | ✓ | — | — |
 
-See [Backends & Extensions](@ref) for the extension table.
+See [Backends, Dealiasing & Extensions](@ref) for the extension table.
 
 ---
 
@@ -163,6 +163,6 @@ Cascade development from t=0 to t=10:
 
 - [Methods & Theory](@ref) — mathematical background for each diagnostic
 - [Architecture](@ref) — internal design and dispatch
-- [Backends & Extensions](@ref) — backends and the extension table
+- [Backends, Dealiasing & Extensions](@ref) — backends and the extension table
 - [API Reference](@ref) — full docstring index
 ```
