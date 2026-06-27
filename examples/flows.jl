@@ -6,6 +6,8 @@ To make the examples actually *show* the physics, we evolve canonical initial co
 small pseudospectral solver until a cascade is established, then diagnose that snapshot:
 
   - `evolve_taylor_green`  : 3D Taylor–Green vortex (forward energy cascade), optional passive scalar.
+  - `evolve_abc_flow`      : 3D maximally-helical ABC flow (strong net helicity ⇒ Π⁺ ≠ Π⁻).
+  - `evolve_2d_turbulence` : 2D decaying turbulence (small-N flow for the mode-to-mode diagnostic).
   - `evolve_orszag_tang`   : 2D Orszag–Tang vortex (canonical incompressible-MHD test).
 
 Velocities are returned as raw `fft` Fourier coefficients packed `(ns..., D)` — exactly the
