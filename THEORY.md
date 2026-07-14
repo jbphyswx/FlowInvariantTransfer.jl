@@ -246,6 +246,18 @@ References: Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023); W
 
 For rotating/stratified/geophysical flows, isotropic `|k|` shells are inadequate; one uses **2D shells** in `(k_⊥, k_∥)` (perpendicular/parallel to rotation axis or gravity). Fluxes become directional (`Π_⊥`, `Π_∥`). Larger, geometry-specific effort. (Alexakis & Biferale §4.3–4.5.)
 
+### 6.1 Spherical spectral transfer (2D barotropic) — [Boer 1983; Augier–Lindborg 2013]
+
+On the sphere the Cartesian Fourier machinery is replaced by the **spherical-harmonic degree** spectrum `l`. For 2D non-divergent (barotropic) flow with streamfunction `ψ` and vorticity `ζ = ∇²ψ` (so `ζ̂_lm = -l(l+1)/a² ψ̂_lm`, radius `a`), velocity `u = k̂×∇ψ`, the vorticity equation `∂_t ζ + J(ψ,ζ) = …` gives the modal energy `E(l) = ½ l(l+1)/a² Σ_m|ψ̂_lm|²` and enstrophy `Z(l) = ½ Σ_m|ζ̂_lm|²`. The nonlinear transfers are
+
+$$T_E(l) = -\sum_m \mathrm{Re}\{\hat\psi^*_{lm}\,\hat A_{lm}\},\qquad T_Z(l) = \sum_m \mathrm{Re}\{\hat\zeta^*_{lm}\,\hat A_{lm}\},\qquad A = J(\psi,\zeta) = \mathbf{u}\cdot\nabla\zeta,$$
+
+both **conserving** (`Σ_l T_E = Σ_l T_Z = 0`, since `∫ψ J(ψ,ζ) dΩ = 0` by antisymmetry — the machine-precision validation anchor), with cumulative fluxes `Π(L) = -Σ_{l≤L} T(l)`. The counter-directional energy↔enstrophy dual cascade (Kraichnan–Batchelor, §2) is the spherical analogue.
+
+**Numerics (pseudospectral):** the horizontal gradient of a scalar `f` is the spin-1 "eth" field `ðf = -(∂_θ + i\csc\theta\,∂_φ)f`; then `A = (1/a²)\,\mathrm{Im}\{\overline{ð\psi}\,ð\zeta\}` in physical space, analysed back to `Â_lm`. `J` is quadratic (content up to degree `2·lmax`), so the products are evaluated on a **dealiased grid resolving `2·lmax`** and truncated to `l≤lmax`, making the retained transfers alias-free.
+
+**Implementation:** `calculate_energy_transfer(SphericalTransferMethod(; radius), ζ)` → `SphericalTransferResult`. Regular colatitude–longitude grids (an `AbstractMatrix` vorticity field) route to **`FastSphericalHarmonics.jl`** (its real/SVector `spinsph_eth` gives the exact gradient); scattered points route to **`NUFSHT.jl`**. Convention verified directly against FastSphericalHarmonics' eth definition and its `test_spin.jl` grad testset.
+
 ---
 
 ## 7. Triadic Orthogonal Decomposition (TOD)
@@ -268,6 +280,7 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 | Partial fluxes: Helmholtz rot/div (leverage `HelmholtzDecomposition.jl`), helical ±, tor/pol | done (`SpectralFlux.calculate_partial_fluxes`; `decomposition=` kwarg) |
 | Smooth band-to-band `T(K,Q)` | done (`BandTransfer.calculate_band_to_band_transfer`) |
 | Anisotropic shells `(k_⊥,k_∥)` | partial (directional shell geometries `PerpendicularShells`/`ParallelShells`) |
+| Spherical spectral transfer `T_E(l)`, `T_Z(l)` (2D barotropic) | done (`SphericalTransferMethod`; FSH regular grid + NUFSHT scattered; §6.1) |
 | **Compressible energy budget (momentum-weighted transfer + KE↔IE pressure-dilatation)** | planned (#1 / Part G; spec transcribed in §0.5, Singh–Tiwari–Sharma–Verma 2025) |
 
 ---

@@ -1,7 +1,7 @@
 module FlowInvariantTransferFFTWExt
 
 using FFTW: FFTW
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractShellBinning, LinearBinning, ShellToShellResult, AbstractInvariant, KineticEnergy
 using FlowInvariantTransfer.Invariants: transfer_density!
 using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
@@ -55,7 +55,7 @@ end
 # `dealiasing` is known at workspace construction, so the (larger) padded scratch is built here ONLY
 # for PaddedThreeHalves and its concrete type flows into `FFTPlanBundle`'s `pad` — keeping every
 # `bundle.pad` access type-stable with no allocation on the common 2/3 path.
-function FET.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing)
+function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     ct  = similar(velocity_hat, ns...)   # complex (ns...)
@@ -65,8 +65,8 @@ function FET.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, 
         (FFTW.plan_fft(ct), FFTW.plan_bfft(ct))
     end
     k_comp   = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-    keepmask = [!FET.NonlinearTerm._is_dealiased(I, ns, nd) for I in CartesianIndices(ns)]
-    pad = dealiasing isa FET.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks) : nothing
+    keepmask = [!FIT.NonlinearTerm._is_dealiased(I, ns, nd) for I in CartesianIndices(ns)]
+    pad = dealiasing isa FIT.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks) : nothing
     return FFTPlanBundle(p_fft, p_bfft, ct, ct2, k_comp, keepmask, pad)
 end
 
@@ -105,7 +105,7 @@ Normalisation: `ifft = bfft/Np`, and the forward result is divided by `Np` (pack
 convention). `N_i = (u_adv)_j ∂_j u_i`: `u_phys` is the advecting velocity, `grad_phys` the
 advected gradient.
 """
-function FET.NonlinearTerm._nonlinear_term_fft!(
+function FIT.NonlinearTerm._nonlinear_term_fft!(
     ws,
     velocity_hat,
     ks;
@@ -215,7 +215,7 @@ Allocation-free: uses the preplanned transforms + reusable `(Ms…)` buffers in 
 (built for `PaddedThreeHalves` at workspace construction) and in-place `mul!` / fused broadcasts.
 Physical normalization: `N̂[k] = DFT_Ms(𝒩)[k] / Mtot` (unnormalized synthesis; see NonlinearTerm docstring).
 """
-function FET.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
+function FIT.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
     pad = ws.plans.pad
     pad === nothing && throw(ArgumentError(
         "PaddedThreeHalves needs a workspace built for it — construct with dealiasing=PaddedThreeHalves()."))
@@ -269,12 +269,12 @@ FFT-accelerated shell-to-shell energy transfer T(n,m) using Alexakis et al. (200
 antisymmetric definition. Writes into `result` using workspace `ws`.
 Reuses ws.û_m and ws.nonlinear.N̂ buffers per mediator shell — no N_sh-fold allocations.
 """
-function FET.ShellToShellTransfer._shell_to_shell_fft!(
+function FIT.ShellToShellTransfer._shell_to_shell_fft!(
     result::ShellToShellResult,
     ws::ShellToShellWorkspace,
     velocity_hat,
     ks;
-    dealiasing::FET.Types.AbstractDealiasing = FET.Types.OrszagTwoThirds(),
+    dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
@@ -298,8 +298,8 @@ function FET.ShellToShellTransfer._shell_to_shell_fft!(
             ws.shell_idx[I] == m || continue
             for c in 1:M; ws.û_m[I, c] = velocity_hat[I, c]; end
         end
-        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-            dealiasing=dealiasing, spectral=FET.Types.FFTBackend(), advecting_hat=advecting_hat)
+        FIT.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
+            dealiasing=dealiasing, spectral=FIT.Types.FFTBackend(), advecting_hat=advecting_hat)
         transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)
         @inbounds for I in CartesianIndices(ns)
             n = ws.shell_idx[I]
@@ -354,7 +354,7 @@ exactly like the direct-sum path. The caller (`triadic_orthogonal_decomposition`
 single `fftshift` to centre the spectrum; this routine must NOT shift as well, or the result is
 shifted twice (a full wrap for even `nDFT`) and `Q_hat` ends up misaligned with the frequency axis.
 """
-function FET.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
+function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     dft_col,
     segment_col,
     window,

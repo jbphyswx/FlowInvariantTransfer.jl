@@ -10,7 +10,7 @@ Run from the repo root:
     julia --project=examples examples/shell_to_shell.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
@@ -18,9 +18,9 @@ function run_shell_to_shell_example(; N=32)
     println("--- Shell-to-Shell Transfer Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FET.LinearBinning(2π / L)
-    result = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(),
-        verify_antisymmetry=true, spectral=FET.FFTBackend())
+    b = FIT.LinearBinning(2π / L)
+    result = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(),
+        verify_antisymmetry=true, spectral=FIT.FFTBackend())
 
     Tn = sqrt(sum(abs2, result.transfer_matrix))
     println("Shells: ", length(result.shell_centers))

@@ -11,11 +11,11 @@ using BenchmarkTools: BenchmarkTools, @benchmarkable, BenchmarkGroup, run, media
 using FFTW: FFTW
 using OhMyThreads: OhMyThreads
 using Random: Random
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 # Incompressible 2D velocity coefficients (package convention û = fft(u)/Np) from a streamfunction.
 function field2d(N; L = 2π, seed = 1)
-    ks = FET.wavenumber_grid((N, N), (L, L))
+    ks = FIT.wavenumber_grid((N, N), (L, L))
     kx = [ks[1][i] for i in 1:N, j in 1:N]
     ky = [ks[2][j] for i in 1:N, j in 1:N]
     ψh = FFTW.fft(randn(Random.MersenneTwister(seed), N, N)) ./ N^2
@@ -33,35 +33,35 @@ end
 
 for N in SIZES
     û, ks = field2d(N)
-    b  = FET.LinearBinning(2π / (2π))
-    ws = FET.NonlinearTermWorkspace(û, ks)
+    b  = FIT.LinearBinning(2π / (2π))
+    ws = FIT.NonlinearTermWorkspace(û, ks)
 
     # Nonlinear term: direct sum (O(N^{2D}), small grids only) vs FFT (O(Nᴰ log N)).
     if N <= 32
         SUITE["nonlinear_term"]["N$N/directsum"] =
-            @benchmarkable FET.compute_nonlinear_term!($ws, $û, $ks; spectral = FET.DirectSumBackend()) evals=1
+            @benchmarkable FIT.compute_nonlinear_term!($ws, $û, $ks; spectral = FIT.DirectSumBackend()) evals=1
     end
     SUITE["nonlinear_term"]["N$N/fft"] =
-        @benchmarkable FET.compute_nonlinear_term!($ws, $û, $ks; spectral = FET.FFTBackend()) evals=1
+        @benchmarkable FIT.compute_nonlinear_term!($ws, $û, $ks; spectral = FIT.FFTBackend()) evals=1
 
     # Spectral flux Π(K) (FFT path).
     SUITE["spectral_flux"]["N$N/fft"] =
-        @benchmarkable FET.calculate_spectral_flux($û, $ks; binning = $b, spectral = FET.FFTBackend()) evals=1
+        @benchmarkable FIT.calculate_spectral_flux($û, $ks; binning = $b, spectral = FIT.FFTBackend()) evals=1
 
     # Shell-to-shell T(n,m): serial vs threaded (FFT spectral).
     SUITE["shell_to_shell"]["N$N/serial"] =
-        @benchmarkable FET.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
-            spectral = FET.FFTBackend(), execution = FET.SerialBackend(), verify_antisymmetry = false) evals=1
+        @benchmarkable FIT.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
+            spectral = FIT.FFTBackend(), execution = FIT.SerialBackend(), verify_antisymmetry = false) evals=1
     if THREADED
         SUITE["shell_to_shell"]["N$N/threaded"] =
-            @benchmarkable FET.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
-                spectral = FET.FFTBackend(), execution = FET.ThreadedBackend(), verify_antisymmetry = false) evals=1
+            @benchmarkable FIT.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
+                spectral = FIT.FFTBackend(), execution = FIT.ThreadedBackend(), verify_antisymmetry = false) evals=1
     end
 
     # Resolved mode-to-mode S(k|p) — O(N^{2D}); only the smallest grid (force past the guard).
     if N == first(SIZES)
         SUITE["mode_to_mode"]["N$N/fft"] =
-            @benchmarkable FET.calculate_mode_to_mode_transfer($û, $ks; spectral = FET.FFTBackend(), force = true) evals=1
+            @benchmarkable FIT.calculate_mode_to_mode_transfer($û, $ks; spectral = FIT.FFTBackend(), force = true) evals=1
     end
 end
 

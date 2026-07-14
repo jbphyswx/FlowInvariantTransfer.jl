@@ -12,10 +12,10 @@ using KernelAbstractions: KernelAbstractions as KA
 using BenchmarkTools: @belapsed
 using FFTW: FFTW
 using Random: Random
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 function field2d(N; L = 2π, seed = 1)
-    ks = FET.wavenumber_grid((N, N), (L, L))
+    ks = FIT.wavenumber_grid((N, N), (L, L))
     kx = [ks[1][i] for i in 1:N, j in 1:N]
     ky = [ks[2][j] for i in 1:N, j in 1:N]
     ψh = FFTW.fft(randn(Random.MersenneTwister(seed), N, N)) ./ N^2
@@ -24,20 +24,20 @@ end
 
 const HAS_GPU = CUDA.functional()
 println("CUDA functional: ", HAS_GPU)
-device_backend = HAS_GPU ? FET.GPUBackend(CUDA.CUDABackend()) : FET.GPUBackend(KA.CPU())
+device_backend = HAS_GPU ? FIT.GPUBackend(CUDA.CUDABackend()) : FIT.GPUBackend(KA.CPU())
 to_device(x) = HAS_GPU ? CUDA.CuArray(x) : x
 
 for N in (64, 128, 256)
     û, ks = field2d(N)
-    b = FET.LinearBinning(2π / (2π))
+    b = FIT.LinearBinning(2π / (2π))
 
-    t_cpu = @belapsed FET.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
-        spectral = FET.FFTBackend(), execution = FET.SerialBackend(), verify_antisymmetry = false)
+    t_cpu = @belapsed FIT.calculate_shell_to_shell_transfer($û, $ks; binning = $b,
+        spectral = FIT.FFTBackend(), execution = FIT.SerialBackend(), verify_antisymmetry = false)
 
     ûd  = to_device(û)
     ksd = HAS_GPU ? map(CUDA.CuArray, ks) : ks
-    t_dev = @belapsed FET.calculate_shell_to_shell_transfer($ûd, $ksd; binning = $b,
-        spectral = FET.FFTBackend(), execution = $device_backend, verify_antisymmetry = false)
+    t_dev = @belapsed FIT.calculate_shell_to_shell_transfer($ûd, $ksd; binning = $b,
+        spectral = FIT.FFTBackend(), execution = $device_backend, verify_antisymmetry = false)
 
     println("N=$N  serial-CPU=$(round(t_cpu*1e3; digits=2))ms  ",
             HAS_GPU ? "GPU" : "KA-CPU", "=$(round(t_dev*1e3; digits=2))ms  ",

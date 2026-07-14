@@ -1,7 +1,7 @@
 module FlowInvariantTransferFINUFFTExt
 
 using FINUFFT: FINUFFT
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxMethod, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 using FlowInvariantTransfer.Filters: filter_response
 using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
@@ -41,7 +41,7 @@ This implements the approach:
 
 For 2D inputs, uses `nufft2d1`/`nufft2d2`; for 3D, `nufft3d1`/`nufft3d2`.
 """
-function FET.nufft_coarse_graining_flux(
+function FIT.nufft_coarse_graining_flux(
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ℓ::Real,
@@ -160,14 +160,14 @@ method in the core; it routes to [`nufft_coarse_graining_flux`](@ref) using the 
 Requires `using FINUFFT`. (Mirrors the 4-arg `velocity_fields, coords, ms` convention the NUFSHT/FSH
 extensions use for the spectral methods, giving `CoarseGrainingFluxMethod` a scattered-grid path.)
 """
-function FET.calculate_energy_transfer(
+function FIT.calculate_energy_transfer(
     method::CoarseGrainingFluxMethod,
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ms::Tuple;
     kwargs...,
 )
-    return FET.nufft_coarse_graining_flux(
+    return FIT.nufft_coarse_graining_flux(
         velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
 end
 

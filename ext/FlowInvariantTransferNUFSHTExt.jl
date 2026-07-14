@@ -1,11 +1,11 @@
 module FlowInvariantTransferNUFSHTExt
 
 using NUFSHT: NUFSHT
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: NUFSHTBackend, SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod
 
 # NUFSHTBackend front-end helpers for scattered/non-uniform spherical grids
-function FET.calculate_energy_transfer(
+function FIT.calculate_energy_transfer(
     method::Union{SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod},
     velocity_fields::Tuple,
     coords_vecs::Tuple,
@@ -43,7 +43,7 @@ function FET.calculate_energy_transfer(
     ks = (ks_l, ks_l)
     
     # Delegate to the core spectral calculation
-    return FET.calculate_energy_transfer(method, coeffs, ks; kwargs...)
+    return FIT.calculate_energy_transfer(method, coeffs, ks; kwargs...)
 end
 
 end # module

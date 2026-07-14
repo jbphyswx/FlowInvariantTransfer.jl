@@ -18,40 +18,40 @@ Run from the repo root:
     julia --project=examples examples/mhd_on_top.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
 # Bin a real per-mode density into shells → (centers, T(k), Π(K)=cumsum) using public helpers.
 function shell_flux(density, ks, binning)
-    kmag  = FET.wavenumber_magnitude_grid(ks)
-    edges = FET.shell_edges(binning, maximum(kmag))
-    idx   = FET.assign_shells(kmag, edges)
-    K     = FET.shell_centers(binning, maximum(kmag))
+    kmag  = FIT.wavenumber_magnitude_grid(ks)
+    edges = FIT.shell_edges(binning, maximum(kmag))
+    idx   = FIT.assign_shells(kmag, edges)
+    K     = FIT.shell_centers(binning, maximum(kmag))
     T = zeros(length(K))
     for I in CartesianIndices(size(density)); n = idx[I]; n == 0 && continue; T[n] += density[I]; end
     return K, T, cumsum(T)
 end
 
 # Re{ carrier*(k)·N(k) } via the package's transfer_density (kinetic-energy form = the dot product).
-redot(carrier, N, ks) = FET.transfer_density(FET.KineticEnergy(), carrier, N, ks)
+redot(carrier, N, ks) = FIT.transfer_density(FIT.KineticEnergy(), carrier, N, ks)
 
 function run_mhd_on_top_example(; N=128)
     println("--- MHD built on FlowInvariantTransfer primitives (2D Orszag–Tang) ---")
     û, b̂, ks, L = evolve_orszag_tang(; N=N)
-    da, sp = FET.OrszagTwoThirds(), FET.FFTBackend()
+    da, sp = FIT.OrszagTwoThirds(), FIT.FFTBackend()
 
     # --- the four advection terms, all from the GENERAL nonlinear-term engine -------------------
-    N_uu = FET.compute_nonlinear_term(û, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)u
-    N_bb = FET.compute_nonlinear_term(b̂, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)b
-    N_ub = FET.compute_nonlinear_term(b̂, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)b
-    N_bu = FET.compute_nonlinear_term(û, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)u
+    N_uu = FIT.compute_nonlinear_term(û, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)u
+    N_bb = FIT.compute_nonlinear_term(b̂, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)b
+    N_ub = FIT.compute_nonlinear_term(b̂, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)b
+    N_bu = FIT.compute_nonlinear_term(û, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)u
 
     # MHD energy budget (the sign bookkeeping IS the MHD equations — domain code, lives here):
     t_KE = redot(û, N_uu, ks) .- redot(û, N_bb, ks)   # kinetic: advection − Lorentz work
     t_ME = redot(b̂, N_ub, ks) .- redot(b̂, N_bu, ks)   # magnetic: induction
-    b = FET.LinearBinning(2π / L)
+    b = FIT.LinearBinning(2π / L)
     K, T_tot, Π_tot = shell_flux(t_KE .+ t_ME, ks, b)
     _, _,    Π_KE   = shell_flux(t_KE, ks, b)
     _, _,    Π_ME   = shell_flux(t_ME, ks, b)

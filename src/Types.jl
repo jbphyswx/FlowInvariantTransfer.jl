@@ -1,6 +1,6 @@
 module Types
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
@@ -10,7 +10,7 @@ export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, resolve_execution, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
+export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -318,6 +318,30 @@ struct TriadicOrthogonalDecompositionMethod{N, O, M} <: AbstractEnergyTransferMe
 end
 TriadicOrthogonalDecompositionMethod(; nfft=nothing, noverlap=nothing, nmode=nothing) =
     TriadicOrthogonalDecompositionMethod(nfft, noverlap, nmode)
+
+"""
+    SphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+
+Spectral energy/enstrophy transfer for 2D non-divergent (barotropic) flow on the sphere, in the
+spherical-harmonic degree spectrum `l`. Given the vorticity field `ζ`, with streamfunction
+`ψ = ∇⁻²ζ` (so `ζ̂_lm = -l(l+1)/a² ψ̂_lm`) and advection `A = J(ψ,ζ) = u·∇ζ`, `u = k̂×∇ψ`, the
+transfers are
+
+    T_E(l) = -Σ_m Re{ψ̂*_lm Â_lm},   T_Z(l) = Σ_m Re{ζ̂*_lm Â_lm},
+
+both conserving (Σ_l T = 0). See THEORY.md §"Spherical spectral transfer".
+
+Dispatched through [`calculate_energy_transfer`](@ref): a regular colatitude–longitude grid (an
+`AbstractMatrix` vorticity field) routes to the FastSphericalHarmonics extension; scattered points
+(a vorticity vector + `(θ, φ)` coordinates) route to the NUFSHT extension.
+
+# Fields
+- `radius::T`: sphere radius `a` (default `1.0`).
+"""
+struct SphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+    radius::T
+end
+SphericalTransferMethod(; radius=1.0) = SphericalTransferMethod(radius)
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +719,27 @@ struct SpectralFluxResult{V<:AbstractVector}
     flux::V
 end
 SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k)}(k, T, f)
+
+"""
+    SphericalTransferResult{V<:AbstractVector}
+
+Result of a spherical spectral energy/enstrophy transfer ([`SphericalTransferMethod`](@ref)),
+indexed by spherical-harmonic degree `l = 0…lmax`.
+
+# Fields
+- `degrees::V`: the degrees `l`.
+- `energy_transfer::V`: `T_E(l)` — nonlinear kinetic-energy transfer into degree `l`; `Σ_l T_E ≈ 0`.
+- `enstrophy_transfer::V`: `T_Z(l)` — enstrophy transfer into degree `l`; `Σ_l T_Z ≈ 0`.
+- `energy_flux::V`: `Π_E(L) = -Σ_{l≤L} T_E(l)` — cumulative up-degree energy flux.
+- `enstrophy_flux::V`: `Π_Z(L) = -Σ_{l≤L} T_Z(l)`.
+"""
+struct SphericalTransferResult{V<:AbstractVector}
+    degrees::V
+    energy_transfer::V
+    enstrophy_transfer::V
+    energy_flux::V
+    enstrophy_flux::V
+end
 
 """
     CompressibleFluxResult{V, CH, PD}

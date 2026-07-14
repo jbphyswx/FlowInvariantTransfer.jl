@@ -9,7 +9,7 @@ Generates:
   - energy_transfer.gif  : animation of cascade development from t=0 to t=10
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FFTW: FFTW
 using CairoMakie: CairoMakie
 
@@ -80,20 +80,20 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
     frames_T    = Matrix{Float64}[]
     frames_Tnet = Vector{Float64}[]
 
-    # FET binning (unit shells in 3D; k=√(kx²+ky²+kz²))
-    # We compute T(n,m) using FET on the 3D→packed representation.
-    # FET expects (N,N,N,3) velocity array or we use the 2D interface on slices.
-    # For simplicity: use the built-in FET 3D wavenumber grid + shell-to-shell.
-    ks3 = FET.wavenumber_grid((N, N, N), (L, L, L))
-    b   = FET.LinearBinning(2π/L)   # unit shells
+    # FIT binning (unit shells in 3D; k=√(kx²+ky²+kz²))
+    # We compute T(n,m) using FIT on the 3D→packed representation.
+    # FIT expects (N,N,N,3) velocity array or we use the 2D interface on slices.
+    # For simplicity: use the built-in FIT 3D wavenumber grid + shell-to-shell.
+    ks3 = FIT.wavenumber_grid((N, N, N), (L, L, L))
+    b   = FIT.LinearBinning(2π/L)   # unit shells
 
     function compute_diagnostics(uh, vh, wh)
-        # Pack into (N,N,N,3) array expected by FET
+        # Pack into (N,N,N,3) array expected by FIT
         û3 = zeros(ComplexF64, N, N, N, 3)
         û3[:,:,:,1] .= uh; û3[:,:,:,2] .= vh; û3[:,:,:,3] .= wh
-        s2s = FET.calculate_shell_to_shell_transfer(û3, ks3;
+        s2s = FIT.calculate_shell_to_shell_transfer(û3, ks3;
             binning=b, dealiasing=true, verify_antisymmetry=false,
-            spectral=FET.FFTBackend())
+            spectral=FIT.FFTBackend())
         return s2s.transfer_matrix, s2s.net_transfer
     end
 

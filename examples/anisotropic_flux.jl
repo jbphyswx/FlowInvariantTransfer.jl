@@ -10,7 +10,7 @@ Run from the repo root:
     julia --project=examples examples/anisotropic_flux.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
@@ -18,10 +18,10 @@ function run_anisotropic_flux_example(; N=32)
     println("--- Anisotropic Directional Flux Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FET.LinearBinning(2π / L)
-    iso  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.IsotropicShells())
-    perp = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.PerpendicularShells())
-    par  = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(), geometry=FET.ParallelShells())
+    b = FIT.LinearBinning(2π / L)
+    iso  = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.IsotropicShells())
+    perp = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.PerpendicularShells())
+    par  = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.ParallelShells())
 
     println("peak Π(|k|)=", round(maximum(iso.flux); sigdigits=3),
             "  Π(k⊥)=", round(maximum(perp.flux); sigdigits=3),

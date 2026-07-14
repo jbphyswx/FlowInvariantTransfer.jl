@@ -2,7 +2,7 @@ module FlowInvariantTransferOhMyThreadsExt
 
 using OhMyThreads: OhMyThreads
 using LinearAlgebra: LinearAlgebra
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractInvariant, KineticEnergy
 
 # ---------------------------------------------------------------------------
@@ -21,13 +21,13 @@ there is no data race. Writes into `result` and `ws`, and returns `max_asym`
 Each task allocates its own `NonlinearTermWorkspace` because the shared workspace
 cannot be reused concurrently across threads.
 """
-function FET.ShellToShellTransfer._shell_to_shell_threaded!(
+function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
     result,
     ws,
     velocity_hat,
     ks,
     spectral;            # transform backend, passed to each per-mediator nonlinear term
-    dealiasing::FET.Types.AbstractDealiasing = FET.Types.OrszagTwoThirds(),
+    dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
@@ -43,7 +43,7 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
 
     # Thread-parallel over mediator shells. Each task writes only column m.
     OhMyThreads.@tasks for m in 1:N_sh
-        local_ws = FET.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
+        local_ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
         û_m      = similar(velocity_hat)
         fill!(û_m, zero(eltype(û_m)))
         for I in CartesianIndices(ns)
@@ -55,12 +55,12 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
 
         # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field
         # (AMP 2005) — for energy gives an antisymmetric A[n,m] reducing to transfer_spectrum[n].
-        FET.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
+        FIT.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
             dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
         N̂_m = local_ws.N̂
 
         local_density = similar(velocity_hat, FT, ns...)
-        FET.Invariants.transfer_density!(local_density, invariant, velocity_hat, N̂_m, ks)
+        FIT.Invariants.transfer_density!(local_density, invariant, velocity_hat, N̂_m, ks)
 
         for n in 1:N_sh
             s = zero(FT)
@@ -109,7 +109,7 @@ Thread-parallel mode→shell reduction for spectral flux, overriding the core st
 partials are `+`-reduced. `O(Nᴰ)` total work in parallel — no `O(N_sh·Nᴰ)` per-shell rescan. (The
 nonlinear-term FFT is threaded separately via the `spectral` backend / FFTW threads.)
 """
-function FET.SpectralFlux._spectral_flux_threaded!(
+function FIT.SpectralFlux._spectral_flux_threaded!(
     result,
     ws,
     velocity_hat,
@@ -124,7 +124,7 @@ function FET.SpectralFlux._spectral_flux_threaded!(
     N_sh = length(ws.T_spec)
     Np   = prod(ns)
 
-    FET.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
+    FIT.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
     td = ws.transfer_density
 
     nchunks = max(1, Threads.nthreads())
@@ -138,7 +138,7 @@ function FET.SpectralFlux._spectral_flux_threaded!(
         t
     end
     copyto!(ws.T_spec, T)
-    return FET.SpectralFlux._finalize_spectral_flux!(result, ws)
+    return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
 # ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ end
 Thread-parallel triad loop using OhMyThreads. Each triad is independent
 (read-only Q_hat, writes to separate Dict slots), so this is embarrassingly parallel.
 """
-function FET.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
+function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
     L, P, T_budget, A_out, Xi_out,
     Q_hat, f_idx, fk_idx, fl_idx, fn_idx,
     weights, nBlks, nFreq, nState, nx, nmode,
@@ -175,7 +175,7 @@ function FET.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
         Q_hat_n = reshape(permutedims(LHS(Q_n_raw), (2, 1, 3)), nStateNx, nBlks)
         Q_hat_kl = reshape(Q_nonlinear(Q_k_raw, Q_l_raw), nStateNx, nBlks)
 
-        U, s, V = FET.TriadicOrthogonalDecomposition.triadic_svd(Q_hat_n, Q_hat_kl, weights, nBlks)
+        U, s, V = FIT.TriadicOrthogonalDecomposition.triadic_svd(Q_hat_n, Q_hat_kl, weights, nBlks)
 
         nm = min(nmode, length(s))
         u = U[:, 1:nm]

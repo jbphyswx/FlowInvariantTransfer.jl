@@ -20,53 +20,53 @@
 using Test: Test
 using Random: Random
 using FFTW: FFTW
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 const _ALLOC_COV = Base.JLOptions().code_coverage != 0
 
 # --- function barriers: warm up, then measure a second call with concrete-typed backend args ---
 function _alloc_nlt(ws, û, ks, adv, da, sp)
-    FET.compute_nonlinear_term!(ws, û, ks; dealiasing=da, spectral=sp, advecting_hat=adv)
-    return @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing=da, spectral=sp, advecting_hat=adv)
+    FIT.compute_nonlinear_term!(ws, û, ks; dealiasing=da, spectral=sp, advecting_hat=adv)
+    return @allocated FIT.compute_nonlinear_term!(ws, û, ks; dealiasing=da, spectral=sp, advecting_hat=adv)
 end
 function _alloc_td(t, invariant, û, N̂, ks)
-    FET.Invariants.transfer_density!(t, invariant, û, N̂, ks)
-    return @allocated FET.Invariants.transfer_density!(t, invariant, û, N̂, ks)
+    FIT.Invariants.transfer_density!(t, invariant, û, N̂, ks)
+    return @allocated FIT.Invariants.transfer_density!(t, invariant, û, N̂, ks)
 end
 function _alloc_sf!(res, ws, û, ks, sidx, sp)
-    FET.calculate_spectral_flux!(res, ws, û, ks, sidx; spectral=sp)
-    return @allocated FET.calculate_spectral_flux!(res, ws, û, ks, sidx; spectral=sp)
+    FIT.calculate_spectral_flux!(res, ws, û, ks, sidx; spectral=sp)
+    return @allocated FIT.calculate_spectral_flux!(res, ws, û, ks, sidx; spectral=sp)
 end
 function _alloc_s2s!(res, ws, û, ks, sp)
-    FET.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
-    return @allocated FET.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
+    FIT.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
+    return @allocated FIT.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
 end
 
 Test.@testset "Allocations" begin
     L = 2π
     N = 16
-    ks2 = FET.wavenumber_grid((N, N), (L, L))
-    ks3 = FET.wavenumber_grid((8, 8, 8), (L, L, L))
+    ks2 = FIT.wavenumber_grid((N, N), (L, L))
+    ks3 = FIT.wavenumber_grid((8, 8, 8), (L, L, L))
     Random.seed!(3)
     û2 = randn(ComplexF64, N, N, 2)
     û3 = randn(ComplexF64, 8, 8, 8, 3)
     θ̂  = randn(ComplexF64, N, N, 1)
-    b2 = FET.LinearBinning(2π / L)
+    b2 = FIT.LinearBinning(2π / L)
 
     Test.@testset "compute_nonlinear_term! — 0 alloc, every backend/dealiasing" begin
         for (û, ks) in ((û2, ks2), (û3, ks3))
-            ws = FET.NonlinearTermWorkspace(û, ks)
-            for sp in (FET.DirectSumBackend(), FET.FFTBackend()),
-                da in (FET.OrszagTwoThirds(), FET.NoDealiasing())
+            ws = FIT.NonlinearTermWorkspace(û, ks)
+            for sp in (FIT.DirectSumBackend(), FIT.FFTBackend()),
+                da in (FIT.OrszagTwoThirds(), FIT.NoDealiasing())
                 Test.@test _alloc_nlt(ws, û, ks, û, da, sp) == 0 skip = _ALLOC_COV
             end
             # Exact 3/2 padding: 0 alloc when the workspace is built for it (preplanned padded scratch).
-            wsp = FET.NonlinearTermWorkspace(û, ks; dealiasing=FET.PaddedThreeHalves())
-            Test.@test _alloc_nlt(wsp, û, ks, û, FET.PaddedThreeHalves(), FET.FFTBackend()) == 0 skip = _ALLOC_COV
+            wsp = FIT.NonlinearTermWorkspace(û, ks; dealiasing=FIT.PaddedThreeHalves())
+            Test.@test _alloc_nlt(wsp, û, ks, û, FIT.PaddedThreeHalves(), FIT.FFTBackend()) == 0 skip = _ALLOC_COV
         end
         # Passive scalar (M = 1) advected by the 2D velocity.
-        wsθ = FET.NonlinearTermWorkspace(θ̂, ks2)
-        for sp in (FET.DirectSumBackend(), FET.FFTBackend()), da in (FET.OrszagTwoThirds(), FET.NoDealiasing())
+        wsθ = FIT.NonlinearTermWorkspace(θ̂, ks2)
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend()), da in (FIT.OrszagTwoThirds(), FIT.NoDealiasing())
             Test.@test _alloc_nlt(wsθ, θ̂, ks2, û2, da, sp) == 0 skip = _ALLOC_COV
         end
     end
@@ -74,30 +74,30 @@ Test.@testset "Allocations" begin
     Test.@testset "transfer_density! — 0 alloc, every invariant" begin
         N̂2 = randn(ComplexF64, N, N, 2); N̂3 = randn(ComplexF64, 8, 8, 8, 3)
         t2 = zeros(Float64, N, N); t3 = zeros(Float64, 8, 8, 8)
-        Test.@test _alloc_td(t2, FET.KineticEnergy(), û2, N̂2, ks2) == 0 skip = _ALLOC_COV
-        Test.@test _alloc_td(t3, FET.KineticEnergy(), û3, N̂3, ks3) == 0 skip = _ALLOC_COV
-        Test.@test _alloc_td(t2, FET.Enstrophy(), û2, N̂2, ks2)     == 0 skip = _ALLOC_COV
-        Test.@test _alloc_td(t3, FET.Enstrophy(), û3, N̂3, ks3)     == 0 skip = _ALLOC_COV
-        Test.@test _alloc_td(t3, FET.Helicity(), û3, N̂3, ks3)      == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t2, FIT.KineticEnergy(), û2, N̂2, ks2) == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t3, FIT.KineticEnergy(), û3, N̂3, ks3) == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t2, FIT.Enstrophy(), û2, N̂2, ks2)     == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t3, FIT.Enstrophy(), û3, N̂3, ks3)     == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t3, FIT.Helicity(), û3, N̂3, ks3)      == 0 skip = _ALLOC_COV
         θN = randn(ComplexF64, N, N, 1)
-        Test.@test _alloc_td(t2, FET.PassiveScalar(), θ̂, θN, ks2)  == 0 skip = _ALLOC_COV
+        Test.@test _alloc_td(t2, FIT.PassiveScalar(), θ̂, θN, ks2)  == 0 skip = _ALLOC_COV
     end
 
     Test.@testset "calculate_spectral_flux! — 0 alloc (Serial, DirectSum & FFT)" begin
-        kmag = FET.shell_coordinate(FET.IsotropicShells(), ks2)
-        edges = FET.shell_edges(b2, maximum(kmag)); sidx = FET.assign_shells(kmag, edges)
-        centers = collect(FET.shell_centers(b2, maximum(kmag)))
-        ws = FET.SpectralFluxWorkspace(û2, ks2, b2)
-        res = FET.SpectralFluxResult(centers, similar(centers), similar(centers))
-        for sp in (FET.DirectSumBackend(), FET.FFTBackend())
+        kmag = FIT.shell_coordinate(FIT.IsotropicShells(), ks2)
+        edges = FIT.shell_edges(b2, maximum(kmag)); sidx = FIT.assign_shells(kmag, edges)
+        centers = collect(FIT.shell_centers(b2, maximum(kmag)))
+        ws = FIT.SpectralFluxWorkspace(û2, ks2, b2)
+        res = FIT.SpectralFluxResult(centers, similar(centers), similar(centers))
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend())
             Test.@test _alloc_sf!(res, ws, û2, ks2, sidx, sp) == 0 skip = _ALLOC_COV
         end
     end
 
     Test.@testset "calculate_shell_to_shell_transfer! — 0 alloc (Serial, DirectSum & FFT)" begin
-        ws = FET.ShellToShellWorkspace(û2, ks2, b2)
-        res = FET.calculate_shell_to_shell_transfer(û2, ks2; binning=b2)  # a result to write into
-        for sp in (FET.DirectSumBackend(), FET.FFTBackend())
+        ws = FIT.ShellToShellWorkspace(û2, ks2, b2)
+        res = FIT.calculate_shell_to_shell_transfer(û2, ks2; binning=b2)  # a result to write into
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend())
             Test.@test _alloc_s2s!(res, ws, û2, ks2, sp) == 0 skip = _ALLOC_COV
         end
     end
@@ -106,9 +106,9 @@ Test.@testset "Allocations" begin
         # Each builds a workspace (O(Nᴰ)) + result. Assert the allocation is bounded by a small
         # multiple of the field size — catches excess/O(N_sh·Nᴰ) regressions without brittle exact bytes.
         fb = sizeof(û2)
-        FET.calculate_spectral_flux(û2, ks2; binning=b2, spectral=FET.FFTBackend())          # warmup
-        Test.@test (@allocated FET.calculate_spectral_flux(û2, ks2; binning=b2, spectral=FET.FFTBackend())) <= 60fb skip = _ALLOC_COV
-        FET.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FET.FFTBackend()) # warmup
-        Test.@test (@allocated FET.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FET.FFTBackend())) <= 80fb skip = _ALLOC_COV
+        FIT.calculate_spectral_flux(û2, ks2; binning=b2, spectral=FIT.FFTBackend())          # warmup
+        Test.@test (@allocated FIT.calculate_spectral_flux(û2, ks2; binning=b2, spectral=FIT.FFTBackend())) <= 60fb skip = _ALLOC_COV
+        FIT.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FIT.FFTBackend()) # warmup
+        Test.@test (@allocated FIT.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FIT.FFTBackend())) <= 80fb skip = _ALLOC_COV
     end
 end

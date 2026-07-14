@@ -1,7 +1,7 @@
 module FlowInvariantTransferCairoMakieExt
 
 using CairoMakie: CairoMakie
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: SpectralFluxResult, CoarseGrainingFluxResult, ShellToShellResult, TriadicOrthogonalDecompositionResult
 
 # ---------------------------------------------------------------------------
@@ -19,19 +19,19 @@ Dispatch to the appropriate plot function based on result type.
 - `TriadicOrthogonalDecompositionResult`: the mode bispectrum λ(f_l, f_n) and modal energy budget
   T(f_l, f_n) as heatmaps (Yeung–Chu–Schmidt Fig. 4 style).
 """
-function FET.plot_energy_transfer(result::SpectralFluxResult; kwargs...)
+function FIT.plot_energy_transfer(result::SpectralFluxResult; kwargs...)
     return _plot_spectral_flux(result; kwargs...)
 end
 
-function FET.plot_energy_transfer(result::CoarseGrainingFluxResult; kwargs...)
+function FIT.plot_energy_transfer(result::CoarseGrainingFluxResult; kwargs...)
     return _plot_cg_flux(result; kwargs...)
 end
 
-function FET.plot_energy_transfer(result::ShellToShellResult; kwargs...)
+function FIT.plot_energy_transfer(result::ShellToShellResult; kwargs...)
     return _plot_shell_transfer_matrix(result; kwargs...)
 end
 
-function FET.plot_energy_transfer(result::TriadicOrthogonalDecompositionResult; kwargs...)
+function FIT.plot_energy_transfer(result::TriadicOrthogonalDecompositionResult; kwargs...)
     return _plot_tod_bispectrum(result; kwargs...)
 end
 

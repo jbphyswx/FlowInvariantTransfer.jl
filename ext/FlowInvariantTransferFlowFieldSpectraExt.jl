@@ -1,7 +1,7 @@
 module FlowInvariantTransferFlowFieldSpectraExt
 
 using FlowFieldSpectra: FlowFieldSpectra as FFS, calculate_spectrum
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod
 
 """
@@ -17,7 +17,7 @@ grid abstraction covers scattered points too) and returns fftSHIFTED (centred, `
 coefficients, whereas FlowInvariantTransfer's core uses grid-shaped arrays in FFTW fftfreq order
 (`0,1,…,N/2−1,−N/2,…,−1`). This method flattens on the way in and `ifftshift`s on the way out.
 """
-function FET.calculate_energy_transfer(
+function FIT.calculate_energy_transfer(
     method::Union{SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod},
     velocity_fields::Tuple,
     coords_vecs::Tuple,
@@ -46,7 +46,7 @@ function FET.calculate_energy_transfer(
     coeffs_ff = circshift(coeffs, shifts)
     ks_ff = ntuple(d -> circshift(collect(ks[d]), -(length(ks[d]) ÷ 2)), nd)
 
-    return FET.calculate_energy_transfer(method, coeffs_ff, ks_ff; kwargs...)
+    return FIT.calculate_energy_transfer(method, coeffs_ff, ks_ff; kwargs...)
 end
 
 end # module

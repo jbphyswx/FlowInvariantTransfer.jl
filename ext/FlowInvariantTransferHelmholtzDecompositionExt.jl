@@ -1,11 +1,11 @@
 module FlowInvariantTransferHelmholtzDecompositionExt
 
 using HelmholtzDecomposition: HelmholtzDecomposition
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition as HelmholtzDecompType, RotationalDecomposition, DivergentDecomposition
 
 # 1. Physical-space decomposition
-function FET.Decomposition._decompose_field_physical(
+function FIT.Decomposition._decompose_field_physical(
     decomp::Union{HelmholtzDecompType, RotationalDecomposition, DivergentDecomposition},
     velocity_fields::Tuple,
     coords_vecs::Tuple;
@@ -47,7 +47,7 @@ function FET.Decomposition._decompose_field_physical(
 end
 
 # 2. Spectral-space decomposition
-function FET.Decomposition._decompose_field_spectral(
+function FIT.Decomposition._decompose_field_spectral(
     decomp::Union{HelmholtzDecompType, RotationalDecomposition, DivergentDecomposition},
     velocity_hat::AbstractArray{<:Complex},
     ks
@@ -104,7 +104,7 @@ function FET.Decomposition._decompose_field_spectral(
 end
 
 # 3. Direct spectral project method override
-function FET.Decomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks)
+function FIT.Decomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks)
     return HelmholtzDecomposition.helmholtz_project_spectral!(û_rot, û_div, velocity_hat, ks)
 end
 

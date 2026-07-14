@@ -197,7 +197,7 @@ function _calculate_shell_to_shell!(result, ws, û, ks, ::ThreadedBackend; ...)
 end
 
 # In extension (ext/FlowInvariantTransferOhMyThreadsExt.jl):
-function FET.ShellToShellTransfer._shell_to_shell_threaded!(...)
+function FIT.ShellToShellTransfer._shell_to_shell_threaded!(...)
     # Real OhMyThreads implementation
 end
 ```

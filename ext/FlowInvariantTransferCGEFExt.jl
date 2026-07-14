@@ -1,11 +1,11 @@
 module FlowInvariantTransferCGEFExt
 
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes as CGEF
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 
 # ---------------------------------------------------------------------------
-# Filter type mapping: FET.AbstractFilter → CGEF.AbstractFilterKernel
+# Filter type mapping: FIT.AbstractFilter → CGEF.AbstractFilterKernel
 # ---------------------------------------------------------------------------
 
 _to_cgef_kernel(::GaussianFilter)      = CGEF.Kernels.GaussianKernel()
@@ -25,7 +25,7 @@ Supports 2D Cartesian grids from tuple inputs.  For spherical geometry or
 more control (masks, backends), call CGEF directly and wrap the result with
 `CoarseGrainingFluxResult`.
 """
-function FET.CoarseGrainingFlux._cg_flux_cgef(
+function FIT.CoarseGrainingFlux._cg_flux_cgef(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,

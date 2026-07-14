@@ -1,7 +1,7 @@
 module FlowInvariantTransferKernelAbstractionsExt
 
 using KernelAbstractions: KernelAbstractions as KA, @kernel, @index
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: GPUBackend, ShellToShellResult, SpectralFluxResult, AbstractInvariant, KineticEnergy, Helicity, Enstrophy
 
 # Copy a host array to a fresh device array on `dev` (a plain Array on GPUBackend(KA.CPU())). Used to
@@ -87,14 +87,14 @@ end
 # ---------------------------------------------------------------------------
 # Shell-to-shell transfer on a KA backend
 # ---------------------------------------------------------------------------
-function FET.ShellToShellTransfer._calculate_shell_to_shell!(
+function FIT.ShellToShellTransfer._calculate_shell_to_shell!(
     result::ShellToShellResult,
-    ws::FET.Workspaces.ShellToShellWorkspace,
+    ws::FIT.Workspaces.ShellToShellWorkspace,
     velocity_hat,
     ks,
     gpu_backend::GPUBackend,
     spectral;            # transform backend for each per-mediator nonlinear term
-    dealiasing::FET.Types.AbstractDealiasing,
+    dealiasing::FIT.Types.AbstractDealiasing,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
@@ -125,7 +125,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
 
         # 2. Nonlinear term 𝒩̂_m = (u·∇)f_m (uses the spectral backend; on a GPU array this needs a
         #    GPU-FFT-capable spectral path, e.g. FFTBackend with cuFFT riding AbstractFFTs).
-        FET.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
+        FIT.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
             dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
 
         # 3. Per-mode transfer density via the device kernel.
@@ -170,7 +170,7 @@ end
 # written by a device kernel and scatter-added into the device T_spec in a single pass, then the
 # cumulative flux is formed on-device with `cumsum!`. No host temporaries, no scalar indexing —
 # a device-resident field stays on the GPU end to end (the point of issue #12 for the SMODE path).
-function FET.SpectralFlux._spectral_flux_gpu!(
+function FIT.SpectralFlux._spectral_flux_gpu!(
     result::SpectralFluxResult,
     ws,
     velocity_hat,

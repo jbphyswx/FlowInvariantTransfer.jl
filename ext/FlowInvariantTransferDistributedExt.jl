@@ -2,19 +2,19 @@ module FlowInvariantTransferDistributedExt
 
 using Distributed: Distributed
 using SharedArrays: SharedArrays
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: DistributedBackend, ThreadedBackend, ShellToShellResult, AbstractInvariant, KineticEnergy, local_backend
 using FlowInvariantTransfer.ShellBinning: assign_shells
 
 # Distributed Shell-to-Shell Transfer Implementation
-function FET.ShellToShellTransfer._calculate_shell_to_shell!(
+function FIT.ShellToShellTransfer._calculate_shell_to_shell!(
     result::ShellToShellResult,
-    ws::FET.Workspaces.ShellToShellWorkspace,
+    ws::FIT.Workspaces.ShellToShellWorkspace,
     velocity_hat,
     ks,
     execution::DistributedBackend,
     spectral;            # transform backend, passed to each per-mediator nonlinear term
-    dealiasing::FET.Types.AbstractDealiasing,
+    dealiasing::FIT.Types.AbstractDealiasing,
     verify_antisymmetry::Bool,
     invariant::AbstractInvariant = KineticEnergy(),
     advecting_hat = velocity_hat,
@@ -79,7 +79,7 @@ end
 # Threaded. To distribute a grid too large for one node (splitting the FFT itself), use
 # `pencil_spectral_flux` (PencilFFTs). Provided here for API parity with the other diagnostics and
 # for pipelines whose field is already worker-resident.
-function FET.SpectralFlux._spectral_flux_distributed!(
+function FIT.SpectralFlux._spectral_flux_distributed!(
     result,
     ws,
     velocity_hat,
@@ -94,7 +94,7 @@ function FET.SpectralFlux._spectral_flux_distributed!(
     N_sh = length(ws.T_spec)
     Np   = prod(ns)
 
-    FET.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
+    FIT.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
     # Hoist plain arrays so the @distributed closure captures only these (not the whole ws, whose
     # nonlinear workspace may hold an FFTW-ext plan bundle workers can't deserialize).
     td = ws.transfer_density
@@ -111,11 +111,11 @@ function FET.SpectralFlux._spectral_flux_distributed!(
         t
     end
     copyto!(ws.T_spec, T)
-    return FET.SpectralFlux._finalize_spectral_flux!(result, ws)
+    return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
 # Helper function executed on worker processes for Shell-to-Shell
-function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat, inner=FET.Types.SerialBackend())
+function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat, inner=FIT.Types.SerialBackend())
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     M  = size(velocity_hat, nd+1)   # components of the binned/carried primary field
@@ -132,13 +132,13 @@ function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, 
     # Allocate a local NonlinearTermWorkspace.
     # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field (AMP 2005) —
     # for energy gives antisymmetric A[n,m] reducing to transfer_spectrum[n] (matches serial/FFT).
-    nl_ws = FET.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
-    FET.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
+    nl_ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
+    FIT.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
         spectral=spectral, advecting_hat=advecting_hat)
 
     # Write per-mode transfer density
     transfer_density = similar(velocity_hat, FT, ns...)
-    FET.Invariants.transfer_density!(transfer_density, invariant, velocity_hat, nl_ws.N̂, ks)
+    FIT.Invariants.transfer_density!(transfer_density, invariant, velocity_hat, nl_ws.N̂, ks)
 
     # Accumulate into the column vector. `inner` is the worker-local execution backend from
     # `local_backend`: SerialBackend (default) sums receiver shells serially; ThreadedBackend threads

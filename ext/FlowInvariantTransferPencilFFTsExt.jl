@@ -4,7 +4,7 @@ using MPI: MPI
 using PencilFFTs: PencilFFTs, PencilFFTPlan, Transforms, allocate_input, allocate_output
 using PencilArrays: PencilArrays, localgrid
 using LinearAlgebra: mul!, ldiv!
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractShellBinning, AbstractInvariant, KineticEnergy,
                                    AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
                                    AbstractShellGeometry, ShellMagnitude, IsotropicShells
@@ -27,14 +27,14 @@ using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, assign_she
 #   res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
 # ---------------------------------------------------------------------------
 
-# Implements the FET.build_pencil_plan stub (docstring lives on the core stub).
-function FET.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Float64) where {nd}
+# Implements the FIT.build_pencil_plan stub (docstring lives on the core stub).
+function FIT.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Float64) where {nd}
     proc_dims  = Tuple(Int.(MPI.Dims_create(MPI.Comm_size(comm), ntuple(_ -> 0, nd - 1))))
     transforms = ntuple(_ -> Transforms.FFT(), nd)
     return PencilFFTPlan(ns, transforms, proc_dims, comm, T)
 end
 
-function FET.pencil_spectral_flux(
+function FIT.pencil_spectral_flux(
     u_phys::NTuple{D, <:PencilArrays.PencilArray},
     plan,
     ks;
