@@ -2,11 +2,9 @@ module FlowInvariantTransferFINUFFTExt
 
 using FINUFFT: FINUFFT
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
+using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxMethod, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 using FlowInvariantTransfer.Filters: filter_response
 using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
-
-export nufft_coarse_graining_flux
 
 # ---------------------------------------------------------------------------
 # Non-uniform coarse-graining flux via FINUFFT type-1/type-2 round-trips
@@ -43,7 +41,7 @@ This implements the approach:
 
 For 2D inputs, uses `nufft2d1`/`nufft2d2`; for 3D, `nufft3d1`/`nufft3d2`.
 """
-function nufft_coarse_graining_flux(
+function FET.nufft_coarse_graining_flux(
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ℓ::Real,
@@ -149,6 +147,31 @@ function nufft_coarse_graining_flux(
 end
 
 # ---------------------------------------------------------------------------
+# Unified entry: scattered-Cartesian coarse-graining flux through calculate_energy_transfer
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_energy_transfer(method::CoarseGrainingFluxMethod, velocity_fields, scatter_coords, ms; kwargs...)
+
+Scattered / non-uniform-Cartesian coarse-graining flux `Π_ℓ(x)` through the unified
+[`calculate_energy_transfer`](@ref) front-end. The extra `ms::Tuple` positional (the intermediate
+uniform spectral-grid size) distinguishes this from the uniform-grid 3-argument `CoarseGrainingFluxMethod`
+method in the core; it routes to [`nufft_coarse_graining_flux`](@ref) using the method's `scale`/`filter`.
+Requires `using FINUFFT`. (Mirrors the 4-arg `velocity_fields, coords, ms` convention the NUFSHT/FSH
+extensions use for the spectral methods, giving `CoarseGrainingFluxMethod` a scattered-grid path.)
+"""
+function FET.calculate_energy_transfer(
+    method::CoarseGrainingFluxMethod,
+    velocity_fields::Tuple,
+    scatter_coords::Tuple,
+    ms::Tuple;
+    kwargs...,
+)
+    return FET.nufft_coarse_graining_flux(
+        velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
+end
+
+# ---------------------------------------------------------------------------
 # NUFFT helpers
 # ---------------------------------------------------------------------------
 
@@ -164,16 +187,16 @@ function _nufft_type1(scaled_coords::Tuple, fields::Tuple, ms::Tuple, tol::Float
         if nd == 1
             raw = FINUFFT.nufft1d1(
                 scaled_coords[1], f_c, 1, tol, ms[1])
-            result[c] = raw ./ N
+            result[c] = reshape(raw, ms) ./ N   # some FINUFFT versions add a trailing batch dim
         elseif nd == 2
             raw = FINUFFT.nufft2d1(
                 scaled_coords[1], scaled_coords[2], f_c, 1, tol, ms[1], ms[2])
-            result[c] = raw ./ N
+            result[c] = reshape(raw, ms) ./ N   # some FINUFFT versions add a trailing batch dim
         elseif nd == 3
             raw = FINUFFT.nufft3d1(
                 scaled_coords[1], scaled_coords[2], scaled_coords[3],
                 f_c, 1, tol, ms[1], ms[2], ms[3])
-            result[c] = raw ./ N
+            result[c] = reshape(raw, ms) ./ N   # some FINUFFT versions add a trailing batch dim
         else
             throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
         end
@@ -187,16 +210,18 @@ function _nufft_type2(scaled_coords::Tuple, û_list::Vector, ms::Tuple, tol::Flo
     result = Vector{Vector{ComplexF64}}(undef, D)
 
     for c in 1:D
-        coeff_c = ComplexF64.(û_list[c])
+        # Coefficients must be the nd-dim spectral grid (drop any trailing batch dim some FINUFFT
+        # versions add); nufftNd2 returns per-point values, `vec` normalizes a possible (M,1) shape.
+        coeff_c = reshape(ComplexF64.(û_list[c]), ms)
         if nd == 1
-            result[c] = FINUFFT.nufft1d2(scaled_coords[1], 1, tol, coeff_c)
+            result[c] = vec(FINUFFT.nufft1d2(scaled_coords[1], 1, tol, coeff_c))
         elseif nd == 2
-            result[c] = FINUFFT.nufft2d2(
-                scaled_coords[1], scaled_coords[2], 1, tol, coeff_c)
+            result[c] = vec(FINUFFT.nufft2d2(
+                scaled_coords[1], scaled_coords[2], 1, tol, coeff_c))
         elseif nd == 3
-            result[c] = FINUFFT.nufft3d2(
+            result[c] = vec(FINUFFT.nufft3d2(
                 scaled_coords[1], scaled_coords[2], scaled_coords[3],
-                1, tol, coeff_c)
+                1, tol, coeff_c))
         else
             throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
         end

@@ -69,7 +69,7 @@ function compute_nonlinear_term(
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
 )
-    ws = NonlinearTermWorkspace(velocity_hat, ks)
+    ws = NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing)
     compute_nonlinear_term!(ws, velocity_hat, ks;
         dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
     return ws.N̂
@@ -156,6 +156,11 @@ Algorithm (pseudospectral, direct DFT/IDFT):
   3. Nᵢ(x)        = Σⱼ u_j(x) · ∂uᵢ/∂xⱼ(x)
   4. N̂ᵢ(k)        = DFT(Nᵢ(x)) via explicit sum
   5. Apply 2/3 dealiasing.
+
+Normalization: the package convention is `û = fft(u)/Nᵈ` (so `E(k)=½|û|²` is the physical modal
+energy). The physical synthesis (IDFT) is therefore `u(x) = Σ_k û(k) e^{ik·x}` — an *unnormalized*
+inverse (no `/Nᵈ`); the forward analysis (DFT) is `û(k) = (1/Nᵈ) Σ_x u(x) e^{-ik·x}`. This makes
+`T(k)=Re{û*·N̂}` the physically-scaled transfer (verified against an independent FFTW ground truth).
 """
 function _compute_nonlinear_term_direct!(
     ws::NonlinearTermWorkspace,
@@ -194,7 +199,8 @@ function _compute_nonlinear_term_direct!(
                 end
                 val += û_j[spec_I] * exp(im * phase)
             end
-            ws.u_phys[phys_I, j] = real(val / FT(Np))
+            # IDFT synthesis is unnormalized (physical u = Σ_k û e^{ik·x}); û already carries the 1/Nᵈ.
+            ws.u_phys[phys_I, j] = real(val)
         end
     end
 
@@ -216,7 +222,8 @@ function _compute_nonlinear_term_direct!(
                     end
                     val += (im * kphys) * û_c[spec_I] * exp(im * phase)
                 end
-                ws.grad_phys[phys_I, comp, grad_d] = real(val / FT(Np))
+                # IDFT synthesis is unnormalized (∂f = Σ_k i k f̂ e^{ik·x}); û already carries the 1/Nᵈ.
+                ws.grad_phys[phys_I, comp, grad_d] = real(val)
             end
         end
     end

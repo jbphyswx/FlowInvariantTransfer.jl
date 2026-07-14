@@ -8,9 +8,9 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, resolve_execution, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
+export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -610,12 +610,29 @@ Shared-memory multithreading over the outer (shell/mode) loop. Load `OhMyThreads
 struct ThreadedBackend <: AbstractExecutionBackend end
 
 """
-    DistributedBackend <: AbstractExecutionBackend
+    DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
+    DistributedBackend(inner = SerialBackend())
 
 Multi-process execution via `Distributed`/`SharedArrays`: parallelises the outer loop over
-mediator shells / receiver modes across workers. Requires `using Distributed, SharedArrays`.
+mediator shells / receiver modes across workers. Parametric on the per-worker `inner` backend, so
+each worker can itself run serially (`DistributedBackend()`, the default) or threaded
+(`DistributedBackend(ThreadedBackend())`, a hybrid distributed+threaded run — `addprocs(...; exeflags="-t N")`
+and `@everywhere using OhMyThreads`). Retrieve the per-worker backend with [`local_backend`](@ref).
+Requires `using Distributed, SharedArrays`.
 """
-struct DistributedBackend <: AbstractExecutionBackend end
+struct DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
+    inner::Inner
+end
+DistributedBackend() = DistributedBackend(SerialBackend())
+
+"""
+    local_backend(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
+
+The execution backend each worker/process should use locally. For [`DistributedBackend`](@ref) this
+is its `inner` backend; for every other backend it is the backend itself (identity).
+"""
+local_backend(execution::AbstractExecutionBackend) = execution
+local_backend(execution::DistributedBackend) = execution.inner
 
 """
     GPUBackend{B} <: AbstractExecutionBackend
@@ -630,9 +647,30 @@ end
 """
     AutoBackend <: AbstractExecutionBackend
 
-Select the best available execution backend at call time (distributed → threaded → serial).
+Select the best available execution backend at call time (see [`resolve_execution`](@ref)): resolves
+to [`ThreadedBackend`](@ref) when the OhMyThreads extension is loaded and Julia was started with more
+than one thread, otherwise [`SerialBackend`](@ref). [`GPUBackend`](@ref) (needs a device) and
+[`DistributedBackend`](@ref) (needs a worker pool, and only parallelises reductions) are never chosen
+automatically — pass them explicitly.
 """
 struct AutoBackend <: AbstractExecutionBackend end
+
+"""
+    resolve_execution(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
+
+Map an execution backend to the concrete backend to actually run on. Concrete backends pass through
+unchanged; [`AutoBackend`](@ref) resolves to [`ThreadedBackend`](@ref) when threading is available
+(the OhMyThreads extension is loaded and `Threads.nthreads() > 1`), else [`SerialBackend`](@ref).
+Called at every diagnostic entry point that accepts `execution`, so `AutoBackend` works uniformly.
+"""
+resolve_execution(execution::AbstractExecutionBackend) = execution
+function resolve_execution(::AutoBackend)
+    if Threads.nthreads() > 1 &&
+       Base.get_extension(parentmodule(@__MODULE__), :FlowInvariantTransferOhMyThreadsExt) !== nothing
+        return ThreadedBackend()
+    end
+    return SerialBackend()
+end
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -657,6 +695,34 @@ struct SpectralFluxResult{V<:AbstractVector}
     flux::V
 end
 SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k)}(k, T, f)
+
+"""
+    CompressibleFluxResult{V, CH, PD}
+
+Result of a compressible kinetic-energy spectral-transfer computation (Singh–Tiwari–Sharma–Verma
+2025; see THEORY.md §0.5). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
+diagnostics it needs the density field and — for the KE↔internal-energy exchange — the pressure.
+
+# Fields
+- `k_shells::V`: representative wavenumber per shell.
+- `transfer_spectrum::V`: `T_u(k)` — net momentum-weighted KE transfer into shell `k` (energy *gain*
+  rate; sign is opposite the incompressible loss convention). Conserves total KE: `Σ_k T_u(k) ≈ 0`.
+- `flux::V`: `Π(K)` — cumulative flux, `Π(K) = Σ_{k>K} T_u(k)`.
+- `channels::CH`: rotational/compressive (Helmholtz `u = u_R + u_C`) flux channels as a `NamedTuple`
+  `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested.
+- `pressure_dilatation::PD`: KE↔IE conversion `(rotational = Q_{I,R}(k), compressive = Q_{I,C}(k))`
+  as a `NamedTuple`, or `nothing` if no pressure field was supplied.
+
+Optional `CH`/`PD` resolve to `Nothing` or the concrete `NamedTuple` type, so the struct is
+type-stable. Parametric on `V` for element-type genericity.
+"""
+struct CompressibleFluxResult{V<:AbstractVector, CH, PD}
+    k_shells::V
+    transfer_spectrum::V
+    flux::V
+    channels::CH
+    pressure_dilatation::PD
+end
 
 """
     CoarseGrainingFluxResult{S, A}

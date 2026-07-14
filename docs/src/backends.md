@@ -243,7 +243,7 @@ an outer loop over shells/triads expose it (the rest run serially over the singl
 
 | Diagnostic | DirectSum | FFT | Serial | Threaded | Distributed | GPU |
 |-----------|:---------:|:---:|:------:|:--------:|:-----------:|:---:|
-| Spectral flux Π(K) | ✓ | ✓ | ✓ | — | — | — |
+| Spectral flux Π(K) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | — | — | — |
 | Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | — | — | — |
@@ -256,9 +256,13 @@ Notes: the net per-mode transfer `T(k)` and the magnitude matrix `T(K,Q)` are ro
 fast FFT spectral-flux / shell-to-shell paths (exact, `O(Nᴰ log N)`); the fully mode-resolved
 `S(k|p)` tensor is the only query that needs the `O(N^{2D})` brute loop (guarded by a mode-count
 limit, `force=true` to override). The single-machine `execution = Threaded/Distributed/GPU` axis
-applies to the diagnostics with an outer loop (shell-to-shell, TOD); spectral flux / mode-to-mode /
-band-to-band run serially over one FFT pass. MPI (batch + pencil axes) is a separate distribution
-layer documented above. Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes
+applies to shell-to-shell and TOD (outer shell/triad loop) and to **spectral flux** (the mode→shell
+reduction: threaded/distributed scatter, or a device kernel + on-device `cumsum!` that keeps a
+GPU-resident field on the GPU — for spectral flux Distributed only parallelises the reduction, not
+the FFT, so use the pencil axis to distribute a too-large grid). Mode-to-mode / band-to-band still
+run serially over one FFT pass. `execution = AutoBackend()` resolves to threaded when available, else
+serial (see [`resolve_execution`](@ref)). MPI (batch + pencil axes) is a separate distribution layer
+documented above. Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes
 extension and has its own parallelism model.
 
 ---

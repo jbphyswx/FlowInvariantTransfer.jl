@@ -2,7 +2,18 @@ module FlowInvariantTransferKernelAbstractionsExt
 
 using KernelAbstractions: KernelAbstractions as KA, @kernel, @index
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
-using FlowInvariantTransfer.Types: GPUBackend, ShellToShellResult, AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+using FlowInvariantTransfer.Types: GPUBackend, ShellToShellResult, SpectralFluxResult, AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+
+# Copy a host array to a fresh device array on `dev` (a plain Array on GPUBackend(KA.CPU())). Used to
+# move the integer shell-index grid onto the device: `assign_shells` always builds a host Array{Int},
+# so broadcasting a shell mask (`shell_idx .== n`) against a device field would otherwise mix host and
+# device arrays — a latent bug invisible only because CI runs on GPUBackend(KA.CPU()). Copying once keeps
+# the band-filter and the shell reduction fully on-device under `allowscalar(false)`.
+function _to_device(dev, A::AbstractArray)
+    d = KA.allocate(dev, eltype(A), size(A)...)
+    copyto!(d, A)
+    return d
+end
 
 # ---------------------------------------------------------------------------
 # Device kernels (KernelAbstractions ≥ 0.9 API: launch then KA.synchronize).
@@ -43,6 +54,17 @@ end
     ω̂   = im * (kx * velocity_hat[I, 2] - ky * velocity_hat[I, 1])
     N̂_ω = im * (kx * N̂[I, 2] - ky * N̂[I, 1])
     t[I] = real(conj(ω̂) * N̂_ω)
+end
+
+# Mode→shell scatter-add: T_spec[shell_idx[I]] += density[I], summed over all modes I in one pass.
+# Atomic because many modes map to the same shell. O(Nᴰ) (vs the O(N_sh·Nᴰ) per-shell broadcast+sum),
+# writes straight into the device T_spec vector — no host temporary, no scalar indexing.
+@kernel function shell_scatter_add_kernel!(T_spec, @Const(density), @Const(shell_idx))
+    I = @index(Global, Cartesian)
+    n = shell_idx[I]
+    if n != 0
+        KA.@atomic T_spec[n] += density[I]
+    end
 end
 
 # Run the per-mode transfer-density kernel for the requested invariant.
@@ -94,9 +116,12 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
         a
     end
 
+    # Device-resident shell index (see `_to_device`) so shell masks broadcast against device fields.
+    shell_idx_dev = _to_device(dev, ws.shell_idx)
+
     for m in 1:N_sh
         # 1. Band-m field: û_m = velocity_hat ⊙ 1[shell == m]  (device broadcast, no scalar indexing)
-        ws.û_m .= velocity_hat .* reshape(ws.shell_idx .== m, ns..., 1)
+        ws.û_m .= velocity_hat .* reshape(shell_idx_dev .== m, ns..., 1)
 
         # 2. Nonlinear term 𝒩̂_m = (u·∇)f_m (uses the spectral backend; on a GPU array this needs a
         #    GPU-FFT-capable spectral path, e.g. FFTBackend with cuFFT riding AbstractFFTs).
@@ -110,7 +135,7 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
         #    device reduction returning a host scalar (no scalar indexing). An Atomix scatter-add over
         #    modes would drop the O(N_sh) factor; kept simple here since the GPU path is correctness-first.
         for n in 1:N_sh
-            result.transfer_matrix[n, m] = sum(ws.transfer_density .* (ws.shell_idx .== n))
+            result.transfer_matrix[n, m] = sum(ws.transfer_density .* (shell_idx_dev .== n))
         end
     end
 
@@ -135,6 +160,52 @@ function FET.ShellToShellTransfer._calculate_shell_to_shell!(
     end
 
     return max_asym
+end
+
+# ---------------------------------------------------------------------------
+# Spectral flux Π(K) on a KA backend
+# ---------------------------------------------------------------------------
+# Overrides the core `_spectral_flux_gpu!` stub. N̂ is computed upstream on the array's own kind
+# (cuFFT via the FFT spectral backend on a device array); here the per-mode transfer density is
+# written by a device kernel and scatter-added into the device T_spec in a single pass, then the
+# cumulative flux is formed on-device with `cumsum!`. No host temporaries, no scalar indexing —
+# a device-resident field stays on the GPU end to end (the point of issue #12 for the SMODE path).
+function FET.SpectralFlux._spectral_flux_gpu!(
+    result::SpectralFluxResult,
+    ws,
+    velocity_hat,
+    N̂,
+    ks,
+    shell_idx,
+    gpu_backend::GPUBackend;
+    invariant::AbstractInvariant = KineticEnergy(),
+)
+    dev = gpu_backend.backend
+    nd  = length(ks)
+    ns  = size(velocity_hat)[1:nd]
+    FT  = real(eltype(velocity_hat))
+    D   = size(velocity_hat, nd + 1)
+
+    ks_dev        = ntuple(nd) do d
+        a = KA.allocate(dev, FT, length(ks[d]))
+        copyto!(a, collect(FT, ks[d]))
+        a
+    end
+    shell_idx_dev = _to_device(dev, shell_idx)
+
+    # 1. Per-mode transfer density (KE/helicity/enstrophy) via the device kernel.
+    _launch_transfer_density!(dev, ws.transfer_density, velocity_hat, N̂, ks, invariant, D, ns, ks_dev)
+
+    # 2. Scatter-add modes into shells → ws.T_spec (device), single pass.
+    fill!(ws.T_spec, zero(FT))
+    shell_scatter_add_kernel!(dev)(ws.T_spec, ws.transfer_density, shell_idx_dev; ndrange = ns)
+    KA.synchronize(dev)
+
+    # 3. Cumulative flux Π = +cumsum(T) (see serial method / THEORY.md §0.5), on-device.
+    copyto!(result.transfer_spectrum, ws.T_spec)
+    cumsum!(ws.flux, ws.T_spec)
+    copyto!(result.flux, ws.flux)
+    return result
 end
 
 end # module

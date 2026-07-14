@@ -21,7 +21,7 @@ module TriadicOrthogonalDecomposition
 using LinearAlgebra: LinearAlgebra
 using ..Types: TriadicOrthogonalDecompositionMethod,
                TriadicOrthogonalDecompositionResult,
-               AbstractExecutionBackend, SerialBackend, ThreadedBackend,
+               AbstractExecutionBackend, SerialBackend, ThreadedBackend, resolve_execution,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
 
 export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
@@ -494,7 +494,7 @@ end
 
 # Dispatch the triad loop on the EXECUTION (parallelism) backend.
 function _dispatch_triadic_loop!(args_tuple...; execution::AbstractExecutionBackend=SerialBackend(), kwargs...)
-    _dispatch_triadic_loop_impl!(execution, args_tuple...; kwargs...)
+    _dispatch_triadic_loop_impl!(resolve_execution(execution), args_tuple...; kwargs...)
 end
 
 _dispatch_triadic_loop_impl!(::SerialBackend, args...; kwargs...) =

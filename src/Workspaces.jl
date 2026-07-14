@@ -1,7 +1,7 @@
 module Workspaces
 
 using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend,
-               AbstractShellGeometry, IsotropicShells
+               AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
 using ..ShellBinning: shell_edges, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 
@@ -17,9 +17,10 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 Hook returning an FFT plan/scratch bundle stored in `NonlinearTermWorkspace.plans`, or
 `nothing`. The core returns `nothing` (the direct-DFT path needs no plans); the FFTW
 extension overrides this to build pre-planned transforms + scratch buffers so the
-FFT-accelerated hot path allocates nothing.
+FFT-accelerated hot path allocates nothing. `dealiasing` is threaded through so the extension can
+preallocate the larger `PaddedThreeHalves` scratch at construction (and only then).
 """
-_make_fft_plans(velocity_hat, ks) = nothing
+_make_fft_plans(advected_hat, ks, dealiasing) = nothing
 
 """
     NonlinearTermWorkspace{CA, RA, GA, P}
@@ -58,9 +59,11 @@ Construct a `NonlinearTermWorkspace` sized for advecting an `M`-component field 
 (shape `(ns..., M)`) by a velocity, on wavenumber tuple `ks` (length `nd`). The advecting
 velocity needs only its `nd` spatial components, so `u_phys` is `(ns..., nd)` regardless of how
 many components the velocity carries. For the momentum self-advection term pass the velocity
-itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned transforms.
+itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned transforms; pass the
+`dealiasing` you will use so the extension can size the scratch (only `PaddedThreeHalves` needs the
+larger 3/2 buffers — the default 2/3 path builds none).
 """
-function NonlinearTermWorkspace(advected_hat, ks)
+function NonlinearTermWorkspace(advected_hat, ks; dealiasing::AbstractDealiasing = OrszagTwoThirds())
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
     ns  = size(advected_hat)[1:nd]
@@ -70,7 +73,7 @@ function NonlinearTermWorkspace(advected_hat, ks)
     grad_phys = similar(advected_hat, FT, ns..., M, nd)
     N_phys    = similar(advected_hat, FT, ns..., M)
     N̂         = similar(advected_hat, ns..., M)         # keeps complex eltype
-    plans     = _make_fft_plans(advected_hat, ks)
+    plans     = _make_fft_plans(advected_hat, ks, dealiasing)
     return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
 end
 
@@ -102,14 +105,15 @@ end
 Construct a `SpectralFluxWorkspace` for the given input and binning.
 """
 function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
-                               geometry::AbstractShellGeometry = IsotropicShells())
+                               geometry::AbstractShellGeometry = IsotropicShells(),
+                               dealiasing::AbstractDealiasing = OrszagTwoThirds())
     k_mag  = shell_coordinate(geometry, ks)
     edges  = shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
     ns     = size(velocity_hat)[1:length(ks)]
     return SpectralFluxWorkspace(
-        NonlinearTermWorkspace(velocity_hat, ks),
+        NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
         similar(velocity_hat, FT, N_sh),     # T_spec
         similar(velocity_hat, FT, N_sh),     # flux
         similar(velocity_hat, FT, ns...),    # transfer_density
@@ -152,7 +156,8 @@ end
 Construct a `ShellToShellWorkspace` for the given input and binning.
 """
 function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
-                               geometry::AbstractShellGeometry = IsotropicShells())
+                               geometry::AbstractShellGeometry = IsotropicShells(),
+                               dealiasing::AbstractDealiasing = OrszagTwoThirds())
     FT        = real(eltype(velocity_hat))
     k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
@@ -160,7 +165,7 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
     shell_idx = assign_shells(k_mag, edges)
     ns        = size(velocity_hat)[1:length(ks)]
     return ShellToShellWorkspace(
-        NonlinearTermWorkspace(velocity_hat, ks),
+        NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
         similar(velocity_hat),                   # û_m
         similar(velocity_hat, FT, N_sh, N_sh),   # T_mat
         similar(velocity_hat, FT, N_sh),         # net_transfer

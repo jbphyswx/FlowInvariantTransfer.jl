@@ -87,12 +87,14 @@ function FET.pencil_spectral_flux(
         out
     end
 
-    # Physical advecting velocity u_phys_j = real(ifft(keep ⊙ û_j))
+    # Physical advecting velocity u_phys_j = Σ_k û e^{ik·x} = bfft(û). PencilFFTs `ldiv!` is the
+    # NORMALIZED inverse (ifft = bfft/Np); since û already carries the 1/Nᵈ, multiply by Np to recover
+    # the physical field (the missing ×Np was the latent normalization bug — see NonlinearTerm docstring).
     uphys = ntuple(nd) do j
         spec = do_trunc ? (KEEP .* û[j]) : copy(û[j])
         ph   = allocate_input(plan)
         ldiv!(ph, plan, spec)
-        real.(ph)
+        real.(ph) .* Np
     end
 
     # N̂_i = fft( Σ_j u_j ∂_j u_i )/Np, dealiased
@@ -103,7 +105,7 @@ function FET.pencil_spectral_flux(
             spec = (im .* KC[j]) .* (do_trunc ? (KEEP .* û[i]) : û[i])   # i k_j û_i (dealiased)
             g = allocate_input(plan)
             ldiv!(g, plan, spec)
-            N_i .+= uphys[j] .* real.(g)
+            N_i .+= uphys[j] .* (real.(g) .* Np)   # ×Np: physical ∂_j u_i (see uphys note above)
         end
         out = allocate_output(plan)
         mul!(out, plan, N_i)

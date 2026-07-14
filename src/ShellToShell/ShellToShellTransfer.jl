@@ -1,6 +1,6 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves, resolve_execution
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid, as_component_field
@@ -87,7 +87,7 @@ function calculate_shell_to_shell_transfer(
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry)
+    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_mag))
     centers = shell_centers(binning, maximum(k_mag))
@@ -97,7 +97,7 @@ function calculate_shell_to_shell_transfer(
     net     = Vector{FT}(undef, N_sh)
     # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, execution, spectral;
+    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)
     return ShellToShellResult(centers, edges, T_mat, net, max_asym)
@@ -121,7 +121,7 @@ function calculate_shell_to_shell_transfer!(
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution, spectral;
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)
     return result

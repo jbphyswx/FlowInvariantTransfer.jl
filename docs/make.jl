@@ -1,7 +1,5 @@
 using Documenter: Documenter
 using FlowInvariantTransfer: FlowInvariantTransfer
-using FlowInvariantTransfer
-using FFTW: FFTW
 
 Documenter.makedocs(;
     modules  = [FlowInvariantTransfer],

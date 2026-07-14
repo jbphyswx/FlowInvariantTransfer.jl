@@ -233,11 +233,11 @@ The total flux can be split into physically meaningful **partial fluxes** `Π = 
 
 | Decomposition | Splits | Basis | Available where |
 |---|---|---|---|
-| **Helmholtz** | rotational (non-divergent) `u_rot=∇×ψ` + divergent (irrotational) `u_div=∇φ` | streamfunction/velocity-potential (Poisson solve) | **`HelmholtzDecomposition.jl`** (dedicated pkg: Cartesian+spherical, regular & scattered, SOR + FFTW/FINUFFT/FSH/NUFSHT solvers, `AutoSolver`). CGEF also has an internal 2D helper. |
-| **Helical `±`** | curl eigenmodes `û(k)=u_+ ĥ_+ + u_- ĥ_-`, `i k×ĥ_± = ±|k|ĥ_±` | diagonalizes helicity; `E=|u_+|²+|u_-|²`, `H=|k|(|u_+|²−|u_-|²)` | not yet (this package) |
-| **Toroidal/poloidal** | splits the solenoidal (`∇·u=0`) part: `u = ∇×(ψẑ) + ∇×∇×(φẑ)` | 3D stratified/rotating | not yet |
+| **Helmholtz** | rotational (non-divergent) `u_rot=∇×ψ` + divergent (irrotational) `u_div=∇φ` | streamfunction/velocity-potential (Poisson solve) | **done** — `decomposition=HelmholtzDecomposition()` through `calculate_spectral_flux`/`calculate_coarse_graining_flux`/`calculate_partial_fluxes`, backed by **`HelmholtzDecomposition.jl`** (Cartesian+spherical, regular & scattered, SOR + FFTW/FINUFFT/FSH/NUFSHT solvers, `AutoSolver`) via `ext/…HelmholtzDecompositionExt.jl`. CGEF also has an internal 2D helper. |
+| **Helical `±`** | curl eigenmodes `û(k)=u_+ ĥ_+ + u_- ĥ_-`, `i k×ĥ_± = ±|k|ĥ_±` | diagonalizes helicity; `E=|u_+|²+|u_-|²`, `H=|k|(|u_+|²−|u_-|²)` | **done** — `HelicalDecomposition()`; `calculate_helical_partial_fluxes` (8 channels) |
+| **Toroidal/poloidal** | splits the solenoidal (`∇·u=0`) part: `u = ∇×(ψẑ) + ∇×∇×(φẑ)` | 3D stratified/rotating | **done** — `ToroidalPoloidalDecomposition()` |
 
-**Key clarification:** Helmholtz (rot/div) is **NOT** the same as helical or toroidal/poloidal. Helmholtz separates divergent from rotational flow; helical splits the rotational part into two curl-eigenmode chiralities; toroidal/poloidal splits the solenoidal part by geometry. The dedicated **`HelmholtzDecomposition.jl`** package provides the rot/div split (geometry-aware, multi-solver) and explicitly targets *separating energy flux Π into toroidal/potential contributions* (Buzzicotti et al. 2023) — so we leverage it for partial fluxes. (NB: this *spatial* Poisson-based Helmholtz differs from the Lindborg-2015 structure-function integral relations of the same name in `StructureFunctions.jl`.) Helical `±` and toroidal/poloidal are separate, additional work.
+**Key clarification:** Helmholtz (rot/div) is **NOT** the same as helical or toroidal/poloidal. Helmholtz separates divergent from rotational flow; helical splits the rotational part into two curl-eigenmode chiralities; toroidal/poloidal splits the solenoidal part by geometry. The dedicated **`HelmholtzDecomposition.jl`** package provides the rot/div split (geometry-aware, multi-solver) and explicitly targets *separating energy flux Π into toroidal/potential contributions* (Buzzicotti et al. 2023) — so we leverage it for partial fluxes. (NB: this *spatial* Poisson-based Helmholtz differs from the Lindborg-2015 structure-function integral relations of the same name in `StructureFunctions.jl`.) All three decompositions (Helmholtz rot/div, helical `±`, toroidal/poloidal) are implemented and tested.
 References: Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023); Waleffe (1992); Constantin & Majda (1988); Biferale, Musacchio & Toschi (2012).
 
 ---
@@ -263,11 +263,12 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 | Shell-to-shell `T(n,m)` (sharp Fourier) | done (`ShellToShell`) |
 | Coarse-graining flux `Π_ℓ(x)`, `E(ℓ)` (smooth/sharp kernels) | done (CGEF + ext) |
 | Triadic Orthogonal Decomposition | done (`TOD`) |
-| **Mode-to-mode triads `S(k\|p\|q)`** | planned (this work) |
-| **Helicity flux (3D), enstrophy flux (2D)** | gap |
-| **Partial fluxes: Helmholtz rot/div (leverage `HelmholtzDecomposition.jl`), helical ±, tor/pol** | gap |
-| **Smooth band-to-band `T(K,Q)`** | gap (belongs in `ShellToShell`) |
-| **Anisotropic shells `(k_⊥,k_∥)`** | gap (future) |
+| Mode-to-mode triads `S(k\|p\|q)` | done (`ScaleToScale`; `calculate_mode_to_mode_transfer`) |
+| Helicity flux (3D), enstrophy flux (2D) | done (`Invariants.transfer_density!(::Helicity)`/`(::Enstrophy)`) |
+| Partial fluxes: Helmholtz rot/div (leverage `HelmholtzDecomposition.jl`), helical ±, tor/pol | done (`SpectralFlux.calculate_partial_fluxes`; `decomposition=` kwarg) |
+| Smooth band-to-band `T(K,Q)` | done (`BandTransfer.calculate_band_to_band_transfer`) |
+| Anisotropic shells `(k_⊥,k_∥)` | partial (directional shell geometries `PerpendicularShells`/`ParallelShells`) |
+| **Compressible energy budget (momentum-weighted transfer + KE↔IE pressure-dilatation)** | planned (#1 / Part G; spec transcribed in §0.5, Singh–Tiwari–Sharma–Verma 2025) |
 
 ---
 

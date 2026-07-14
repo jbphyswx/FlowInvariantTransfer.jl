@@ -20,6 +20,7 @@ include("ShellToShell/ShellToShellTransfer.jl")
 include("BandTransfer.jl")
 include("ScaleToScale/TriadicOrthogonalDecomposition/TriadicOrthogonalDecomposition.jl")
 include("ScaleToScale/ScaleToScaleTransfer.jl")
+include("Compressible/CompressibleTransfer.jl")
 
 # ---------------------------------------------------------------------------
 # Re-exports
@@ -69,6 +70,7 @@ using .Types:
     DistributedBackend,
     GPUBackend,
     AutoBackend,
+    local_backend,
     AbstractSpectralBackend,
     DirectSumBackend,
     FFTBackend,
@@ -90,7 +92,7 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
 
@@ -125,6 +127,7 @@ using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 export compute_nonlinear_term, compute_nonlinear_term!
 
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
+using .Compressible: calculate_compressible_flux
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 using .BandTransfer: calculate_band_to_band_transfer
@@ -132,6 +135,7 @@ using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_scalar_m
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
+export calculate_compressible_flux
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 export calculate_band_to_band_transfer
@@ -205,6 +209,18 @@ function plot_energy_transfer(args...; kwargs...)
 end
 
 export plot_energy_transfer
+
+"""
+    nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms; kwargs...)
+
+Coarse-graining energy flux `Π_ℓ(x)` at scattered (non-uniform) Cartesian points via FINUFFT.
+Requires `using FINUFFT` (the extension supplies the method).
+"""
+function nufft_coarse_graining_flux(args...; kwargs...)
+    throw(ArgumentError("nufft_coarse_graining_flux requires FINUFFT. Run `using FINUFFT`."))
+end
+
+export nufft_coarse_graining_flux
 
 # ---------------------------------------------------------------------------
 # Unified entry point

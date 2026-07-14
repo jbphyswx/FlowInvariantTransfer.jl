@@ -97,6 +97,51 @@ function FET.ShellToShellTransfer._shell_to_shell_threaded!(
 end
 
 # ---------------------------------------------------------------------------
+# Thread-parallel spectral flux Π(K) reduction
+# ---------------------------------------------------------------------------
+
+"""
+    _spectral_flux_threaded!(result, ws, velocity_hat, N̂, ks, shell_idx; invariant)
+
+Thread-parallel mode→shell reduction for spectral flux, overriding the core stub dispatched by
+`ThreadedBackend`. The transfer density is written once, then the scatter into shells is split into
+`nthreads` index chunks, each accumulating a private length-`N_sh` partial sum (race-free); the
+partials are `+`-reduced. `O(Nᴰ)` total work in parallel — no `O(N_sh·Nᴰ)` per-shell rescan. (The
+nonlinear-term FFT is threaded separately via the `spectral` backend / FFTW threads.)
+"""
+function FET.SpectralFlux._spectral_flux_threaded!(
+    result,
+    ws,
+    velocity_hat,
+    N̂,
+    ks,
+    shell_idx;
+    invariant::AbstractInvariant = KineticEnergy(),
+)
+    nd   = length(ks)
+    ns   = size(velocity_hat)[1:nd]
+    FT   = real(eltype(velocity_hat))
+    N_sh = length(ws.T_spec)
+    Np   = prod(ns)
+
+    FET.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
+    td = ws.transfer_density
+
+    nchunks = max(1, Threads.nthreads())
+    T = OhMyThreads.tmapreduce(+, OhMyThreads.index_chunks(1:Np; n = nchunks)) do rng
+        t = zeros(FT, N_sh)
+        @inbounds for i in rng
+            n = shell_idx[i]
+            n == 0 && continue
+            t[n] += td[i]
+        end
+        t
+    end
+    copyto!(ws.T_spec, T)
+    return FET.SpectralFlux._finalize_spectral_flux!(result, ws)
+end
+
+# ---------------------------------------------------------------------------
 # Override TriadicOrthogonalDecomposition._triadic_loop_threaded!
 # ---------------------------------------------------------------------------
 

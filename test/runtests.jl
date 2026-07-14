@@ -11,6 +11,9 @@ using KernelAbstractions: KernelAbstractions as KA
 using MPI: MPI
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using HelmholtzDecomposition: HelmholtzDecomposition
+using CairoMakie: CairoMakie
+using FINUFFT: FINUFFT
+using FlowFieldSpectra: FlowFieldSpectra
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FET
 
@@ -214,33 +217,8 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    Test.@testset "NonlinearTerm — allocation-free in-place hot path" begin
-        # The !-variant must allocate nothing per call: FFT path uses pre-planned transforms
-        # (ws.plans) + mul! into preallocated buffers; direct path is pure loops.
-        # NOTE: coverage instrumentation (`Pkg.test(coverage=true)`, as julia-actions/julia-runtest
-        # uses in CI) adds per-line allocations, so `@allocated == 0` is only meaningful without it —
-        # skip the assertion under coverage rather than report a false failure.
-        cov = Base.JLOptions().code_coverage != 0
-        N = 16; L = 2π
-        ks = FET.wavenumber_grid((N, N), (L, L))
-        Random.seed!(3)
-        û  = randn(ComplexF64, N, N, 2)
-        ws = FET.NonlinearTermWorkspace(û, ks)
-        for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
-            FET.compute_nonlinear_term!(ws, û, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral)  # warmup
-            a = @allocated FET.compute_nonlinear_term!(ws, û, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral)
-            Test.@test a == 0 skip = cov
-        end
-
-        # Generalized engine: scalar (M=1) advected by the velocity is also zero-alloc.
-        θ̂   = randn(ComplexF64, N, N, 1)
-        wsθ = FET.NonlinearTermWorkspace(θ̂, ks)
-        for spectral in (FET.DirectSumBackend(), FET.FFTBackend())
-            FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral, advecting_hat = û)
-            a = @allocated FET.compute_nonlinear_term!(wsθ, θ̂, ks; dealiasing = FET.OrszagTwoThirds(), spectral = spectral, advecting_hat = û)
-            Test.@test a == 0 skip = cov
-        end
-    end
+    # Comprehensive allocation contract (every !() path = 0 alloc; allocating entry points bounded).
+    include("test_allocs.jl")
 
     # -----------------------------------------------------------------------
     Test.@testset "Enstrophy — 2D conserved, 3D works (vortex stretching)" begin
@@ -1020,6 +998,16 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(res_serial.transfer_matrix, res_dist.transfer_matrix; atol=1e-12)
         Test.@test isapprox(res_serial.net_transfer, res_thread.net_transfer; atol=1e-12)
         Test.@test isapprox(res_serial.net_transfer, res_dist.net_transfer; atol=1e-12)
+
+        # #4 — parametric DistributedBackend{Inner} + local_backend accessor.
+        Test.@test FET.DistributedBackend() === FET.DistributedBackend(FET.SerialBackend())
+        Test.@test FET.local_backend(FET.DistributedBackend(FET.ThreadedBackend())) === FET.ThreadedBackend()
+        Test.@test FET.local_backend(FET.SerialBackend()) === FET.SerialBackend()   # identity for non-distributed
+        # Hybrid distributed+threaded per-worker path must match serial (workers here are single-threaded,
+        # so this exercises the ThreadedBackend inner branch of compute_mediator_transfer_column).
+        res_hybrid = FET.calculate_shell_to_shell_transfer(s_û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), verify_antisymmetry=true, execution=FET.DistributedBackend(FET.ThreadedBackend()))
+        Test.@test isapprox(res_serial.transfer_matrix, res_hybrid.transfer_matrix; atol=1e-12)
+        Test.@test isapprox(res_serial.net_transfer, res_hybrid.net_transfer; atol=1e-12)
     end
 
     # -----------------------------------------------------------------------
@@ -1129,9 +1117,19 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(ka.transfer_matrix, ref.transfer_matrix; atol=1e-12 * (maximum(abs, ref.transfer_matrix)+eps()))
         Test.@test isapprox(ka.net_transfer, ref.net_transfer; atol=1e-12 * (maximum(abs, ref.net_transfer)+eps()))
 
-        # Helicity (3D) and Enstrophy (2D) device kernels
+        # Helicity (3D) and Enstrophy (2D) device kernels. Use a REAL divergence-free field (curl of a
+        # random vector potential) so the helicity transfer is genuine and well-conditioned — a random
+        # complex field gives near-zero, heavily-cancelling transfer that no tolerance can match.
         ks3 = FET.wavenumber_grid((8, 8, 8), (L, L, L))
-        û3  = randn(Random.MersenneTwister(7), ComplexF64, 8, 8, 8, 3) .* 0.1
+        kx3 = [ks3[1][i] for i in 1:8, j in 1:8, k in 1:8]
+        ky3 = [ks3[2][j] for i in 1:8, j in 1:8, k in 1:8]
+        kz3 = [ks3[3][k] for i in 1:8, j in 1:8, k in 1:8]
+        Âx = FFTW.fft(randn(Random.MersenneTwister(7), 8, 8, 8)) ./ 8^3
+        Ây = FFTW.fft(randn(Random.MersenneTwister(8), 8, 8, 8)) ./ 8^3
+        Âz = FFTW.fft(randn(Random.MersenneTwister(9), 8, 8, 8)) ./ 8^3
+        û3 = cat(im .* (ky3 .* Âz .- kz3 .* Ây),
+                 im .* (kz3 .* Âx .- kx3 .* Âz),
+                 im .* (kx3 .* Ây .- ky3 .* Âx); dims = 4)   # u = ∇×A: real, divergence-free, helical
         rh = FET.calculate_shell_to_shell_transfer(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), execution=FET.SerialBackend(), invariant=FET.Helicity())
         gh = FET.calculate_shell_to_shell_transfer(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), execution=FET.GPUBackend(KA.CPU()), invariant=FET.Helicity())
         Test.@test isapprox(gh.transfer_matrix, rh.transfer_matrix; atol=1e-12 * (maximum(abs, rh.transfer_matrix)+eps()))
@@ -1139,6 +1137,164 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         re = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.SerialBackend(), invariant=FET.Enstrophy())
         ge = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.GPUBackend(KA.CPU()), invariant=FET.Enstrophy())
         Test.@test isapprox(ge.transfer_matrix, re.transfer_matrix; atol=1e-12 * (maximum(abs, re.transfer_matrix)+eps()))
+    end
+
+    # -----------------------------------------------------------------------
+    # Spectral flux Π(K): every execution backend (Threaded/Distributed/GPU) must reproduce the
+    # serial reduction to machine precision, for each invariant with a device kernel. GPU is the
+    # KernelAbstractions CPU backend (same device path used on CUDA/ROC/Metal); Distributed runs
+    # over however many workers are present (≥1). Guards against the issue #12 regression (spectral
+    # flux was serial-only) and against the execution axis diverging from serial.
+    Test.@testset "Spectral flux execution backends" begin
+        L = 2π
+        N = 16
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(Random.MersenneTwister(11), N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FET.LinearBinning(2π / L)
+
+        ref = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.SerialBackend())
+        atolT = 1e-12 * (maximum(abs, ref.transfer_spectrum) + eps())
+        atolΠ = 1e-12 * (maximum(abs, ref.flux) + eps())
+        for exec in (FET.ThreadedBackend(), FET.DistributedBackend(), FET.GPUBackend(KA.CPU()))
+            res = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend(), execution=exec)
+            Test.@test isapprox(res.transfer_spectrum, ref.transfer_spectrum; atol=atolT)
+            Test.@test isapprox(res.flux, ref.flux; atol=atolΠ)
+        end
+
+        # 3D helicity + 2D enstrophy device kernels through the spectral-flux GPU path.
+        ks3 = FET.wavenumber_grid((8, 8, 8), (L, L, L))
+        û3  = randn(Random.MersenneTwister(13), ComplexF64, 8, 8, 8, 3) .* 0.1
+        rh = FET.calculate_spectral_flux(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), invariant=FET.Helicity())
+        gh = FET.calculate_spectral_flux(û3, ks3; binning=FET.LinearBinning(2π/L), spectral=FET.FFTBackend(), invariant=FET.Helicity(), execution=FET.GPUBackend(KA.CPU()))
+        Test.@test isapprox(gh.transfer_spectrum, rh.transfer_spectrum; atol=1e-12 * (maximum(abs, rh.transfer_spectrum)+eps()))
+        Test.@test isapprox(gh.flux, rh.flux; atol=1e-12 * (maximum(abs, rh.flux)+eps()))
+
+        re = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend(), invariant=FET.Enstrophy())
+        ge = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend(), invariant=FET.Enstrophy(), execution=FET.GPUBackend(KA.CPU()))
+        Test.@test isapprox(ge.transfer_spectrum, re.transfer_spectrum; atol=1e-12 * (maximum(abs, re.transfer_spectrum)+eps()))
+
+        # AutoBackend resolves to the best available backend (threaded here, since OhMyThreads is
+        # loaded and the suite runs multithreaded in CI) and must match the serial reference.
+        auto = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend(), execution=FET.AutoBackend())
+        Test.@test isapprox(auto.transfer_spectrum, ref.transfer_spectrum; atol=atolT)
+        Test.@test isapprox(auto.flux, ref.flux; atol=atolΠ)
+    end
+
+    # -----------------------------------------------------------------------
+    # Compressible KE spectral transfer (#1 / Singh–Tiwari–Sharma–Verma 2025). Validated by the
+    # analytic identities that make it trustworthy: (a) the momentum-weighted nonlinear transfer
+    # conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u to
+    # −(incompressible transfer_spectrum) (paper Eqs. 48–50); (c) the R/C flux channels reconstruct
+    # the total flux and the compressive/cross channels vanish for incompressible flow; (d) uniform
+    # pressure ⇒ zero pressure-dilatation.
+    Test.@testset "Compressible energy transfer (#1)" begin
+        L = 2π; N = 16
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        # Broadband real divergence-free velocity from a random real streamfunction (nonzero net
+        # inter-shell transfer, so the incompressible reference and the tolerances are non-degenerate).
+        ψh = FFTW.fft(randn(Random.MersenneTwister(101), N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims=3)
+        b = FET.LinearBinning(2π / L)
+        ρ̂ = zeros(ComplexF64, N, N); ρ̂[1, 1] = 1.0    # ρ(x) ≡ 1  (k=0 mode)
+
+        res = FET.calculate_compressible_flux(û, ρ̂, ks; binning=b)
+        ref = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend())
+        scaleT = maximum(abs, ref.transfer_spectrum) + eps()
+        # (a) conservation
+        Test.@test abs(sum(res.transfer_spectrum)) < 1e-10 * scaleT
+        # (b) incompressible limit: T_u = −ρ·(incompressible T), here ρ=1
+        Test.@test isapprox(res.transfer_spectrum, -ref.transfer_spectrum; atol=1e-10 * scaleT)
+        # (c) channels: compressive & cross vanish; the four reconstruct the total flux
+        Test.@test maximum(abs, res.channels.compressive) < 1e-10 * scaleT
+        Test.@test maximum(abs, res.channels.comp_to_rot) < 1e-10 * scaleT
+        Test.@test maximum(abs, res.channels.rot_to_comp) < 1e-10 * scaleT
+        Test.@test isapprox(res.channels.rotational .+ res.channels.compressive .+
+                            res.channels.rot_to_comp .+ res.channels.comp_to_rot, res.flux; atol=1e-10 * scaleT)
+        # (d) uniform pressure ⇒ ∇σ = 0 ⇒ zero pressure-dilatation
+        σ̂ = zeros(ComplexF64, N, N); σ̂[1, 1] = 1.0
+        resp = FET.calculate_compressible_flux(û, ρ̂, ks; binning=b, pressure_hat=σ̂)
+        Test.@test resp.pressure_dilatation !== nothing
+        Test.@test maximum(abs, resp.pressure_dilatation.rotational) < 1e-10 * scaleT
+        Test.@test maximum(abs, resp.pressure_dilatation.compressive) < 1e-10 * scaleT
+        # no pressure ⇒ nothing
+        Test.@test res.pressure_dilatation === nothing
+    end
+
+    # -----------------------------------------------------------------------
+    # Extension smoke tests (#10): exercise the previously-untested extensions with meaningful
+    # numerical assertions, not @test true. CairoMakie (plot dispatch incl. the new TOD figure),
+    # FINUFFT (scattered-Cartesian coarse-graining + the calculate_energy_transfer wiring, #11),
+    # and FlowFieldSpectra (physical→spectral front-end). FSH/NUFSHT spherical transfer is tested
+    # in its own testset once the genuine spherical implementation lands.
+    Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" begin
+        L = 2π; N = 16
+        ks = FET.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(Random.MersenneTwister(21), N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FET.LinearBinning(2π / L)
+
+        Test.@testset "CairoMakie plot dispatch" begin
+            sf = FET.calculate_spectral_flux(û, ks; binning=b, spectral=FET.FFTBackend())
+            Test.@test FET.plot_energy_transfer(sf) isa CairoMakie.Figure
+            ss = FET.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FET.FFTBackend())
+            Test.@test FET.plot_energy_transfer(ss) isa CairoMakie.Figure
+            # New TOD Fig-4 bispectrum plot (#3): build a minimal result and render it.
+            nF = 6; nm = 2
+            freqs = collect(range(-2.0, 2.0; length=nF))
+            λ = abs.(randn(Random.MersenneTwister(3), nF, nF, nm))
+            Tb = randn(Random.MersenneTwister(4), nF, nF, nm)
+            tod = FET.TriadicOrthogonalDecompositionResult(freqs, λ, Dict{Tuple{Int,Int},Any}(), Tb, nothing, nothing)
+            Test.@test FET.plot_energy_transfer(tod) isa CairoMakie.Figure
+            Test.@test FET.plot_energy_transfer(tod; mode=2, fmax=1.5) isa CairoMakie.Figure
+            Test.@test_throws ArgumentError FET.plot_energy_transfer(tod; mode=99)
+        end
+
+        Test.@testset "FINUFFT scattered coarse-graining (#11)" begin
+            # Sample a smooth periodic velocity field at scattered points; the scattered coarse-graining
+            # flux must be finite and its calculate_energy_transfer wiring must match the direct call.
+            rng = Random.MersenneTwister(31)
+            Np = 400
+            xs = 2π .* rand(rng, Np); ys = 2π .* rand(rng, Np)
+            u  = @. sin(xs) * cos(ys); v = @. -cos(xs) * sin(ys)
+            ms = (16, 16); ℓ = 0.5
+            filt = FET.GaussianFilter()
+            direct = FET.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
+            Test.@test direct isa FET.CoarseGrainingFluxResult
+            Test.@test all(isfinite, direct.flux_field)
+            Test.@test length(direct.flux_field) == Np
+            # Part D: unified calculate_energy_transfer entry for scattered CoarseGrainingFlux.
+            method = FET.CoarseGrainingFluxMethod(filt, ℓ)
+            wired = FET.calculate_energy_transfer(method, (u, v), (xs, ys), ms)
+            Test.@test isapprox(wired.flux_field, direct.flux_field; rtol=1e-10)
+        end
+
+        Test.@testset "FlowFieldSpectra front-end" begin
+            # Physical-space uniform periodic field → spectral coeffs via FlowFieldSpectra, then the
+            # spectral-flux transfer. Band-limit (|k| ≤ 3) so the 2/3 dealiasing is a no-op and the
+            # incompressible conservation Σ_k T = 0 holds exactly (not just up to the dealiasing residual).
+            ψbl = copy(ψh)
+            for i in 1:N, j in 1:N
+                (abs(kx[i, j]) <= 3 && abs(ky[i, j]) <= 3) || (ψbl[i, j] = 0)
+            end
+            ûbl = cat(im .* ky .* ψbl, -im .* kx .* ψbl; dims = 3)
+            xs = collect(range(0, 2π; length=N+1)[1:N])
+            # Physical field from the fft/N² coefficients is bfft(û) = Σ_k û e^{ik·x} (unnormalized
+            # inverse); ifft(û) would give u/Nᵈ (a scaled field) and mis-scale the FFS comparison.
+            uxp = real.(FFTW.bfft(ûbl[:, :, 1]))
+            uyp = real.(FFTW.bfft(ûbl[:, :, 2]))
+            ffs = FET.calculate_energy_transfer(FET.SpectralFluxMethod(b), (uxp, uyp), (xs, xs), (N, N))
+            Test.@test ffs isa FET.SpectralFluxResult
+            Test.@test abs(sum(ffs.transfer_spectrum)) < 1e-8 * (maximum(abs, ffs.transfer_spectrum) + eps())
+            # Correctness: the physical→spectral front-end must reproduce the transfer computed directly
+            # from the field's own FFT coefficients (same 2/3 dealiasing on both sides).
+            ref = FET.calculate_spectral_flux(ûbl, ks; binning=b, spectral=FET.FFTBackend())
+            Test.@test isapprox(ffs.transfer_spectrum, ref.transfer_spectrum;
+                                atol = 1e-10 * (maximum(abs, ref.transfer_spectrum) + eps()))
+        end
     end
 
     # -----------------------------------------------------------------------
