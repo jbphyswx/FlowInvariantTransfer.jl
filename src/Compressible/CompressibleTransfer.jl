@@ -257,10 +257,10 @@ function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,
     uR = real.(_idft(ûR, ns));  uC = real.(_idft(ûC, ns))
     vR = real.(_idft(v̂R, ns));  vC = real.(_idft(v̂C, ns))
 
-    # Transfer density with receiver β-part at k and giver α-part carried through the nonlinear term:
-    #   T^{βα}(k) = −½ Re{ β̂*(k)·𝒩̂₁[α] } − ½ Re{ β̂_v*(k)·𝒩̂₂[α] }
-    # where 𝒩₁[α] = (u·∇)v_α + v_α(∇·u), 𝒩₂[α] = (u·∇)u_α (full u advects/dilates the α-part).
-    density(u_recv, v_recv, u_giv_phys, v_giv_phys) = begin
+    # The nonlinear terms depend ONLY on the giver (α) part, so there are just two distinct sets
+    # (α = R, C), not one per channel: 𝒩̂₁[α] = FFT[(u·∇)v_α + v_α(∇·u)], 𝒩̂₂[α] = FFT[(u·∇)u_α]
+    # (full u advects/dilates the α-part). Compute each once and reuse across the four channels.
+    giver_N(u_giv_phys, v_giv_phys) = begin
         gradv = real.(_grad_phys(_dft(complex.(v_giv_phys), ns), ks, ns))
         gradu = real.(_grad_phys(_dft(complex.(u_giv_phys), ns), ks, ns))
         N1 = zeros(FT, ns..., nd); N2 = zeros(FT, ns..., nd)
@@ -273,12 +273,19 @@ function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,
             N1[xI, c] = av + v_giv_phys[xI, c] * divu[xI]
             N2[xI, c] = au
         end
-        N̂1 = _dft(complex.(N1), ns); N̂2 = _dft(complex.(N2), ns)
+        (_dft(complex.(N1), ns), _dft(complex.(N2), ns))
+    end
+    N̂1R, N̂2R = giver_N(uR, vR)
+    N̂1C, N̂2C = giver_N(uC, vC)
+
+    # Transfer density: receiver β-part at k, giver α-part carried through the nonlinear term
+    #   T^{βα}(k) = −½ Re{ û_β*(k)·𝒩̂₁[α] } − ½ Re{ v̂_β*(k)·𝒩̂₂[α] }
+    density(û_recv, v̂_recv, N̂1, N̂2) = begin
         td = zeros(FT, ns...)
         @inbounds for kI in CartesianIndices(ns)
             s = zero(FT)
             for c in 1:nd
-                s += real(conj(u_recv[kI, c]) * N̂1[kI, c]) + real(conj(v_recv[kI, c]) * N̂2[kI, c])
+                s += real(conj(û_recv[kI, c]) * N̂1[kI, c]) + real(conj(v̂_recv[kI, c]) * N̂2[kI, c])
             end
             td[kI] = -FT(0.5) * s
         end
@@ -286,10 +293,10 @@ function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,
     end
 
     Π(td) = _flux_from_transfer(_bin(td, sidx, N_sh, FT, ns, trunc))
-    rr = Π(density(ûR, v̂R, uR, vR))   # R receiver, R giver
-    cc = Π(density(ûC, v̂C, uC, vC))   # C receiver, C giver
-    rc = Π(density(ûR, v̂R, uC, vC))   # C→R : R receiver, C giver
-    cr = Π(density(ûC, v̂C, uR, vR))   # R→C : C receiver, R giver
+    rr = Π(density(ûR, v̂R, N̂1R, N̂2R))   # R receiver, R giver
+    cc = Π(density(ûC, v̂C, N̂1C, N̂2C))   # C receiver, C giver
+    rc = Π(density(ûR, v̂R, N̂1C, N̂2C))   # C→R : R receiver, C giver
+    cr = Π(density(ûC, v̂C, N̂1R, N̂2R))   # R→C : C receiver, R giver
     return (rotational = rr, compressive = cc, rot_to_comp = cr, comp_to_rot = rc)
 end
 
