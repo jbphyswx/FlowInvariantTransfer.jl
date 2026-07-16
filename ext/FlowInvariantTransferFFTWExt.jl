@@ -366,4 +366,56 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     return dft_col
 end
 
+# ---------------------------------------------------------------------------
+# FFT transform context for the compressible spectral transfer (FFTBackend). Provides the
+# O(Nᵈ log Nᵈ) analysis/synthesis/gradient primitives the compressible core assembly calls through
+# `FIT.Compressible.TransformContext`, replacing its dependency-free explicit-DFT (DirectSumBackend).
+# One forward + one backward plan and two (ns...) scratch buffers are shared across every component
+# and every transform in a call (created once under the plan lock). Convention matches the core:
+# synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
+# ---------------------------------------------------------------------------
+function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {nd}
+    FT = real(eltype(velocity_hat))
+    CT = complex(FT)
+    Np = FT(prod(ns))
+    inbuf  = Array{CT}(undef, ns)
+    outbuf = Array{CT}(undef, ns)
+    p_fft, p_bfft = lock(_PLAN_LOCK) do
+        (FFTW.plan_fft(inbuf), FFTW.plan_bfft(inbuf))
+    end
+    kv = ntuple(d -> collect(FT, ks[d]), nd)
+
+    idft = function (fh)                                    # spectral (ns...,C) → physical (bfft)
+        C = size(fh, nd + 1)
+        out = Array{CT}(undef, ns..., C)
+        @inbounds for c in 1:C
+            for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
+            mul!(outbuf, p_bfft, inbuf)
+            for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
+        end
+        return out
+    end
+    dft = function (fp)                                     # physical (ns...,C) → spectral (fft/Nᵈ)
+        C = size(fp, nd + 1)
+        out = Array{CT}(undef, ns..., C)
+        @inbounds for c in 1:C
+            for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
+            mul!(outbuf, p_fft, inbuf)
+            for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
+        end
+        return out
+    end
+    grad = function (fh)                                    # ∂_d f_c = bfft(i k_d f̂_c) → (ns...,C,nd)
+        C = size(fh, nd + 1)
+        g = Array{CT}(undef, ns..., C, nd)
+        @inbounds for d in 1:nd, c in 1:C
+            for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
+            mul!(outbuf, p_bfft, inbuf)
+            for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
+        end
+        return g
+    end
+    return FIT.Compressible.TransformContext(idft, dft, grad)
+end
+
 end # module FlowInvariantTransferFFTWExt

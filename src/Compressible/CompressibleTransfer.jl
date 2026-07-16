@@ -1,7 +1,8 @@
 module Compressible
 
 using ..Types: CompressibleFluxResult, AbstractShellBinning, LinearBinning, AbstractShellGeometry,
-               IsotropicShells, AbstractDealiasing, OrszagTwoThirds, NoDealiasing
+               IsotropicShells, AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
+               AbstractSpectralBackend, DirectSumBackend, FFTBackend
 using ..ShellBinning: shell_edges, shell_centers, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 using ..NonlinearTerm: _is_dealiased
@@ -129,6 +130,37 @@ function _helmholtz_split(field_hat, ks, ns::NTuple{nd,Int}) where {nd}
 end
 
 # ---------------------------------------------------------------------------
+# Transform context — swappable analysis/synthesis/gradient primitives so the physics assembly is
+# written once and the transform algorithm is chosen by the spectral backend: the core provides the
+# dependency-free explicit-DFT context (`DirectSumBackend`), and the FlowInvariantTransferFFTWExt
+# extension provides the O(Nᵈ log Nᵈ) FFT context (`FFTBackend`), reusing preplanned FFTs + scratch.
+#
+#   tf.idft(field_hat)  : spectral (ns...,C) → physical (ns...,C) complex  (synthesis, u = Σ û e^{ik·x})
+#   tf.dft(field_phys)  : physical (ns...,C) → spectral (ns...,C)          (analysis, û = fft/Nᵈ)
+#   tf.grad(field_hat)  : spectral (ns...,C) → physical gradients (ns...,C,nd)
+# ---------------------------------------------------------------------------
+struct TransformContext{ID, DF, GR}
+    idft::ID
+    dft::DF
+    grad::GR
+end
+
+_directsum_tf(ks, ns) = TransformContext(
+    fh -> _idft(fh, ns),
+    fp -> _dft(fp, ns),
+    fh -> _grad_phys(fh, ks, ns),
+)
+
+# The FFT context is provided by FlowInvariantTransferFFTWExt; this fallback (less specific than the
+# extension's method) gives a clear error when a non-DirectSum backend is requested without FFTW.
+_fft_tf(velocity_hat, ks, ns) = throw(ArgumentError(
+    "calculate_compressible_flux with an FFT backend requires `using FFTW`; " *
+    "or pass `spectral = DirectSumBackend()` for the dependency-free (slow, small-grid) path."))
+
+_resolve_tf(::DirectSumBackend, velocity_hat, ks, ns) = _directsum_tf(ks, ns)
+_resolve_tf(::AbstractSpectralBackend, velocity_hat, ks, ns) = _fft_tf(velocity_hat, ks, ns)
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -166,6 +198,7 @@ function calculate_compressible_flux(
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     decompose::Bool = true,
     geometry::AbstractShellGeometry = IsotropicShells(),
+    spectral::AbstractSpectralBackend = FFTBackend(),
 )
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
@@ -181,18 +214,21 @@ function calculate_compressible_flux(
     ρ̂ = _as_scalar(density_hat, ns)
     ρ̂ = trunc ? _truncate_modes(ρ̂, ns, nd) : ρ̂
 
+    # Analysis/synthesis/gradient primitives — explicit DFT (DirectSumBackend) or FFT (FFTBackend, ext).
+    tf = _resolve_tf(spectral, velocity_hat, ks, ns)
+
     # Physical fields
-    u_phys = real.(_idft(velocity_hat, ns))                 # (ns..., nd)
-    ρ_phys = real.(_idft(ρ̂, ns))[ntuple(_ -> Colon(), nd)..., 1]  # (ns...)
+    u_phys = real.(tf.idft(velocity_hat))                   # (ns..., nd)
+    ρ_phys = real.(tf.idft(ρ̂))[ntuple(_ -> Colon(), nd)..., 1]  # (ns...)
     v_phys = similar(u_phys)
     @inbounds for c in 1:nd, xI in CartesianIndices(ns)
         v_phys[xI, c] = ρ_phys[xI] * u_phys[xI, c]
     end
-    v̂ = _dft(complex.(v_phys), ns)
+    v̂ = tf.dft(complex.(v_phys))
 
     # Divergence ∇·u (physical) and gradients of u, v
-    gradu = real.(_grad_phys(velocity_hat, ks, ns))         # (ns..., nd, nd) ∂u_c/∂x_d
-    gradv = real.(_grad_phys(v̂, ks, ns))
+    gradu = real.(tf.grad(velocity_hat))                    # (ns..., nd, nd) ∂u_c/∂x_d
+    gradv = real.(tf.grad(v̂))
     divu = zeros(FT, ns...)
     @inbounds for xI in CartesianIndices(ns), d in 1:nd
         divu[xI] += gradu[xI, d, d]
@@ -210,8 +246,8 @@ function calculate_compressible_flux(
         N1_phys[xI, c] = adv_v + v_phys[xI, c] * divu[xI]
         N2_phys[xI, c] = adv_u
     end
-    N̂1 = _dft(complex.(N1_phys), ns)
-    N̂2 = _dft(complex.(N2_phys), ns)
+    N̂1 = tf.dft(complex.(N1_phys))
+    N̂2 = tf.dft(complex.(N2_phys))
 
     # Per-mode net transfer T_u(k) = −½Re{û*·𝒩̂₁} − ½Re{v̂*·𝒩̂₂}
     td = zeros(FT, ns...)
@@ -233,12 +269,12 @@ function calculate_compressible_flux(
     T_spec = _bin(td, sidx, N_sh, FT, ns, trunc)
     flux   = _flux_from_transfer(T_spec)
 
-    channels = decompose ? _rc_channels(velocity_hat, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns, sidx, N_sh, FT, trunc) : nothing
+    channels = decompose ? _rc_channels(velocity_hat, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns, sidx, N_sh, FT, trunc, tf) : nothing
     pdil = nothing
     if pressure_hat !== nothing
         σ̂ = _as_scalar(pressure_hat, ns)
         σ̂ = trunc ? _truncate_modes(σ̂, ns, nd) : σ̂
-        pdil = _pressure_dilatation(velocity_hat, v̂, σ̂, ρ_phys, ks, ns, sidx, N_sh, FT, trunc)
+        pdil = _pressure_dilatation(velocity_hat, v̂, σ̂, ρ_phys, ks, ns, sidx, N_sh, FT, trunc, tf)
     end
 
     return CompressibleFluxResult(centers, T_spec, flux, channels, pdil)
@@ -251,18 +287,18 @@ end
 # accumulated into a flux; the four channels sum to the total flux (validated in tests), and in the
 # incompressible limit only the rotational channel survives (paper Eqs. 48–50).
 # ---------------------------------------------------------------------------
-function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where {nd}
+function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc, tf) where {nd}
     ûR, ûC = _helmholtz_split(û, ks, ns)
     v̂R, v̂C = _helmholtz_split(v̂, ks, ns)
-    uR = real.(_idft(ûR, ns));  uC = real.(_idft(ûC, ns))
-    vR = real.(_idft(v̂R, ns));  vC = real.(_idft(v̂C, ns))
+    uR = real.(tf.idft(ûR));  uC = real.(tf.idft(ûC))
+    vR = real.(tf.idft(v̂R));  vC = real.(tf.idft(v̂C))
 
     # The nonlinear terms depend ONLY on the giver (α) part, so there are just two distinct sets
     # (α = R, C), not one per channel: 𝒩̂₁[α] = FFT[(u·∇)v_α + v_α(∇·u)], 𝒩̂₂[α] = FFT[(u·∇)u_α]
     # (full u advects/dilates the α-part). Compute each once and reuse across the four channels.
     giver_N(u_giv_phys, v_giv_phys) = begin
-        gradv = real.(_grad_phys(_dft(complex.(v_giv_phys), ns), ks, ns))
-        gradu = real.(_grad_phys(_dft(complex.(u_giv_phys), ns), ks, ns))
+        gradv = real.(tf.grad(tf.dft(complex.(v_giv_phys))))
+        gradu = real.(tf.grad(tf.dft(complex.(u_giv_phys))))
         N1 = zeros(FT, ns..., nd); N2 = zeros(FT, ns..., nd)
         @inbounds for c in 1:nd, xI in CartesianIndices(ns)
             av = zero(FT); au = zero(FT)
@@ -273,7 +309,7 @@ function _rc_channels(û, v̂, u_phys, v_phys, ρ_phys, divu, ks, ns::NTuple{nd,
             N1[xI, c] = av + v_giv_phys[xI, c] * divu[xI]
             N2[xI, c] = au
         end
-        (_dft(complex.(N1), ns), _dft(complex.(N2), ns))
+        (tf.dft(complex.(N1)), tf.dft(complex.(N2)))
     end
     N̂1R, N̂2R = giver_N(uR, vR)
     N̂1C, N̂2C = giver_N(uC, vC)
@@ -306,16 +342,16 @@ end
 #   Q_{I,C}(k) = ½ Re[σ̃(k)·v_C*(k)] − ½ Im[σ(k){k·u_C*(k)}]
 # with σ̃ = ∇σ/ρ (specific pressure gradient). Shell-binned. Vanishes for incompressible div-free flow.
 # ---------------------------------------------------------------------------
-function _pressure_dilatation(û, v̂, σ̂, ρ_phys, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where {nd}
+function _pressure_dilatation(û, v̂, σ̂, ρ_phys, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc, tf) where {nd}
     _, ûC = _helmholtz_split(û, ks, ns)
     v̂R, v̂C = _helmholtz_split(v̂, ks, ns)
     # σ̃ = ∇σ / ρ : physical gradient of σ divided by ρ, back to spectral.
-    gradσ = _grad_phys(σ̂, ks, ns)                          # (ns..., 1, nd) complex
+    gradσ = tf.grad(σ̂)                                     # (ns..., 1, nd) complex
     σ̃_phys = Array{complex(FT)}(undef, ns..., nd)
     @inbounds for d in 1:nd, xI in CartesianIndices(ns)
         σ̃_phys[xI, d] = real(gradσ[xI, 1, d]) / ρ_phys[xI]
     end
-    σ̃ = _dft(σ̃_phys, ns)
+    σ̃ = tf.dft(σ̃_phys)
 
     QR = zeros(FT, ns...); QC = zeros(FT, ns...)
     @inbounds for kI in CartesianIndices(ns)
