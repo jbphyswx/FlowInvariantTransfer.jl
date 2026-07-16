@@ -56,6 +56,9 @@ function FIT.calculate_energy_transfer(
     lmax = Nθ - 1
     a = float(method.radius)
 
+    # FastSphericalHarmonics (a double-precision FastTransforms C library) is Float64-only — its
+    # spinsph_transform/eth/evaluate accept only `Array{Float64}`/`Array{Complex{Float64}}` — so this
+    # path necessarily computes (and returns) in Float64 regardless of the input element type.
     Cζ0 = FSH.spinsph_transform(Matrix{Float64}(vorticity), 0)     # ζ̂_lm (real, spinsph(0) layout)
 
     # Dealiasing: evaluate the quadratic Jacobian on a grid resolving 2·lmax (exact for a product of

@@ -56,48 +56,51 @@ function FIT.calculate_energy_transfer(
     (length(θ) == M && length(φ) == M) ||
         throw(ArgumentError("vorticity and both coordinate vectors must have equal length; got $((M, length(θ), length(φ)))."))
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
-    a = float(method.radius)
     lwork = dealias ? 2 * lmax : lmax
     M ≥ (lwork + 1)^2 || throw(ArgumentError(
         "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
         "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
 
-    ζdata = ComplexF64.(vorticity)
+    # Compute type follows the input (NUFSHT's plans are parametric via `T`); Complex{FT} coefficients.
+    FT = float(eltype(vorticity))
+    CT = Complex{FT}
+    a = FT(method.radius)
+    ζdata = CT.(vorticity)
 
     # Analyse ζ → complex spin-0 coefficients (spin_coeff_index layout).
-    plan0 = NUFSHT.make_spin_plan(θ, φ, lmax, 0; tol = tol)
-    ζ_lm = zeros(ComplexF64, lmax + 1, 2lmax + 1)
+    plan0 = NUFSHT.make_spin_plan(θ, φ, lmax, 0; tol = tol, T = FT)
+    ζ_lm = zeros(CT, lmax + 1, 2lmax + 1)
     NUFSHT.nusht_solve_spin!(ζ_lm, ζdata, plan0; rtol = rtol, maxiter = maxiter)
 
     # ψ = ∇⁻²ζ (ψ̂_lm = -a²/(l(l+1)) ζ̂_lm) and the eth ladder → spin-1 gradient coefficients.
-    ψ_lm = zeros(ComplexF64, lmax + 1, 2lmax + 1)
-    ðψ = zeros(ComplexF64, lmax + 1, 2lmax + 1)
-    ðζ = zeros(ComplexF64, lmax + 1, 2lmax + 1)
+    ψ_lm = zeros(CT, lmax + 1, 2lmax + 1)
+    ðψ = zeros(CT, lmax + 1, 2lmax + 1)
+    ðζ = zeros(CT, lmax + 1, 2lmax + 1)
     @inbounds for ℓ in 1:lmax, m in -ℓ:ℓ
         i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
         ψ_lm[i] = -a^2 / (ℓ * (ℓ + 1)) * ζ_lm[i]
-        c = sqrt(ℓ * (ℓ + 1))
+        c = sqrt(FT(ℓ * (ℓ + 1)))
         ðψ[i] = c * ψ_lm[i]
         ðζ[i] = c * ζ_lm[i]
     end
 
     # Synthesise the gradient fields ðψ, ðζ at the scattered points (spin-1).
-    plan1 = NUFSHT.make_spin_plan(θ, φ, lmax, 1; tol = tol)
-    Gψ = zeros(ComplexF64, M); NUFSHT.nusht_type2_spin!(Gψ, ðψ, plan1)
-    Gζ = zeros(ComplexF64, M); NUFSHT.nusht_type2_spin!(Gζ, ðζ, plan1)
+    plan1 = NUFSHT.make_spin_plan(θ, φ, lmax, 1; tol = tol, T = FT)
+    Gψ = zeros(CT, M); NUFSHT.nusht_type2_spin!(Gψ, ðψ, plan1)
+    Gζ = zeros(CT, M); NUFSHT.nusht_type2_spin!(Gζ, ðζ, plan1)
     J = @. imag(conj(Gψ) * Gζ) / a^2                             # A = J(ψ,ζ) at the points
 
     # Analyse A at degree lwork (dealiased), then keep l ≤ lmax.
-    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol)
-    A_lw = zeros(ComplexF64, lwork + 1, 2lwork + 1)
-    NUFSHT.nusht_solve_spin!(A_lw, ComplexF64.(J), plan0w; rtol = rtol, maxiter = maxiter)
+    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT)
+    A_lw = zeros(CT, lwork + 1, 2lwork + 1)
+    NUFSHT.nusht_solve_spin!(A_lw, CT.(J), plan0w; rtol = rtol, maxiter = maxiter)
 
     # Flatten to per-mode arrays for the shared degree-spectrum reduction.
     nmode = (lmax + 1)^2
     degs = Vector{Int}(undef, nmode)
-    ψv = Vector{ComplexF64}(undef, nmode)
-    ζv = Vector{ComplexF64}(undef, nmode)
-    Av = Vector{ComplexF64}(undef, nmode)
+    ψv = Vector{CT}(undef, nmode)
+    ζv = Vector{CT}(undef, nmode)
+    Av = Vector{CT}(undef, nmode)
     k = 0
     @inbounds for ℓ in 0:lmax, m in -ℓ:ℓ
         k += 1
