@@ -15,6 +15,7 @@ using CairoMakie: CairoMakie
 using FINUFFT: FINUFFT
 using FlowFieldSpectra: FlowFieldSpectra
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
+using NUFSHT: NUFSHT
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
@@ -1340,6 +1341,49 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         # Grid-shape guard.
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), randn(N, N))
+    end
+
+    # -----------------------------------------------------------------------
+    # Scattered spherical transfer (#10 NUFSHT extension; rewrite off a fabricated API). Same
+    # 2D-barotropic transfer at scattered points via NUFSHT's FINUFFT-backed spin transforms.
+    # Anchor: cross-check against the validated FSH regular-grid path on the SAME field, sampled
+    # identically (random real-SH coeffs C → FSH grid via sph_evaluate, scattered via nusht_type2!).
+    # Coefficient recovery is well-conditioned only for equidistributed (spherical-Fibonacci) points.
+    Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
+        a = 1.0
+        lmax = 8; N = lmax + 1
+        rng = Random.MersenneTwister(99)
+        C = zeros(N, 2N - 1)
+        for ℓ in 0:lmax, m in -ℓ:ℓ; C[FSH.sph_mode(ℓ, m)] = randn(rng); end   # broadband real-SH field
+        ζgrid = FSH.sph_evaluate(C)
+        resF = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(radius = a), ζgrid)
+
+        # Spherical-Fibonacci scattered points (equidistributed), M ≥ (2lmax+1)² for the dealiased solve.
+        Msolve = 8 * (2lmax + 1)^2
+        ga = π * (3 - sqrt(5))
+        zf = [1 - 2 * (k + 0.5) / Msolve for k in 0:Msolve-1]
+        θs = acos.(clamp.(zf, -1.0, 1.0)); φs = mod.(ga .* (0:Msolve-1), 2π)
+        ζscat = zeros(Msolve)
+        NUFSHT.nusht_type2!(ζscat, C, NUFSHT.make_plan(θs, φs, lmax; tol = 1e-12))
+
+        res = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs);
+                                            lmax = lmax, tol = 1e-12, rtol = 1e-13)
+        Test.@test res isa FIT.SphericalTransferResult
+        Test.@test res.degrees == collect(0.0:lmax)
+
+        scaleE = maximum(abs, resF.energy_transfer) + eps()
+        scaleZ = maximum(abs, resF.enstrophy_transfer) + eps()
+        Test.@test scaleE > 1e-3   # genuine nonzero transfer in the reference
+        # Conservation (CG-tolerance-limited on scattered points).
+        Test.@test abs(sum(res.energy_transfer))    < 1e-8 * scaleE
+        Test.@test abs(sum(res.enstrophy_transfer)) < 1e-8 * scaleZ
+        # Cross-check: scattered transfer matches the validated FSH grid transfer for the same field.
+        Test.@test maximum(abs.(res.energy_transfer    .- resF.energy_transfer))    < 0.02 * scaleE
+        Test.@test maximum(abs.(res.enstrophy_transfer .- resF.enstrophy_transfer)) < 0.02 * scaleZ
+
+        # Guard: too few points for the dealiased solve.
+        Test.@test_throws ArgumentError FIT.calculate_energy_transfer(
+            FIT.SphericalTransferMethod(), ζscat[1:10], (θs[1:10], φs[1:10]); lmax = lmax)
     end
 
     # -----------------------------------------------------------------------
