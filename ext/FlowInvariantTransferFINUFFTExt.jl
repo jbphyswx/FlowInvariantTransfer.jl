@@ -27,7 +27,7 @@ points using FINUFFT for the spectral transforms.
 
 # Keyword Arguments
 - `return_diagnostics::Bool=false`: If `true`, also return τ̄ᵢⱼ and S̄ᵢⱼ at the output points.
-- `tol::Float64=1e-8`: FINUFFT accuracy tolerance.
+- `tol=1e-8`: FINUFFT accuracy tolerance.
 
 # Returns
 `CoarseGrainingFluxResult` with `flux_field` sampled at the input scatter coordinates.
@@ -48,42 +48,41 @@ function FIT.nufft_coarse_graining_flux(
     filter::AbstractFilter,
     ms::Tuple;
     return_diagnostics::Bool = false,
-    tol::Float64 = 1e-8,
+    tol::Real = 1e-8,
 )
     D  = length(velocity_fields)
     nd = length(scatter_coords)
     D == nd || throw(ArgumentError("velocity components ($D) ≠ spatial dimensions ($nd)"))
     N  = length(velocity_fields[1])
-    FT = Float64
+    FT = float(eltype(velocity_fields[1]))       # compute type follows the input (FINUFFT is precision-generic)
 
     # Build uniform wavenumber grid for the spectral representation
     # Infer domain size from coordinate ranges
     Ls = ntuple(Val(nd)) do d
         cv = scatter_coords[d]
-        range = maximum(cv) - minimum(cv)
-        range > 0 ? range : 1.0
+        rng = maximum(cv) - minimum(cv)
+        rng > 0 ? FT(rng) : one(FT)
     end
     ks_1d = ntuple(Val(nd)) do d
         N_d = ms[d]
-        dk  = 2π / Ls[d]
-        [Float64(k <= N_d÷2 ? k : k - N_d) * dk for k in 0:N_d-1]
+        dk  = 2 * FT(π) / Ls[d]
+        [FT(k <= N_d÷2 ? k : k - N_d) * dk for k in 0:N_d-1]
     end
     k_mag = wavenumber_magnitude_grid(ks_1d)
 
-    # Rescale coordinates to [-π, π) for FINUFFT
+    # Rescale coordinates to [-π, π) for FINUFFT (in the compute precision FT)
     scaled_coords = ntuple(Val(nd)) do d
-        cmin = minimum(scatter_coords[d])
-        cmax = maximum(scatter_coords[d])
-        range = cmax - cmin
-        range > 0 ? (scatter_coords[d] .- cmin) ./ range .* 2π .- π :
-                    zeros(eltype(scatter_coords[d]), N)
+        cmin = FT(minimum(scatter_coords[d]))
+        rng  = FT(maximum(scatter_coords[d])) - cmin
+        rng > 0 ? (FT.(scatter_coords[d]) .- cmin) ./ rng .* (2 * FT(π)) .- FT(π) :
+                  zeros(FT, N)
     end
 
     # Type-1 NUFFT: scattered → spectral (analyse each velocity component)
     û = _nufft_type1(scaled_coords, velocity_fields, ms, tol)
 
     # Filter weights Ĝ(k)
-    Ĝ = [FT(filter_response(filter, k_mag[I], Float64(ℓ))) for I in CartesianIndices(size(k_mag))]
+    Ĝ = [FT(filter_response(filter, k_mag[I], FT(ℓ))) for I in CartesianIndices(size(k_mag))]
 
     # Filtered velocity at scattered points via Type-2 NUFFT
     û_filt = [Ĝ .* û[c] for c in 1:D]
@@ -175,15 +174,15 @@ end
 # NUFFT helpers
 # ---------------------------------------------------------------------------
 
-function _nufft_type1(scaled_coords::Tuple, fields::Tuple, ms::Tuple, tol::Float64)
+function _nufft_type1(scaled_coords::Tuple, fields::Tuple, ms::Tuple, tol::Real)
     nd = length(scaled_coords)
     D  = length(fields)
     N  = length(fields[1])
-    Np = prod(ms)
-    result = Vector{Array{ComplexF64}}(undef, D)
+    CT = Complex{eltype(scaled_coords[1])}       # FINUFFT precision follows the (scaled) coordinates
+    result = Vector{Array{CT}}(undef, D)
 
     for c in 1:D
-        f_c = ComplexF64.(fields[c])
+        f_c = CT.(fields[c])
         if nd == 1
             raw = FINUFFT.nufft1d1(
                 scaled_coords[1], f_c, 1, tol, ms[1])
@@ -204,15 +203,16 @@ function _nufft_type1(scaled_coords::Tuple, fields::Tuple, ms::Tuple, tol::Float
     return result
 end
 
-function _nufft_type2(scaled_coords::Tuple, û_list::Vector, ms::Tuple, tol::Float64)
+function _nufft_type2(scaled_coords::Tuple, û_list::AbstractVector, ms::Tuple, tol::Real)
     nd = length(scaled_coords)
     D  = length(û_list)
-    result = Vector{Vector{ComplexF64}}(undef, D)
+    CT = Complex{eltype(scaled_coords[1])}       # FINUFFT precision follows the (scaled) coordinates
+    result = Vector{Vector{CT}}(undef, D)
 
     for c in 1:D
         # Coefficients must be the nd-dim spectral grid (drop any trailing batch dim some FINUFFT
         # versions add); nufftNd2 returns per-point values, `vec` normalizes a possible (M,1) shape.
-        coeff_c = reshape(ComplexF64.(û_list[c]), ms)
+        coeff_c = reshape(CT.(û_list[c]), ms)
         if nd == 1
             result[c] = vec(FINUFFT.nufft1d2(scaled_coords[1], 1, tol, coeff_c))
         elseif nd == 2
@@ -230,8 +230,7 @@ function _nufft_type2(scaled_coords::Tuple, û_list::Vector, ms::Tuple, tol::Flo
 end
 
 function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
-    nd = length(ms)
-    kc = zeros(Float64, ms...)
+    kc = zeros(eltype(ks_1d[d]), ms...)
     for I in CartesianIndices(ms)
         kc[I] = ks_1d[d][I[d]]
     end
