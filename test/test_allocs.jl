@@ -41,6 +41,22 @@ function _alloc_s2s!(res, ws, û, ks, sp)
     FIT.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
     return @allocated FIT.calculate_shell_to_shell_transfer!(res, ws, û, ks; spectral=sp)
 end
+function _alloc_m2m!(res, ws, û_p, û, ks)
+    FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks)
+    return @allocated FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks)
+end
+function _alloc_ss_scalar!(res, ws, û, θ̂, ks)
+    FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks)
+    return @allocated FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks)
+end
+function _alloc_band!(T, net, bws, û, ks)
+    FIT.calculate_band_to_band_transfer!(T, net, bws, û, ks)
+    return @allocated FIT.calculate_band_to_band_transfer!(T, net, bws, û, ks)
+end
+function _alloc_comp!(ws, û, ρ̂, ks, b)
+    FIT.calculate_compressible_flux!(ws, û, ρ̂, ks; binning=b)
+    return @allocated FIT.calculate_compressible_flux!(ws, û, ρ̂, ks; binning=b)
+end
 
 Test.@testset "Allocations" begin
     L = 2π
@@ -110,5 +126,32 @@ Test.@testset "Allocations" begin
         Test.@test (@allocated FIT.calculate_spectral_flux(û2, ks2; binning=b2, spectral=FIT.FFTBackend())) <= 60fb skip = _ALLOC_COV
         FIT.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FIT.FFTBackend()) # warmup
         Test.@test (@allocated FIT.calculate_shell_to_shell_transfer(û2, ks2; binning=b2, spectral=FIT.FFTBackend())) <= 80fb skip = _ALLOC_COV
+    end
+
+    Test.@testset "in-place transfer variants — 0 alloc (reuse caller result + workspace)" begin
+        ns = (N, N)
+        # mode-to-mode!
+        wsm  = FIT.NonlinearTermWorkspace(û2, ks2); ûp = similar(û2)
+        Sm   = similar(û2, Float64, ns..., ns...); netm = similar(û2, Float64, ns...)
+        resm = FIT.ModeToModeTriadResult(FIT.KineticEnergy(), ks2, netm, Sm)
+        Test.@test _alloc_m2m!(resm, wsm, ûp, û2, ks2) == 0 skip = _ALLOC_COV
+        # scalar shell-to-shell!
+        θ̂c   = randn(ComplexF64, N, N, 1)
+        wss  = FIT.ShellToShellWorkspace(θ̂c, ks2, b2)
+        ress = FIT.calculate_scalar_shell_to_shell_transfer(û2, θ̂c, ks2; binning=b2)
+        Test.@test _alloc_ss_scalar!(ress, wss, û2, θ̂c, ks2) == 0 skip = _ALLOC_COV
+        # band-to-band!
+        bands = FIT.SmoothBands([2.0, 4.0])
+        bws   = FIT.BandTransferWorkspace(û2, ks2, bands)
+        Tb    = zeros(2, 2); netb = zeros(2)
+        Test.@test _alloc_band!(Tb, netb, bws, û2, ks2) == 0 skip = _ALLOC_COV
+    end
+
+    Test.@testset "compressible! — reuses workspace (field intermediates not reallocated)" begin
+        fb = sizeof(û2)
+        ρ̂  = randn(ComplexF64, N, N)
+        wsc = FIT.CompressibleWorkspace(û2, ks2)
+        # ~34× field (shell-binning setup + per-shell result vectors); NOT the 93× of the allocating form.
+        Test.@test _alloc_comp!(wsc, û2, ρ̂, ks2, b2) <= 45fb skip = _ALLOC_COV
     end
 end
