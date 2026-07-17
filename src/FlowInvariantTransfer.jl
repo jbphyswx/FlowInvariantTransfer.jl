@@ -130,7 +130,7 @@ using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 export compute_nonlinear_term, compute_nonlinear_term!
 
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
-using .Compressible: calculate_compressible_flux
+using .Compressible: calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
 using .Spherical: calculate_spherical_transfer
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
@@ -140,7 +140,7 @@ using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_mode_to_
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
-export calculate_compressible_flux
+export calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
 export calculate_spherical_transfer
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!

@@ -415,7 +415,32 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
         end
         return g
     end
-    return FIT.Compressible.TransformContext(idft, dft, grad)
+    # In-place siblings — write into the caller's buffer (for the compressible workspace path).
+    idft! = function (out, fh)
+        @inbounds for c in 1:size(fh, nd + 1)
+            for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
+            mul!(outbuf, p_bfft, inbuf)
+            for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
+        end
+        return out
+    end
+    dft! = function (out, fp)
+        @inbounds for c in 1:size(fp, nd + 1)
+            for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
+            mul!(outbuf, p_fft, inbuf)
+            for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
+        end
+        return out
+    end
+    grad! = function (g, fh)
+        @inbounds for d in 1:nd, c in 1:size(fh, nd + 1)
+            for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
+            mul!(outbuf, p_bfft, inbuf)
+            for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
+        end
+        return g
+    end
+    return FIT.Compressible.TransformContext(idft, dft, grad, idft!, dft!, grad!)
 end
 
 end # module FlowInvariantTransferFFTWExt
