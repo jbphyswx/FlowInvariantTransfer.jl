@@ -253,10 +253,9 @@ Returns left singular vectors U, singular values S_diag (vector), and right sing
 """
 function sirovich_svd(X)
     # X is (n, m) where n is the smaller dimension (snapshots)
-    M = X * X'
-    # Make Hermitian for eigen
-    M = LinearAlgebra.Hermitian(M)
-    eigen_result = LinearAlgebra.eigen(M)
+    M = X * X'                                    # fresh temp — safe to consume in-place
+    # In-place Hermitian eigendecomposition (destroys M, which is ours).
+    eigen_result = LinearAlgebra.eigen!(LinearAlgebra.Hermitian(M))
     λ = real.(eigen_result.values)
     U = eigen_result.vectors
 
@@ -289,7 +288,7 @@ Low-rank SVD via QR factorization of Q3, then Sirovich SVD of the reduced produc
 Returns left singular vectors (in the original space of Q3), singular values, and right singular vectors.
 """
 function lowrank_svd(X, Q3)
-    Q, R = LinearAlgebra.qr(Q3)
+    Q, R = LinearAlgebra.qr!(Q3)      # Q3 is a caller-owned temp — consume it in-place
     Q_mat = Matrix(Q)  # materialize for multiplication
     U_r, S_diag, V = sirovich_svd(R * X)
     U = Q_mat * U_r
@@ -321,10 +320,10 @@ function triadic_svd(Q_hat_n, Q_hat_kl, weights, nBlks)
 
     U, s, V = lowrank_svd(X, Q3)
 
-    # Un-weight modes
+    # Un-weight modes in place (U, V are fresh outputs of lowrank_svd).
     inv_sqrt_w = 1 ./ sqrt_w
-    U = U .* inv_sqrt_w
-    V = V .* inv_sqrt_w
+    U .*= inv_sqrt_w
+    V .*= inv_sqrt_w
 
     return U, s, V
 end
@@ -627,39 +626,44 @@ function triadic_orthogonal_decomposition(
     X_flat = reshape(X, nt, nVar, nx)
 
     # Temporary for block DFT
-    Q_hat_blk = zeros(CT, nDFT, nVar * nx)
-
     # Temporal-DFT transform is chosen by the spectral backend.
     dft_backend = spectral
+    shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
+
+    # Reusable per-block/column scratch — avoids per-column allocation in the hot DFT loop.
+    segment  = Array{CT}(undef, nDFT, nx)
+    windowed = Array{CT}(undef, nDFT)
+    dft_col  = Array{CT}(undef, nDFT)
+    shifted  = Array{CT}(undef, nDFT)
+    seg_before_mean = blk_mean ? Array{CT}(undef, nDFT, nx) : segment
 
     for iBlk in 1:nBlks
-        # Time indices for this block
         offset = min((iBlk - 1) * (nDFT - noverlap_val) + nDFT, nt) - nDFT
-        time_idx = (1:nDFT) .+ offset
 
         for iVar in 1:nVar
-            # Extract segment: (nDFT, nx)
-            segment = CT.(X_flat[time_idx, iVar, :]) .- transpose(X_mean[iVar, :])
-
-            # Blockwise mean subtraction
-            if blk_mean
-                seg_before_mean = copy(segment)
-                blk_avg = sum(segment; dims=1) ./ nDFT
-                segment .-= blk_avg
+            # Extract this block/variable segment into the reused (nDFT, nx) buffer.
+            @inbounds for ix in 1:nx, t in 1:nDFT
+                segment[t, ix] = X_flat[offset + t, iVar, ix] - X_mean[iVar, ix]
             end
 
-            # Apply window, FFT, normalize, fftshift → (nDFT,) per spatial point
+            # Blockwise mean subtraction (keep the pre-mean copy for the DC term below).
+            if blk_mean
+                copyto!(seg_before_mean, segment)
+                @inbounds for ix in 1:nx
+                    blk_avg = zero(CT)
+                    for t in 1:nDFT; blk_avg += segment[t, ix]; end
+                    blk_avg /= nDFT
+                    for t in 1:nDFT; segment[t, ix] -= blk_avg; end
+                end
+            end
+
+            # Apply window, DFT, normalize, fftshift → (nDFT,) per spatial point.
             for ix in 1:nx
-                seg_col = segment[:, ix]
-                windowed = seg_col .* window_vec
-                # DFT
-                dft_col = zeros(CT, nDFT)
                 if dft_backend isa FFTBackend
-                    # Will be overridden by extension
-                    _temporal_block_dft_fft!(dft_col, seg_col, window_vec, win_weight, nDFT)
+                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT)
                 else
-                    # Direct sum
-                    for freq_k in 1:nDFT
+                    @inbounds for t in 1:nDFT; windowed[t] = segment[t, ix] * window_vec[t]; end
+                    @inbounds for freq_k in 1:nDFT
                         val = zero(ComplexF64)
                         for t in 1:nDFT
                             phase = -2π * (freq_k - 1) * (t - 1) / nDFT
@@ -669,18 +673,15 @@ function triadic_orthogonal_decomposition(
                     end
                 end
 
-                # Handle blockwise mean: preserve the DC component from pre-mean data
+                # Blockwise mean: restore the DC component from the pre-mean data.
                 if blk_mean
-                    windowed_pre = seg_before_mean[:, ix] .* window_vec
-                    dc_val = sum(windowed_pre) * (win_weight / nDFT)
-                    dft_col[1] = dc_val
+                    dc = zero(CT)
+                    @inbounds for t in 1:nDFT; dc += seg_before_mean[t, ix] * window_vec[t]; end
+                    dft_col[1] = dc * (win_weight / nDFT)
                 end
 
-                # fftshift
-                shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
-                dft_col = circshift(dft_col, shift)
-
-                Q_hat[:, iVar, ix, iBlk] = dft_col
+                circshift!(shifted, dft_col, shift)
+                @inbounds @views Q_hat[:, iVar, ix, iBlk] .= shifted
             end
         end
     end
