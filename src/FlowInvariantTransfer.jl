@@ -135,7 +135,8 @@ using .Spherical: calculate_spherical_transfer
 using .CoarseGrainingFlux: calculate_coarse_graining_flux
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 using .BandTransfer: calculate_band_to_band_transfer
-using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
+using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!,
+                             calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
@@ -144,7 +145,7 @@ export calculate_spherical_transfer
 export calculate_coarse_graining_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer
 export calculate_band_to_band_transfer
-export calculate_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer
+export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
 export calculate_energy_transfer
 
