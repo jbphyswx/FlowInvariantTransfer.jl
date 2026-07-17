@@ -343,7 +343,6 @@ This is the fallback when FFTW is not loaded.
 Result is written into `Q_hat_blk` of size `(nDFT, nVar*nx)`, fftshifted.
 """
 function _temporal_block_dft_direct!(Q_hat_blk, segment, window, win_weight, nDFT)
-    FT = Float64
     nCols = size(segment, 2)
 
     # Apply window and normalize
@@ -352,7 +351,7 @@ function _temporal_block_dft_direct!(Q_hat_blk, segment, window, win_weight, nDF
     # Direct DFT
     for freq_idx in 1:nDFT
         for col in 1:nCols
-            val = zero(ComplexF64)
+            val = zero(eltype(Q_hat_blk))
             for t in 1:nDFT
                 # DFT: X[k] = Σ_n x[n] * exp(-2πi*(k-1)*(n-1)/N)
                 phase = -2π * (freq_idx - 1) * (t - 1) / nDFT
@@ -589,11 +588,17 @@ function triadic_orthogonal_decomposition(
     (window_vec, weight_vec, noverlap_val, dt_val, nDFT, nBlks) =
         parse_parameters(nt, nx; window=window, weight=weight, noverlap=noverlap, dt=dt)
 
+    # Compute precision follows the input snapshots; the temporal DFT/SVD run in Complex{RT}.
+    RT = real(float(eltype(X)))
+    CT = Complex{RT}
+    window_vec = convert(Vector{RT}, window_vec)
+    weight_vec = convert(Vector{RT}, weight_vec)
+
     # Determine number of modes to store
     nmode_val = nmode === nothing ? nBlks : Int(nmode)
 
     # Window correction factor
-    win_weight = 1.0 / (sum(window_vec) / length(window_vec))
+    win_weight = RT(1) / (sum(window_vec) / length(window_vec))
 
     # --- Handle mean subtraction ---
     X_mean = if mean_type === :zero || mean_type === :blockwise
@@ -612,17 +617,17 @@ function triadic_orthogonal_decomposition(
 
     # Determine nState from LHS
     # Apply LHS to a dummy to determine output size
-    dummy_input = zeros(ComplexF64, nVar, nx, 1)
+    dummy_input = zeros(CT, nVar, nx, 1)
     nState = size(LHS(dummy_input), 1)
 
     # Preallocate Q_hat: (nFreq, nVar, nx, nBlks)
-    Q_hat = zeros(ComplexF64, nFreq, nVar, nx, nBlks)
+    Q_hat = zeros(CT, nFreq, nVar, nx, nBlks)
 
     # Reshape X for processing: (nt, nVar, nx)
     X_flat = reshape(X, nt, nVar, nx)
 
     # Temporary for block DFT
-    Q_hat_blk = zeros(ComplexF64, nDFT, nVar * nx)
+    Q_hat_blk = zeros(CT, nDFT, nVar * nx)
 
     # Temporal-DFT transform is chosen by the spectral backend.
     dft_backend = spectral
@@ -634,7 +639,7 @@ function triadic_orthogonal_decomposition(
 
         for iVar in 1:nVar
             # Extract segment: (nDFT, nx)
-            segment = ComplexF64.(X_flat[time_idx, iVar, :]) .- transpose(X_mean[iVar, :])
+            segment = CT.(X_flat[time_idx, iVar, :]) .- transpose(X_mean[iVar, :])
 
             # Blockwise mean subtraction
             if blk_mean
@@ -648,7 +653,7 @@ function triadic_orthogonal_decomposition(
                 seg_col = segment[:, ix]
                 windowed = seg_col .* window_vec
                 # DFT
-                dft_col = zeros(ComplexF64, nDFT)
+                dft_col = zeros(CT, nDFT)
                 if dft_backend isa FFTBackend
                     # Will be overridden by extension
                     _temporal_block_dft_fft!(dft_col, seg_col, window_vec, win_weight, nDFT)
@@ -684,8 +689,8 @@ function triadic_orthogonal_decomposition(
     weights = repeat(weight_vec, nState)
 
     # --- Preallocate output arrays ---
-    L = fill(NaN, nFreq, nFreq, nmode_val)
-    T_budget = fill(NaN, nFreq, nFreq, nmode_val)
+    L = fill(RT(NaN), nFreq, nFreq, nmode_val)
+    T_budget = fill(RT(NaN), nFreq, nFreq, nmode_val)
     P = Dict{Tuple{Int,Int}, NamedTuple}()
     A_out = return_coefficients ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing
     Xi_out = return_auxiliary_modes ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing

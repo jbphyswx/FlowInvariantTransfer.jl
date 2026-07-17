@@ -862,6 +862,12 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         res_aux = FIT.triadic_orthogonal_decomposition(X; dt=dt_sig, return_coefficients=true, return_auxiliary_modes=true)
         Test.@test res_aux.expansion_coefficients isa Dict
         Test.@test res_aux.auxiliary_modes isa Dict
+
+        # 7. Precision genericity: Float32 snapshots stay in Float32 (no ComplexF64 upcast).
+        res32 = FIT.triadic_orthogonal_decomposition(Float32.(X); dt=Float32(dt_sig))
+        Test.@test res32 isa FIT.TriadicOrthogonalDecompositionResult
+        Test.@test eltype(res32.mode_bispectrum) === Float32
+        Test.@test isapprox(Float64.(res32.frequencies), res_serial.frequencies; atol=1e-4)
     end
 
     # -----------------------------------------------------------------------
