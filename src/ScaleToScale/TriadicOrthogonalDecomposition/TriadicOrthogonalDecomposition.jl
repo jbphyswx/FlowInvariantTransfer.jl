@@ -459,10 +459,13 @@ function _triadic_loop_serial!(
         # Modes: convective (u) and recipient (v)
         P[(fi_l, fi_n)] = (convective=u, recipient=v)
 
-        # Modal energy budget: T = s .* dot(V, W .* U) for each mode
-        for j in 1:nm
-            # Weighted inner product of V[:,j] and U[:,j]
-            T_budget[fi_l, fi_n, j] = s[j] * real(LinearAlgebra.dot(v[:, j], weights .* u[:, j]))
+        # Modal energy budget T = s · Re⟨v, W u⟩ per mode (allocation-free weighted inner product).
+        @inbounds for j in 1:nm
+            acc = zero(eltype(u))
+            for k in axes(u, 1)
+                acc += conj(v[k, j]) * weights[k] * u[k, j]
+            end
+            T_budget[fi_l, fi_n, j] = s[j] * real(acc)
         end
 
         # Expansion coefficients
