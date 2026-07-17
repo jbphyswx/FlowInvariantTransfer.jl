@@ -8,7 +8,7 @@ using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, ShellToShellWorkspace
 
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!,
-       calculate_scalar_shell_to_shell_transfer
+       calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 
 # ---------------------------------------------------------------------------
 # Internal FFTW-path stub (overridden by FlowInvariantTransferFFTWExt)
@@ -143,6 +143,19 @@ The scalar field is band-filtered and carried; the velocity advects it. Thin wra
 function calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...)
     θ̂ = as_component_field(scalar_hat, length(ks))
     return calculate_shell_to_shell_transfer(θ̂, ks;
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
+end
+
+"""
+    calculate_scalar_shell_to_shell_transfer!(result, ws, velocity_hat, scalar_hat, ks; kwargs...)
+
+In-place passive-scalar shell-to-shell variance transfer — thin wrapper over
+[`calculate_shell_to_shell_transfer!`](@ref) (`invariant = PassiveScalar()`), writing into the
+caller-provided `result`/`ws` (0 alloc beyond them; `ws` sized for the scalar field).
+"""
+function calculate_scalar_shell_to_shell_transfer!(result, ws, velocity_hat, scalar_hat, ks; kwargs...)
+    θ̂ = as_component_field(scalar_hat, length(ks))
+    return calculate_shell_to_shell_transfer!(result, ws, θ̂, ks;
         invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
 end
 

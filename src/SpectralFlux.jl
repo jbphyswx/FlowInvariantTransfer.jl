@@ -8,7 +8,7 @@ using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coor
 using ..NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_partial_fluxes, calculate_helical_partial_fluxes
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_helical_partial_fluxes
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -261,6 +261,19 @@ function calculate_scalar_flux(
     return calculate_spectral_flux(θ̂, ks; binning=binning, dealiasing=dealiasing,
         invariant=PassiveScalar(), advecting_hat=velocity_hat, spectral=spectral,
         execution=execution, geometry=geometry)
+end
+
+"""
+    calculate_scalar_flux!(result, ws, velocity_hat, scalar_hat, ks, shell_idx; kwargs...)
+
+In-place passive-scalar variance flux — thin wrapper over [`calculate_spectral_flux!`](@ref)
+(`invariant = PassiveScalar()`, scalar advected by `velocity_hat`), writing into the
+caller-provided `result`/`ws` (0 alloc beyond them; `ws` sized for the scalar field).
+"""
+function calculate_scalar_flux!(result, ws, velocity_hat, scalar_hat, ks, shell_idx; kwargs...)
+    θ̂ = as_component_field(scalar_hat, length(ks))
+    return calculate_spectral_flux!(result, ws, θ̂, ks, shell_idx;
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
 end
 
 # ---------------------------------------------------------------------------
