@@ -8,7 +8,7 @@ using ..Utils: wavenumber_grid, wavenumber_magnitude_grid, domain_size_from_coor
 using ..NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_helical_partial_fluxes
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -299,7 +299,20 @@ the off-diagonal channels are the **rotational↔divergent cross-flux** (zero fo
 flow, since `u_div = 0`). `channels` is keyed by the component-name triple `(s_k, s_p, s_q)`.
 Built from the decomposition + generalized nonlinear term, so it inherits all backends/dealiasing.
 """
-function calculate_partial_fluxes(
+function calculate_partial_fluxes(velocity_hat, ks; kwargs...)
+    ws = NonlinearTermWorkspace(velocity_hat, ks)
+    return calculate_partial_fluxes!(ws, velocity_hat, ks; kwargs...)
+end
+
+"""
+    calculate_partial_fluxes!(ws::NonlinearTermWorkspace, velocity_hat, ks; kwargs...)
+
+In-place partial-flux computation reusing a caller-provided `ws` across **all** decomposition-channel
+pairs — the allocating version previously built a fresh nonlinear-term workspace for every `(sp,sq)`
+pair (profiled waste). The channel `SpectralFluxResult`s and their total are the (inherent) output.
+"""
+function calculate_partial_fluxes!(
+    ws::NonlinearTermWorkspace,
     velocity_hat,
     ks;
     decomposition::AbstractFieldDecomposition = HelicalDecomposition(),
@@ -334,9 +347,10 @@ function calculate_partial_fluxes(
     channels = Dict{NTuple{3,Symbol}, SpectralFluxResult}()
     td = similar(velocity_hat, FT, ns...)
     for sp in names, sq in names
-        N̂ = compute_nonlinear_term(comps[sq], ks; advecting_hat=comps[sp], dealiasing=dealiasing, spectral=spectral)  # (u_{sp}·∇)u_{sq}
+        # (u_{sp}·∇)u_{sq} into the shared workspace's N̂ (reused across every pair).
+        compute_nonlinear_term!(ws, comps[sq], ks; advecting_hat=comps[sp], dealiasing=dealiasing, spectral=spectral)
         for sk in names
-            transfer_density!(td, KineticEnergy(), comps[sk], N̂, ks)
+            transfer_density!(td, KineticEnergy(), comps[sk], ws.N̂, ks)
             channels[(sk, sp, sq)] = binflux(td)
         end
     end
@@ -356,6 +370,15 @@ Biferale–Musacchio–Toschi 2012; Alexakis 2017).
 """
 calculate_helical_partial_fluxes(velocity_hat, ks; kwargs...) =
     calculate_partial_fluxes(velocity_hat, ks; decomposition=HelicalDecomposition(), kwargs...)
+
+"""
+    calculate_helical_partial_fluxes!(ws::NonlinearTermWorkspace, velocity_hat, ks; kwargs...)
+
+In-place helical partial fluxes — [`calculate_partial_fluxes!`](@ref) with
+`decomposition = HelicalDecomposition()`, reusing the caller's `ws`.
+"""
+calculate_helical_partial_fluxes!(ws, velocity_hat, ks; kwargs...) =
+    calculate_partial_fluxes!(ws, velocity_hat, ks; decomposition=HelicalDecomposition(), kwargs...)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
