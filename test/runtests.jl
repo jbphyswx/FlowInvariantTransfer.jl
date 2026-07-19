@@ -672,6 +672,48 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + plan cache" begin
+        Random.seed!(7)
+        N = 32; L = 2π
+        xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs)
+        u  = [sin(xs[i]) * cos(ys[j]) + 0.2 * randn() for i in 1:N, j in 1:N]
+        v  = [-cos(xs[i]) * sin(ys[j]) + 0.2 * randn() for i in 1:N, j in 1:N]
+        filt = FIT.GaussianFilter(); ℓ = 0.5
+
+        # in-place matches the allocating path to machine precision (same computation)
+        r0 = FIT.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
+        ws = FIT.CoarseGrainingFluxWorkspace((u, v), (xs, ys), filt)
+        r1 = FIT.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
+        Test.@test r1 isa FIT.CoarseGrainingFluxResult
+        Test.@test maximum(abs.(r0.flux_field .- r1.flux_field)) == 0.0
+        Test.@test r0.mean_flux == r1.mean_flux
+
+        # return_diagnostics=true works end-to-end (regression: the diagnostics result type used to
+        # over-constrain the 4-D τ̄/S̄ to the 2-D flux array type, so this path errored for everyone).
+        r0d = FIT.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt; return_diagnostics = true)
+        Test.@test r0d isa FIT.CoarseGrainingFluxResultWithDiagnostics
+        Test.@test size(r0d.stress_tensor) == (N, N, 2, 2)
+        wsd = FIT.CoarseGrainingFluxWorkspace((u, v), (xs, ys), filt; return_diagnostics = true)
+        r1d = FIT.calculate_coarse_graining_flux!(wsd, (u, v), ℓ, filt)
+        Test.@test maximum(abs.(r0d.stress_tensor .- r1d.stress_tensor)) == 0.0
+        Test.@test maximum(abs.(r0d.strain_rate  .- r1d.strain_rate))  == 0.0
+
+        # Filter-scale sweep reusing one workspace matches per-call allocation (plan rebuilt per ℓ).
+        for l in (0.3, 0.5, 0.8, 1.2)
+            ra = FIT.calculate_coarse_graining_flux((u, v), (xs, ys), l, filt)
+            rb = FIT.calculate_coarse_graining_flux!(ws, (u, v), l, filt)
+            Test.@test maximum(abs.(ra.flux_field .- rb.flux_field)) == 0.0
+        end
+
+        # Plan cache: a repeated snapshot at a fixed scale reuses the cached filter plan, so it
+        # allocates far less than a fresh call (which rebuilds the scale-dependent footprint).
+        FIT.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)  # warm + cache the plan
+        alloc_fresh = @allocated FIT.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
+        alloc_reuse = @allocated FIT.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
+        Test.@test alloc_reuse < alloc_fresh ÷ 20 skip = (Base.JLOptions().code_coverage != 0)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "calculate_energy_transfer — unified dispatch" begin
         N = 8; L = 2π
         ks = FIT.wavenumber_grid((N,), (L,))
@@ -1390,6 +1432,39 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # Guard: too few points for the dealiased solve.
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(
             FIT.SphericalTransferMethod(), ζscat[1:10], (θs[1:10], φs[1:10]); lmax = lmax)
+    end
+
+    # -----------------------------------------------------------------------
+    # Element-type genericity: every public entry point is `eltype`-derived, so a Float32
+    # field must flow through end-to-end as Float32 (no silent Float64 promotion). Pins the
+    # genericity contract across the whole transfer surface, not just the incompressible core.
+    Test.@testset "Float32 genericity — outputs preserve input eltype" begin
+        Random.seed!(1)
+        N = 16; L = 2π
+        for T in (Float64, Float32)
+            ks0 = FIT.wavenumber_grid((N, N), (L, L))
+            ks  = ntuple(d -> T.(ks0[d]), 2)
+            kx  = [ks[1][i] for i in 1:N, j in 1:N]
+            ky  = [ks[2][j] for i in 1:N, j in 1:N]
+            ψh  = FFTW.fft(randn(N, N)) ./ N^2
+            û   = Complex{T}.(cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3))
+            ρ̂   = Complex{T}.(FFTW.fft(1.0 .+ 0.1 .* randn(N, N)) ./ N^2)
+            b   = FIT.LinearBinning(T(2π / L))
+
+            r1 = FIT.calculate_spectral_flux(û, ks; binning = b, spectral = FIT.FFTBackend())
+            r2 = FIT.calculate_shell_to_shell_transfer(û, ks; binning = b, spectral = FIT.FFTBackend())
+            r3 = FIT.calculate_mode_to_mode_transfer(û, ks)
+            r4 = FIT.calculate_band_to_band_transfer(û, ks; bands = FIT.SmoothBands(T[2, 4, 6]))
+            r5 = FIT.calculate_partial_fluxes(û, ks; binning = b, decomposition = FIT.HelmholtzDecomposition())
+            r6 = FIT.calculate_compressible_flux(û, ρ̂, ks; binning = b)
+
+            Test.@test eltype(r1.transfer_spectrum)     === T
+            Test.@test eltype(r2.transfer_matrix)        === T
+            Test.@test eltype(r3.transfer)               === T
+            Test.@test eltype(r4.transfer_matrix)        === T
+            Test.@test eltype(r5.total.transfer_spectrum) === T
+            Test.@test eltype(r6.transfer_spectrum)      === T
+        end
     end
 
     # -----------------------------------------------------------------------

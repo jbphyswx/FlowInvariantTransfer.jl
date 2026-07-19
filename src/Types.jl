@@ -797,21 +797,22 @@ Result of a coarse-graining energy flux computation including stress/strain diag
 - `filter_scale::S`: Filter scale ℓ used.
 - `flux_field::A`: Π_ℓ(x) pointwise energy flux field.
 - `mean_flux::S`: Area-weighted spatial mean ⟨Π_ℓ⟩.
-- `stress_tensor::A`: τ̄ᵢʲ (same array type as `flux_field`).
-- `strain_rate::A`: S̄ᵢʲ (same array type as `flux_field`).
+- `stress_tensor::T`: τ̄ᵢʲ (component-indexed array, e.g. `(Nx,Ny,2,2)`).
+- `strain_rate::T`: S̄ᵢʲ (same array type as `stress_tensor`).
 
 Returned instead of `CoarseGrainingFluxResult` when `return_diagnostics=true`.
-All fields are always present — no `Union{Nothing,...}` type instability.
+The tensor diagnostics carry their own type parameter `T` (higher-rank than the scalar
+`flux_field::A`); all fields are always present — no `Union{Nothing,...}` type instability.
 """
-struct CoarseGrainingFluxResultWithDiagnostics{S, A<:AbstractArray}
+struct CoarseGrainingFluxResultWithDiagnostics{S, A<:AbstractArray, T<:AbstractArray}
     filter_scale::S
     flux_field::A
     mean_flux::S
-    stress_tensor::A
-    strain_rate::A
+    stress_tensor::T
+    strain_rate::T
 end
 CoarseGrainingFluxResultWithDiagnostics(s, a, m, st, sr) =
-    CoarseGrainingFluxResultWithDiagnostics{typeof(s), typeof(a)}(s, a, m, st, sr)
+    CoarseGrainingFluxResultWithDiagnostics{typeof(s), typeof(a), typeof(st)}(s, a, m, st, sr)
 
 """
     ShellToShellResult{V, M, E}
