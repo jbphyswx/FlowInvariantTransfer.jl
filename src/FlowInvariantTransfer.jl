@@ -226,7 +226,57 @@ function nufft_coarse_graining_flux(args...; kwargs...)
     throw(ArgumentError("nufft_coarse_graining_flux requires FINUFFT. Run `using FINUFFT`."))
 end
 
-export nufft_coarse_graining_flux
+"""
+    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8)
+
+Reusable resources for [`nufft_coarse_graining_flux!`](@ref): the two FINUFFT guru plans
+(type-1 analysis and type-2 synthesis, points preset), the precomputed spectral-side arrays
+(rescaled coordinates, `|k|`, per-axis `kⱼ` grids, filter weights `Ĝ`), and **every** working
+buffer of the flux computation — the `(ms…, D)` filtered spectral velocities, the `(N, D)`
+filtered scattered velocities, the `(N, D, D)` stress/strain tensor arrays, and the spectral /
+scattered scratch that `finufft_exec!` writes into. A repeat call therefore allocates nothing on
+the Julia side (only the tiny result struct, which wraps the reused `Π` buffer); the FINUFFT plans
+avoid re-planning the FFT + re-sorting the points (dominant for small inputs).
+
+`mutable` is required ONLY so a `finalizer` can free the two plans (C resources FINUFFT never
+finalizes itself — holding them without this would leak the FFTW plan + spreading grid); every
+field is `const`. `show` is a one-liner (never introspect a live plan). Requires `using FINUFFT`;
+each array/plan field is its own type parameter, so nothing is hardcoded to `Vector`/`Array{T}` and
+the core names no FINUFFT type.
+"""
+mutable struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SD, UM, TA, CV, RV, R<:Real}
+    const p1::P1              # FINUFFT type-1 (nonuniform → uniform) plan, points set
+    const p2::P2              # FINUFFT type-2 (uniform → nonuniform) plan, points set
+    const scaled_coords::SC   # coordinates rescaled to [-π, π)
+    const k_mag::KM           # |k| grid
+    const k_comp_grids::KC    # per-dimension kⱼ grids
+    const ks_1d::K1           # per-axis wavenumber vectors
+    const Ĝ::KM               # filter weights Ĝ(k) (recomputed per ℓ into this buffer)
+    const û_filt::SD          # (ms…, D) filtered spectral velocity (page c = component c)
+    const u_filt::UM          # (N, D) filtered velocity at the scattered points (real)
+    const τ::TA               # (N, D, D) SFS stress — doubles as the Π-contraction buffer
+    const S̄::TA               # (N, D, D) strain rate
+    const Π::RV               # (N,) flux (the result wraps this)
+    const spec::SA            # (ms…) complex spectral scratch (exec output / filtered product / gradient)
+    const scat_in::CV         # (N,) complex type-1 input scratch
+    const scat_out::CV        # (N,) complex type-2 output scratch
+    const prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
+    const grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
+    const npoints::Int        # number of scattered points (type-1 normalization)
+    const tol::R
+end
+Base.show(io::IO, ::NUFFTCoarseGrainingWorkspace) = print(io, "NUFFTCoarseGrainingWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::NUFFTCoarseGrainingWorkspace) = show(io, w)
+
+function NUFFTCoarseGrainingWorkspace(args...; kwargs...)
+    throw(ArgumentError("NUFFTCoarseGrainingWorkspace requires FINUFFT. Run `using FINUFFT`."))
+end
+
+function nufft_coarse_graining_flux!(args...; kwargs...)
+    throw(ArgumentError("nufft_coarse_graining_flux! requires FINUFFT. Run `using FINUFFT`."))
+end
+
+export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, NUFFTCoarseGrainingWorkspace
 
 # ---------------------------------------------------------------------------
 # Unified entry point

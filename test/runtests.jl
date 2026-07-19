@@ -1320,6 +1320,26 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             method = FIT.CoarseGrainingFluxMethod(filt, ℓ)
             wired = FIT.calculate_energy_transfer(method, (u, v), (xs, ys), ms)
             Test.@test isapprox(wired.flux_field, direct.flux_field; rtol=1e-10)
+
+            # In-place workspace form: matches the allocating call, diagnostics work, and a repeat
+            # call reuses the plans + every buffer — so it allocates only the tiny result struct
+            # (a genuine reduction, not the plan-reuse-only 1.06× it would be without buffer reuse).
+            ws = FIT.NUFFTCoarseGrainingWorkspace((xs, ys), ms)
+            ip = FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
+            Test.@test isapprox(ip.flux_field, direct.flux_field; rtol=1e-10)
+            ipd = FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms; return_diagnostics=true)
+            Test.@test ipd isa FIT.CoarseGrainingFluxResultWithDiagnostics
+            Test.@test size(ipd.stress_tensor) == (Np, 2, 2)
+            # scale sweep reuses one workspace
+            for l in (0.3, 0.7)
+                sweep_alloc = FIT.nufft_coarse_graining_flux((u, v), (xs, ys), l, filt, ms)
+                sweep_ip = FIT.nufft_coarse_graining_flux!(ws, (u, v), l, filt, ms)
+                Test.@test isapprox(sweep_alloc.flux_field, sweep_ip.flux_field; rtol=1e-10)
+            end
+            FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)  # warm
+            a_fresh = @allocated FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
+            a_reuse = @allocated FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
+            Test.@test a_reuse < a_fresh ÷ 100 skip = (Base.JLOptions().code_coverage != 0)
         end
 
         Test.@testset "FlowFieldSpectra front-end" begin
