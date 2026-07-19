@@ -23,6 +23,7 @@ function FIT.calculate_energy_transfer(
     coords_vecs::Tuple,
     ms::Tuple;
     backend::FFS.AbstractSpectralBackend = FFS.DirectSumBackend(),
+    execution::FFS.AbstractExecutionBackend = FFS.AutoBackend(),
     domain_size = nothing,
     kwargs...
 )
@@ -41,7 +42,9 @@ function FIT.calculate_energy_transfer(
 
     # Transform physical → spectral, then reorder centred → fftfreq (ifftshift = circshift by −N/2 per axis)
     # so the coefficient at grid index i carries the fftfreq wavenumber FlowInvariantTransfer's core expects.
-    coeffs, ks = FFS.calculate_spectrum(backend, grid, flat_fields, ms)
+    # FlowFieldSpectra's `calculate_spectrum` uses two-axis (transform × execution) dispatch; the
+    # grid-first keyword entry resolves the execution backend (Serial/Threaded/GPU) internally.
+    coeffs, ks = FFS.calculate_spectrum(grid, flat_fields, ms; transform = backend, execution = execution)
     shifts = ntuple(d -> d <= nd ? -(size(coeffs, d) ÷ 2) : 0, ndims(coeffs))
     coeffs_ff = circshift(coeffs, shifts)
     ks_ff = ntuple(d -> circshift(collect(ks[d]), -(length(ks[d]) ÷ 2)), nd)
