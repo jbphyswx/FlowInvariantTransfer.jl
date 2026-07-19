@@ -1,6 +1,6 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves, resolve_execution
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid, as_component_field
@@ -8,7 +8,7 @@ using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace, ShellToShellWorkspace
 
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!,
-       calculate_scalar_shell_to_shell_transfer
+       calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 
 # ---------------------------------------------------------------------------
 # Internal FFTW-path stub (overridden by FlowInvariantTransferFFTWExt)
@@ -87,7 +87,7 @@ function calculate_shell_to_shell_transfer(
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry)
+    ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_mag))
     centers = shell_centers(binning, maximum(k_mag))
@@ -97,7 +97,7 @@ function calculate_shell_to_shell_transfer(
     net     = Vector{FT}(undef, N_sh)
     # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, execution, spectral;
+    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)
     return ShellToShellResult(centers, edges, T_mat, net, max_asym)
@@ -121,7 +121,7 @@ function calculate_shell_to_shell_transfer!(
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution, spectral;
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)
     return result
@@ -143,6 +143,19 @@ The scalar field is band-filtered and carried; the velocity advects it. Thin wra
 function calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...)
     θ̂ = as_component_field(scalar_hat, length(ks))
     return calculate_shell_to_shell_transfer(θ̂, ks;
+        invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
+end
+
+"""
+    calculate_scalar_shell_to_shell_transfer!(result, ws, velocity_hat, scalar_hat, ks; kwargs...)
+
+In-place passive-scalar shell-to-shell variance transfer — thin wrapper over
+[`calculate_shell_to_shell_transfer!`](@ref) (`invariant = PassiveScalar()`), writing into the
+caller-provided `result`/`ws` (0 alloc beyond them; `ws` sized for the scalar field).
+"""
+function calculate_scalar_shell_to_shell_transfer!(result, ws, velocity_hat, scalar_hat, ks; kwargs...)
+    θ̂ = as_component_field(scalar_hat, length(ks))
+    return calculate_shell_to_shell_transfer!(result, ws, θ̂, ks;
         invariant=PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
 end
 

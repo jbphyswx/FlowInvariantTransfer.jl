@@ -11,7 +11,7 @@ Run from the repo root:
     julia --project=examples examples/helical_flux.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
@@ -19,10 +19,10 @@ function run_helical_flux_example(; N=32)
     println("--- Helicity-Resolved Energy Flux Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FET.LinearBinning(2π / L)
-    total = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
-    hel   = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend(),
-        decomposition=FET.HelicalDecomposition())
+    b = FIT.LinearBinning(2π / L)
+    total = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
+    hel   = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(),
+        decomposition=FIT.HelicalDecomposition())
 
     summed = hel.positive.flux .+ hel.negative.flux
     println("max|Π⁺+Π⁻ − Π| / max|Π| = ",

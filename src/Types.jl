@@ -1,6 +1,6 @@
 module Types
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
@@ -8,9 +8,9 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, resolve_execution, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult
+export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -319,6 +319,30 @@ end
 TriadicOrthogonalDecompositionMethod(; nfft=nothing, noverlap=nothing, nmode=nothing) =
     TriadicOrthogonalDecompositionMethod(nfft, noverlap, nmode)
 
+"""
+    SphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+
+Spectral energy/enstrophy transfer for 2D non-divergent (barotropic) flow on the sphere, in the
+spherical-harmonic degree spectrum `l`. Given the vorticity field `ζ`, with streamfunction
+`ψ = ∇⁻²ζ` (so `ζ̂_lm = -l(l+1)/a² ψ̂_lm`) and advection `A = J(ψ,ζ) = u·∇ζ`, `u = k̂×∇ψ`, the
+transfers are
+
+    T_E(l) = -Σ_m Re{ψ̂*_lm Â_lm},   T_Z(l) = Σ_m Re{ζ̂*_lm Â_lm},
+
+both conserving (Σ_l T = 0). See THEORY.md §"Spherical spectral transfer".
+
+Dispatched through [`calculate_energy_transfer`](@ref): a regular colatitude–longitude grid (an
+`AbstractMatrix` vorticity field) routes to the FastSphericalHarmonics extension; scattered points
+(a vorticity vector + `(θ, φ)` coordinates) route to the NUFSHT extension.
+
+# Fields
+- `radius::T`: sphere radius `a` (default `1.0`).
+"""
+struct SphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+    radius::T
+end
+SphericalTransferMethod(; radius=1.0) = SphericalTransferMethod(radius)
+
 
 # ---------------------------------------------------------------------------
 # Filter hierarchy
@@ -610,12 +634,29 @@ Shared-memory multithreading over the outer (shell/mode) loop. Load `OhMyThreads
 struct ThreadedBackend <: AbstractExecutionBackend end
 
 """
-    DistributedBackend <: AbstractExecutionBackend
+    DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
+    DistributedBackend(inner = SerialBackend())
 
 Multi-process execution via `Distributed`/`SharedArrays`: parallelises the outer loop over
-mediator shells / receiver modes across workers. Requires `using Distributed, SharedArrays`.
+mediator shells / receiver modes across workers. Parametric on the per-worker `inner` backend, so
+each worker can itself run serially (`DistributedBackend()`, the default) or threaded
+(`DistributedBackend(ThreadedBackend())`, a hybrid distributed+threaded run — `addprocs(...; exeflags="-t N")`
+and `@everywhere using OhMyThreads`). Retrieve the per-worker backend with [`local_backend`](@ref).
+Requires `using Distributed, SharedArrays`.
 """
-struct DistributedBackend <: AbstractExecutionBackend end
+struct DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
+    inner::Inner
+end
+DistributedBackend() = DistributedBackend(SerialBackend())
+
+"""
+    local_backend(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
+
+The execution backend each worker/process should use locally. For [`DistributedBackend`](@ref) this
+is its `inner` backend; for every other backend it is the backend itself (identity).
+"""
+local_backend(execution::AbstractExecutionBackend) = execution
+local_backend(execution::DistributedBackend) = execution.inner
 
 """
     GPUBackend{B} <: AbstractExecutionBackend
@@ -630,9 +671,30 @@ end
 """
     AutoBackend <: AbstractExecutionBackend
 
-Select the best available execution backend at call time (distributed → threaded → serial).
+Select the best available execution backend at call time (see [`resolve_execution`](@ref)): resolves
+to [`ThreadedBackend`](@ref) when the OhMyThreads extension is loaded and Julia was started with more
+than one thread, otherwise [`SerialBackend`](@ref). [`GPUBackend`](@ref) (needs a device) and
+[`DistributedBackend`](@ref) (needs a worker pool, and only parallelises reductions) are never chosen
+automatically — pass them explicitly.
 """
 struct AutoBackend <: AbstractExecutionBackend end
+
+"""
+    resolve_execution(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
+
+Map an execution backend to the concrete backend to actually run on. Concrete backends pass through
+unchanged; [`AutoBackend`](@ref) resolves to [`ThreadedBackend`](@ref) when threading is available
+(the OhMyThreads extension is loaded and `Threads.nthreads() > 1`), else [`SerialBackend`](@ref).
+Called at every diagnostic entry point that accepts `execution`, so `AutoBackend` works uniformly.
+"""
+resolve_execution(execution::AbstractExecutionBackend) = execution
+function resolve_execution(::AutoBackend)
+    if Threads.nthreads() > 1 &&
+       Base.get_extension(parentmodule(@__MODULE__), :FlowInvariantTransferOhMyThreadsExt) !== nothing
+        return ThreadedBackend()
+    end
+    return SerialBackend()
+end
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -657,6 +719,55 @@ struct SpectralFluxResult{V<:AbstractVector}
     flux::V
 end
 SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k)}(k, T, f)
+
+"""
+    SphericalTransferResult{V<:AbstractVector}
+
+Result of a spherical spectral energy/enstrophy transfer ([`SphericalTransferMethod`](@ref)),
+indexed by spherical-harmonic degree `l = 0…lmax`.
+
+# Fields
+- `degrees::V`: the degrees `l`.
+- `energy_transfer::V`: `T_E(l)` — nonlinear kinetic-energy transfer into degree `l`; `Σ_l T_E ≈ 0`.
+- `enstrophy_transfer::V`: `T_Z(l)` — enstrophy transfer into degree `l`; `Σ_l T_Z ≈ 0`.
+- `energy_flux::V`: `Π_E(L) = -Σ_{l≤L} T_E(l)` — cumulative up-degree energy flux.
+- `enstrophy_flux::V`: `Π_Z(L) = -Σ_{l≤L} T_Z(l)`.
+"""
+struct SphericalTransferResult{V<:AbstractVector}
+    degrees::V
+    energy_transfer::V
+    enstrophy_transfer::V
+    energy_flux::V
+    enstrophy_flux::V
+end
+
+"""
+    CompressibleFluxResult{V, CH, PD}
+
+Result of a compressible kinetic-energy spectral-transfer computation (Singh–Tiwari–Sharma–Verma
+2025; see THEORY.md §0.5). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
+diagnostics it needs the density field and — for the KE↔internal-energy exchange — the pressure.
+
+# Fields
+- `k_shells::V`: representative wavenumber per shell.
+- `transfer_spectrum::V`: `T_u(k)` — net momentum-weighted KE transfer into shell `k` (energy *gain*
+  rate; sign is opposite the incompressible loss convention). Conserves total KE: `Σ_k T_u(k) ≈ 0`.
+- `flux::V`: `Π(K)` — cumulative flux, `Π(K) = Σ_{k>K} T_u(k)`.
+- `channels::CH`: rotational/compressive (Helmholtz `u = u_R + u_C`) flux channels as a `NamedTuple`
+  `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested.
+- `pressure_dilatation::PD`: KE↔IE conversion `(rotational = Q_{I,R}(k), compressive = Q_{I,C}(k))`
+  as a `NamedTuple`, or `nothing` if no pressure field was supplied.
+
+Optional `CH`/`PD` resolve to `Nothing` or the concrete `NamedTuple` type, so the struct is
+type-stable. Parametric on `V` for element-type genericity.
+"""
+struct CompressibleFluxResult{V<:AbstractVector, CH, PD}
+    k_shells::V
+    transfer_spectrum::V
+    flux::V
+    channels::CH
+    pressure_dilatation::PD
+end
 
 """
     CoarseGrainingFluxResult{S, A}
@@ -686,21 +797,22 @@ Result of a coarse-graining energy flux computation including stress/strain diag
 - `filter_scale::S`: Filter scale ℓ used.
 - `flux_field::A`: Π_ℓ(x) pointwise energy flux field.
 - `mean_flux::S`: Area-weighted spatial mean ⟨Π_ℓ⟩.
-- `stress_tensor::A`: τ̄ᵢʲ (same array type as `flux_field`).
-- `strain_rate::A`: S̄ᵢʲ (same array type as `flux_field`).
+- `stress_tensor::T`: τ̄ᵢʲ (component-indexed array, e.g. `(Nx,Ny,2,2)`).
+- `strain_rate::T`: S̄ᵢʲ (same array type as `stress_tensor`).
 
 Returned instead of `CoarseGrainingFluxResult` when `return_diagnostics=true`.
-All fields are always present — no `Union{Nothing,...}` type instability.
+The tensor diagnostics carry their own type parameter `T` (higher-rank than the scalar
+`flux_field::A`); all fields are always present — no `Union{Nothing,...}` type instability.
 """
-struct CoarseGrainingFluxResultWithDiagnostics{S, A<:AbstractArray}
+struct CoarseGrainingFluxResultWithDiagnostics{S, A<:AbstractArray, T<:AbstractArray}
     filter_scale::S
     flux_field::A
     mean_flux::S
-    stress_tensor::A
-    strain_rate::A
+    stress_tensor::T
+    strain_rate::T
 end
 CoarseGrainingFluxResultWithDiagnostics(s, a, m, st, sr) =
-    CoarseGrainingFluxResultWithDiagnostics{typeof(s), typeof(a)}(s, a, m, st, sr)
+    CoarseGrainingFluxResultWithDiagnostics{typeof(s), typeof(a), typeof(st)}(s, a, m, st, sr)
 
 """
     ShellToShellResult{V, M, E}

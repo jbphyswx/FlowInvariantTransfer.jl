@@ -3,10 +3,10 @@ module CoarseGrainingFlux
 using ..Types: CoarseGrainingFluxMethod, CoarseGrainingFluxResult, AbstractFilter, AbstractFieldDecomposition, NoDecomposition
 using ..Decomposition: decompose_field
 
-export calculate_coarse_graining_flux
+export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGrainingFluxWorkspace
 
 # ---------------------------------------------------------------------------
-# Internal stub — overridden by FlowInvariantTransferCGEFExt when
+# Internal stubs — overridden by FlowInvariantTransferCGEFExt when
 # CoarseGrainingEnergyFluxes is loaded.
 # ---------------------------------------------------------------------------
 
@@ -20,6 +20,68 @@ function _cg_flux_cgef(args...; kwargs...)
     throw(ArgumentError(
         "Coarse-graining flux requires CoarseGrainingEnergyFluxes.jl. " *
         "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
+end
+
+"""
+    _cg_flux_workspace(velocity_fields, coords_vecs, filter; kwargs...)
+
+Build the reusable CGEF grid + `ΠWorkspace` + output buffer.
+Stub overridden by the CoarseGrainingEnergyFluxes extension.
+"""
+function _cg_flux_workspace(args...; kwargs...)
+    throw(ArgumentError(
+        "CoarseGrainingFluxWorkspace requires CoarseGrainingEnergyFluxes.jl. " *
+        "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
+end
+
+"""
+    _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
+
+In-place coarse-graining flux reusing `ws`. Stub overridden by the extension.
+"""
+function _cg_flux_cgef!(args...; kwargs...)
+    throw(ArgumentError(
+        "Coarse-graining flux requires CoarseGrainingEnergyFluxes.jl. " *
+        "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
+end
+
+# ---------------------------------------------------------------------------
+# Reusable workspace
+# ---------------------------------------------------------------------------
+
+"""
+    CoarseGrainingFluxWorkspace(velocity_fields, coords_vecs, filter;
+                                mask=nothing, return_diagnostics=false)
+
+Preallocated, reusable resources for [`calculate_coarse_graining_flux!`](@ref): the
+CGEF `StructuredGrid`, its `ΠWorkspace` (filtered fields + stress/strain scratch), the
+`Π_ℓ(x)` output buffer, and — when `return_diagnostics=true` — the `τ̄`/`S̄` diagnostic
+buffers. Build once, then reuse across a whole filter-scale sweep `Π(ℓ)` or across
+snapshots on the same grid; the grid geometry (`coords_vecs`, `mask`) and array element
+type are fixed at construction.
+
+The dominant per-call cost inside CGEF is the scale-dependent *filter footprint/plan*, not the
+scratch arrays. `filter_plan` caches the last-built plan so repeated snapshots at a fixed scale
+reuse it (the footprint is rebuilt only when the requested scale/kernel/mask changes — e.g. a
+`Π(ℓ)` sweep, where a new footprint is genuinely required). It is a deliberately type-erased
+cache slot (the plan's concrete type varies with kernel/method/backend and is touched once per
+call), so it is not a numeric-payload field; `Π_out`/`diagnostics` carry the real element type.
+
+Requires `CoarseGrainingEnergyFluxes` to be loaded. The grid/workspace fields are typed
+via parameters so the struct carries no hardcoded CGEF types into the core package.
+"""
+struct CoarseGrainingFluxWorkspace{G, W, P<:AbstractMatrix, D}
+    grid::G                       # CGEF.Grids.StructuredGrid
+    cgef_workspace::W             # CGEF.Diagnostics.ΠWorkspace
+    Π_out::P                      # reused Π_ℓ(x) output buffer
+    diagnostics::D                # nothing, or (τ_arr, S_arr) reused diagnostic buffers
+    filter_plan::Base.RefValue{Any}  # scale-keyed cache of the CGEF filter plan
+end
+
+function CoarseGrainingFluxWorkspace(
+    velocity_fields::Tuple, coords_vecs::Tuple, filter::AbstractFilter; kwargs...,
+)
+    return _cg_flux_workspace(velocity_fields, coords_vecs, filter; kwargs...)
 end
 
 # ---------------------------------------------------------------------------
@@ -93,6 +155,32 @@ function _calculate_coarse_graining_flux_decomposed(
     return map(decomposed) do fields
         return _cg_flux_cgef(fields, coords_vecs, ℓ, filter; kwargs...)
     end
+end
+
+"""
+    calculate_coarse_graining_flux!(ws::CoarseGrainingFluxWorkspace, velocity_fields, ℓ, filter;
+                                    kwargs...) -> CoarseGrainingFluxResult
+
+In-place coarse-graining flux reusing the preallocated `ws` (its CGEF grid, `ΠWorkspace`,
+and `Π_out` buffer) — no per-call grid/workspace/output allocation. Intended for a
+filter-scale sweep `Π(ℓ)` or repeated snapshots on the same grid: build the workspace once
+with [`CoarseGrainingFluxWorkspace`](@ref), then call this per `(velocity_fields, ℓ)`.
+
+The returned result wraps the reused `ws.Π_out` buffer (a subsequent call overwrites it);
+copy `result.flux` if the field must persist across calls. `return_diagnostics` is fixed at
+workspace-construction time. Only `NoDecomposition` is supported here — apply a
+decomposition upstream and pass the decomposed component fields if needed.
+
+Requires `CoarseGrainingEnergyFluxes` to be loaded.
+"""
+function calculate_coarse_graining_flux!(
+    ws::CoarseGrainingFluxWorkspace,
+    velocity_fields::Tuple,
+    ℓ::Real,
+    filter::AbstractFilter;
+    kwargs...,
+)
+    return _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
 end
 
 end # module CoarseGrainingFlux

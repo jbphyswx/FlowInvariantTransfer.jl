@@ -233,11 +233,11 @@ The total flux can be split into physically meaningful **partial fluxes** `Π = 
 
 | Decomposition | Splits | Basis | Available where |
 |---|---|---|---|
-| **Helmholtz** | rotational (non-divergent) `u_rot=∇×ψ` + divergent (irrotational) `u_div=∇φ` | streamfunction/velocity-potential (Poisson solve) | **`HelmholtzDecomposition.jl`** (dedicated pkg: Cartesian+spherical, regular & scattered, SOR + FFTW/FINUFFT/FSH/NUFSHT solvers, `AutoSolver`). CGEF also has an internal 2D helper. |
-| **Helical `±`** | curl eigenmodes `û(k)=u_+ ĥ_+ + u_- ĥ_-`, `i k×ĥ_± = ±|k|ĥ_±` | diagonalizes helicity; `E=|u_+|²+|u_-|²`, `H=|k|(|u_+|²−|u_-|²)` | not yet (this package) |
-| **Toroidal/poloidal** | splits the solenoidal (`∇·u=0`) part: `u = ∇×(ψẑ) + ∇×∇×(φẑ)` | 3D stratified/rotating | not yet |
+| **Helmholtz** | rotational (non-divergent) `u_rot=∇×ψ` + divergent (irrotational) `u_div=∇φ` | streamfunction/velocity-potential (Poisson solve) | **done** — `decomposition=HelmholtzDecomposition()` through `calculate_spectral_flux`/`calculate_coarse_graining_flux`/`calculate_partial_fluxes`, backed by **`HelmholtzDecomposition.jl`** (Cartesian+spherical, regular & scattered, SOR + FFTW/FINUFFT/FSH/NUFSHT solvers, `AutoSolver`) via `ext/…HelmholtzDecompositionExt.jl`. CGEF also has an internal 2D helper. |
+| **Helical `±`** | curl eigenmodes `û(k)=u_+ ĥ_+ + u_- ĥ_-`, `i k×ĥ_± = ±|k|ĥ_±` | diagonalizes helicity; `E=|u_+|²+|u_-|²`, `H=|k|(|u_+|²−|u_-|²)` | **done** — `HelicalDecomposition()`; `calculate_helical_partial_fluxes` (8 channels) |
+| **Toroidal/poloidal** | splits the solenoidal (`∇·u=0`) part: `u = ∇×(ψẑ) + ∇×∇×(φẑ)` | 3D stratified/rotating | **done** — `ToroidalPoloidalDecomposition()` |
 
-**Key clarification:** Helmholtz (rot/div) is **NOT** the same as helical or toroidal/poloidal. Helmholtz separates divergent from rotational flow; helical splits the rotational part into two curl-eigenmode chiralities; toroidal/poloidal splits the solenoidal part by geometry. The dedicated **`HelmholtzDecomposition.jl`** package provides the rot/div split (geometry-aware, multi-solver) and explicitly targets *separating energy flux Π into toroidal/potential contributions* (Buzzicotti et al. 2023) — so we leverage it for partial fluxes. (NB: this *spatial* Poisson-based Helmholtz differs from the Lindborg-2015 structure-function integral relations of the same name in `StructureFunctions.jl`.) Helical `±` and toroidal/poloidal are separate, additional work.
+**Key clarification:** Helmholtz (rot/div) is **NOT** the same as helical or toroidal/poloidal. Helmholtz separates divergent from rotational flow; helical splits the rotational part into two curl-eigenmode chiralities; toroidal/poloidal splits the solenoidal part by geometry. The dedicated **`HelmholtzDecomposition.jl`** package provides the rot/div split (geometry-aware, multi-solver) and explicitly targets *separating energy flux Π into toroidal/potential contributions* (Buzzicotti et al. 2023) — so we leverage it for partial fluxes. (NB: this *spatial* Poisson-based Helmholtz differs from the Lindborg-2015 structure-function integral relations of the same name in `StructureFunctions.jl`.) All three decompositions (Helmholtz rot/div, helical `±`, toroidal/poloidal) are implemented and tested.
 References: Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023); Waleffe (1992); Constantin & Majda (1988); Biferale, Musacchio & Toschi (2012).
 
 ---
@@ -245,6 +245,18 @@ References: Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023); W
 ## 6. Anisotropic / directional shells
 
 For rotating/stratified/geophysical flows, isotropic `|k|` shells are inadequate; one uses **2D shells** in `(k_⊥, k_∥)` (perpendicular/parallel to rotation axis or gravity). Fluxes become directional (`Π_⊥`, `Π_∥`). Larger, geometry-specific effort. (Alexakis & Biferale §4.3–4.5.)
+
+### 6.1 Spherical spectral transfer (2D barotropic) — [Boer 1983; Augier–Lindborg 2013]
+
+On the sphere the Cartesian Fourier machinery is replaced by the **spherical-harmonic degree** spectrum `l`. For 2D non-divergent (barotropic) flow with streamfunction `ψ` and vorticity `ζ = ∇²ψ` (so `ζ̂_lm = -l(l+1)/a² ψ̂_lm`, radius `a`), velocity `u = k̂×∇ψ`, the vorticity equation `∂_t ζ + J(ψ,ζ) = …` gives the modal energy `E(l) = ½ l(l+1)/a² Σ_m|ψ̂_lm|²` and enstrophy `Z(l) = ½ Σ_m|ζ̂_lm|²`. The nonlinear transfers are
+
+$$T_E(l) = -\sum_m \mathrm{Re}\{\hat\psi^*_{lm}\,\hat A_{lm}\},\qquad T_Z(l) = \sum_m \mathrm{Re}\{\hat\zeta^*_{lm}\,\hat A_{lm}\},\qquad A = J(\psi,\zeta) = \mathbf{u}\cdot\nabla\zeta,$$
+
+both **conserving** (`Σ_l T_E = Σ_l T_Z = 0`, since `∫ψ J(ψ,ζ) dΩ = 0` by antisymmetry — the machine-precision validation anchor), with cumulative fluxes `Π(L) = -Σ_{l≤L} T(l)`. The counter-directional energy↔enstrophy dual cascade (Kraichnan–Batchelor, §2) is the spherical analogue.
+
+**Numerics (pseudospectral):** the horizontal gradient of a scalar `f` is the spin-1 "eth" field `ðf = -(∂_θ + i\csc\theta\,∂_φ)f`; then `A = (1/a²)\,\mathrm{Im}\{\overline{ð\psi}\,ð\zeta\}` in physical space, analysed back to `Â_lm`. `J` is quadratic (content up to degree `2·lmax`), so the products are evaluated on a **dealiased grid resolving `2·lmax`** and truncated to `l≤lmax`, making the retained transfers alias-free.
+
+**Implementation:** `calculate_energy_transfer(SphericalTransferMethod(; radius), ζ)` → `SphericalTransferResult`. Regular colatitude–longitude grids (an `AbstractMatrix` vorticity field) route to **`FastSphericalHarmonics.jl`** (its real/SVector `spinsph_eth` gives the exact gradient); scattered points route to **`NUFSHT.jl`**. Convention verified directly against FastSphericalHarmonics' eth definition and its `test_spin.jl` grad testset.
 
 ---
 
@@ -263,11 +275,14 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 | Shell-to-shell `T(n,m)` (sharp Fourier) | done (`ShellToShell`) |
 | Coarse-graining flux `Π_ℓ(x)`, `E(ℓ)` (smooth/sharp kernels) | done (CGEF + ext) |
 | Triadic Orthogonal Decomposition | done (`TOD`) |
-| **Mode-to-mode triads `S(k\|p\|q)`** | planned (this work) |
-| **Helicity flux (3D), enstrophy flux (2D)** | gap |
-| **Partial fluxes: Helmholtz rot/div (leverage `HelmholtzDecomposition.jl`), helical ±, tor/pol** | gap |
-| **Smooth band-to-band `T(K,Q)`** | gap (belongs in `ShellToShell`) |
-| **Anisotropic shells `(k_⊥,k_∥)`** | gap (future) |
+| Mode-to-mode triads `S(k\|p\|q)` | done (`ScaleToScale`; `calculate_mode_to_mode_transfer`) |
+| Helicity flux (3D), enstrophy flux (2D) | done (`Invariants.transfer_density!(::Helicity)`/`(::Enstrophy)`) |
+| Partial fluxes: Helmholtz rot/div (leverage `HelmholtzDecomposition.jl`), helical ±, tor/pol | done (`SpectralFlux.calculate_partial_fluxes`; `decomposition=` kwarg) |
+| Smooth band-to-band `T(K,Q)` | done (`BandTransfer.calculate_band_to_band_transfer`) |
+| Anisotropic shells `(k_⊥,k_∥)` | partial (directional shell geometries `PerpendicularShells`/`ParallelShells`) |
+| Spherical spectral transfer `T_E(l)`, `T_Z(l)` (2D barotropic) | done (`SphericalTransferMethod`; FSH regular grid + NUFSHT scattered; §6.1) |
+| Compressible energy budget (momentum-weighted transfer, R/C Helmholtz channels, KE↔IE pressure-dilatation) | done (`calculate_compressible_flux`; Singh–Tiwari–Sharma–Verma 2025, §0.5) |
+| Compressible **coarse-graining** budget (Favre filter, deformation-work + baropycnal + pressure-dilatation) | belongs in CoarseGrainingEnergyFluxes.jl (Aluie 2011/2013); tracked there |
 
 ---
 

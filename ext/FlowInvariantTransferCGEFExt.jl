@@ -1,11 +1,11 @@
 module FlowInvariantTransferCGEFExt
 
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes as CGEF
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 
 # ---------------------------------------------------------------------------
-# Filter type mapping: FET.AbstractFilter → CGEF.AbstractFilterKernel
+# Filter type mapping: FIT.AbstractFilter → CGEF.AbstractFilterKernel
 # ---------------------------------------------------------------------------
 
 _to_cgef_kernel(::GaussianFilter)      = CGEF.Kernels.GaussianKernel()
@@ -16,24 +16,32 @@ _to_cgef_kernel(::SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
 # Override CoarseGrainingFlux._cg_flux_cgef
 # ---------------------------------------------------------------------------
 
-"""
-    _cg_flux_cgef(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
+# Allocation-free masked mean over the wet points of the flux field.
+function _masked_mean(Π::AbstractMatrix{FT}, wet::AbstractMatrix{Bool}) where {FT}
+    acc = zero(FT)
+    n = 0
+    @inbounds for i in eachindex(Π, wet)
+        if wet[i]
+            acc += Π[i]
+            n += 1
+        end
+    end
+    return acc / max(1, n)
+end
 
-Delegate to `CoarseGrainingEnergyFluxes.compute_Π!` for the actual computation.
-
-Supports 2D Cartesian grids from tuple inputs.  For spherical geometry or
-more control (masks, backends), call CGEF directly and wrap the result with
-`CoarseGrainingFluxResult`.
 """
-function FET.CoarseGrainingFlux._cg_flux_cgef(
+    _cg_flux_workspace(velocity_fields, coords_vecs, filter; mask=nothing, return_diagnostics=false)
+
+Build the reusable CGEF `StructuredGrid`, its `ΠWorkspace`, the `Π_ℓ(x)` output buffer, and
+(when `return_diagnostics`) the `τ̄`/`S̄` diagnostic buffers, wrapped in a
+`CoarseGrainingFluxWorkspace`. Supports 2D Cartesian grids from tuple inputs.
+"""
+function FIT.CoarseGrainingFlux._cg_flux_workspace(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
-    ℓ::Real,
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
-    backend::CGEF.Backends.AbstractExecutionBackend = CGEF.Backends.AutoBackend(),
-    kwargs...,
 )
     D  = length(velocity_fields)
     nd = length(coords_vecs)
@@ -44,59 +52,113 @@ function FET.CoarseGrainingFlux._cg_flux_cgef(
         "For 3D or spherical, call CoarseGrainingEnergyFluxes directly."))
 
     FT  = eltype(velocity_fields[1])
-    ns  = size(velocity_fields[1])
-    Nlon, Nlat = ns
+    Nlon, Nlat = size(velocity_fields[1])
 
-    # Build CGEF grid objects
     x_vec = coords_vecs[1]
     y_vec = coords_vecs[2]
     dx = length(x_vec) > 1 ? FT((x_vec[end] - x_vec[begin]) / (length(x_vec) - 1)) : FT(1)
     dy = length(y_vec) > 1 ? FT((y_vec[end] - y_vec[begin]) / (length(y_vec) - 1)) : FT(1)
 
     geom = CGEF.Geometry.CartesianGeometry(dx, dy)
-
-    # All-wet mask if not provided
-    wet = mask !== nothing ? mask : trues(Nlon, Nlat)
+    wet  = mask !== nothing ? mask : trues(Nlon, Nlat)
     grid = CGEF.Grids.StructuredGrid(geom, FT.(x_vec), FT.(y_vec), wet)
 
-    cgef_kernel = _to_cgef_kernel(filter)
-
-    # Allocate workspace and output
     workspace = CGEF.Diagnostics.ΠWorkspace(grid)
     Π_out = zeros(FT, Nlon, Nlat)
+    diagnostics = return_diagnostics ?
+        (zeros(FT, Nlon, Nlat, 2, 2), zeros(FT, Nlon, Nlat, 2, 2)) : nothing
 
-    u = velocity_fields[1]
-    v = velocity_fields[2]
+    return FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
+        grid, workspace, Π_out, diagnostics, Base.RefValue{Any}(nothing))
+end
+
+# Return the cached filter plan if it was built for this exact (scale, kernel, mask); otherwise
+# build it once, cache it, and return it. The footprint is scale-dependent, so a genuinely new
+# scale (e.g. a Π(ℓ) sweep) rebuilds — but repeated snapshots at a fixed scale reuse it, which is
+# where the ~MB/call footprint allocation was coming from.
+function _cached_filter_plan(ws, cgef_kernel, ℓ::Real, mask_strategy, backend)
+    cached = ws.filter_plan[]
+    if cached !== nothing &&
+       cached.scale == ℓ &&
+       typeof(cached.kernel) === typeof(cgef_kernel) &&
+       typeof(cached.strategy) === typeof(mask_strategy)
+        return cached
+    end
+    plan = CGEF.Filtering.plan_filter(ws.grid, cgef_kernel, ℓ; mask_strategy = mask_strategy, backend = backend)
+    ws.filter_plan[] = plan
+    return plan
+end
+
+# Core compute: fill ws.Π_out (+ optional diagnostics) via CGEF, wrap in a result.
+function FIT.CoarseGrainingFlux._cg_flux_cgef!(
+    ws::FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace,
+    velocity_fields::Tuple,
+    ℓ::Real,
+    filter::AbstractFilter;
+    backend::CGEF.Backends.AbstractExecutionBackend = CGEF.Backends.AutoBackend(),
+    mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.Deformable(),
+    kwargs...,
+)
+    Π_out = ws.Π_out
+    FT = eltype(Π_out)
+    size(velocity_fields[1]) == size(Π_out) || throw(DimensionMismatch(
+        "velocity field size $(size(velocity_fields[1])) does not match workspace grid $(size(Π_out))"))
+
+    cgef_kernel = _to_cgef_kernel(filter)
+    plan = _cached_filter_plan(ws, cgef_kernel, FT(ℓ), mask_strategy, backend)
 
     CGEF.Diagnostics.compute_Π!(
         Π_out,
-        u, v, nothing,
-        grid,
+        velocity_fields[1], velocity_fields[2], nothing,
+        ws.grid,
         cgef_kernel,
         FT(ℓ);
-        workspace = workspace,
-        backend   = backend,
+        workspace     = ws.cgef_workspace,
+        filter_plan   = plan,
+        backend       = backend,
+        mask_strategy = mask_strategy,
         kwargs...,
     )
 
-    mean_Π = sum(Π_out[wet]) / max(1, count(wet))
+    mean_Π = _masked_mean(Π_out, ws.grid.mask)
 
-    if return_diagnostics
-        # Extract τ and S̄ from workspace after compute_Π! has populated them
-        τ_arr = zeros(FT, Nlon, Nlat, 2, 2)
-        S_arr = zeros(FT, Nlon, Nlat, 2, 2)
-        τ_arr[:, :, 1, 1] .= workspace.τ_xx
-        τ_arr[:, :, 1, 2] .= workspace.τ_xy
-        τ_arr[:, :, 2, 1] .= workspace.τ_xy
-        τ_arr[:, :, 2, 2] .= workspace.τ_yy
-        S_arr[:, :, 1, 1] .= workspace.S_xx
-        S_arr[:, :, 1, 2] .= workspace.S_xy
-        S_arr[:, :, 2, 1] .= workspace.S_xy
-        S_arr[:, :, 2, 2] .= workspace.S_yy
-        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
-    else
+    if ws.diagnostics === nothing
         return CoarseGrainingFluxResult(FT(ℓ), Π_out, FT(mean_Π))
+    else
+        w = ws.cgef_workspace
+        τ_arr, S_arr = ws.diagnostics
+        τ_arr[:, :, 1, 1] .= w.τ_xx
+        τ_arr[:, :, 1, 2] .= w.τ_xy
+        τ_arr[:, :, 2, 1] .= w.τ_xy
+        τ_arr[:, :, 2, 2] .= w.τ_yy
+        S_arr[:, :, 1, 1] .= w.S_xx
+        S_arr[:, :, 1, 2] .= w.S_xy
+        S_arr[:, :, 2, 1] .= w.S_xy
+        S_arr[:, :, 2, 2] .= w.S_yy
+        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
     end
+end
+
+"""
+    _cg_flux_cgef(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
+
+Allocating coarse-graining flux: build a one-shot [`CoarseGrainingFluxWorkspace`](@ref) and
+delegate to [`calculate_coarse_graining_flux!`](@ref) (`CGEF.compute_Π!`). Supports 2D
+Cartesian grids from tuple inputs. For spherical geometry or more control (masks, backends),
+call CGEF directly and wrap the result with `CoarseGrainingFluxResult`.
+"""
+function FIT.CoarseGrainingFlux._cg_flux_cgef(
+    velocity_fields::Tuple,
+    coords_vecs::Tuple,
+    ℓ::Real,
+    filter::AbstractFilter;
+    return_diagnostics::Bool = false,
+    mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
+    kwargs...,
+)
+    ws = FIT.CoarseGrainingFlux._cg_flux_workspace(
+        velocity_fields, coords_vecs, filter; return_diagnostics = return_diagnostics, mask = mask)
+    return FIT.CoarseGrainingFlux._cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
 end
 
 end # module FlowInvariantTransferCGEFExt

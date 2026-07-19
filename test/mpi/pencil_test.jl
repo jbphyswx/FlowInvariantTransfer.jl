@@ -7,14 +7,14 @@ using PencilFFTs: PencilFFTs, allocate_input
 using PencilArrays: PencilArrays, range_local
 using FFTW: FFTW
 using Random: Random
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 MPI.Init()
 comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 
 N = 16; L = 2π; nd = 2
-ks = FET.wavenumber_grid((N, N), (L, L))
+ks = FIT.wavenumber_grid((N, N), (L, L))
 kx = [ks[1][i] for i in 1:N, j in 1:N]
 ky = [ks[2][j] for i in 1:N, j in 1:N]
 
@@ -26,12 +26,12 @@ ky = [ks[2][j] for i in 1:N, j in 1:N]
 û  = cat(ûx, ûy; dims = 3)
 Uphys = (real.(FFTW.bfft(ûx)), real.(FFTW.bfft(ûy)))
 
-binning = FET.LinearBinning(2π / L)
-ref = FET.calculate_spectral_flux(û, ks; binning = binning,
-        dealiasing = FET.OrszagTwoThirds(), spectral = FET.FFTBackend())
+binning = FIT.LinearBinning(2π / L)
+ref = FIT.calculate_spectral_flux(û, ks; binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), spectral = FIT.FFTBackend())
 
 # Distribute the physical field into pencils: each rank fills the portion it owns.
-plan = FET.build_pencil_plan((N, N), comm)
+plan = FIT.build_pencil_plan((N, N), comm)
 upen = ntuple(nd) do c
     a  = allocate_input(plan)
     rl = range_local(a)                # global physical indices owned by this rank
@@ -41,8 +41,8 @@ upen = ntuple(nd) do c
     end
     a
 end
-res = FET.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
-        dealiasing = FET.OrszagTwoThirds())
+res = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds())
 
 failures = 0
 if rank == 0

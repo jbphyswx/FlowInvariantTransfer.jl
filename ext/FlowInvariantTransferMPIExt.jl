@@ -1,7 +1,7 @@
 module FlowInvariantTransferMPIExt
 
 using MPI: MPI
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 # ---------------------------------------------------------------------------
 # Batch axis: distribute independent inputs across ranks (round-robin), then
@@ -36,7 +36,7 @@ function _apply_reduction(flat::AbstractVector, reduction)
     end
 end
 
-function FET.mpi_batch_map(
+function FIT.mpi_batch_map(
     f,
     items;
     comm = MPI.COMM_WORLD,

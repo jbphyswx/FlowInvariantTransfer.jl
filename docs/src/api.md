@@ -42,10 +42,17 @@ calculate_partial_fluxes
 calculate_helical_partial_fluxes
 ```
 
+## Compressible Energy Transfer
+
+```@docs
+calculate_compressible_flux
+```
+
 ## Coarse-Graining Flux
 
 ```@docs
 calculate_coarse_graining_flux
+nufft_coarse_graining_flux
 ```
 
 ## Distributed (MPI)
@@ -132,6 +139,7 @@ PaddedThreeHalves
 
 ```@docs
 SpectralFluxResult
+CompressibleFluxResult
 ShellToShellResult
 ModeToModeTriadResult
 CoarseGrainingFluxResult
@@ -207,6 +215,8 @@ ThreadedBackend
 DistributedBackend
 GPUBackend
 AutoBackend
+local_backend
+resolve_execution
 ```
 
 ## Filters

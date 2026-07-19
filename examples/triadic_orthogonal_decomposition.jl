@@ -14,7 +14,7 @@ Run from the repo root:
     julia --project=examples examples/triadic_orthogonal_decomposition.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FFTW: FFTW          # loads the FFTW extension so spectral=FFTBackend() works
 using CairoMakie: CairoMakie
 using Random: Random
@@ -40,8 +40,8 @@ function run_tod_example(; nfft=100, nblocks=64, nx=64, dt=0.1, seed=42)
         end
     end
 
-    method = FET.TriadicOrthogonalDecompositionMethod(nfft=nfft, noverlap=0, nmode=1)
-    result = FET.calculate_energy_transfer(method, X; dt=dt, isreal_data=true, spectral=FET.FFTBackend())
+    method = FIT.TriadicOrthogonalDecompositionMethod(nfft=nfft, noverlap=0, nmode=1)
+    result = FIT.calculate_energy_transfer(method, X; dt=dt, isreal_data=true, spectral=FIT.FFTBackend())
 
     freqs = result.frequencies
     λ = copy(result.mode_bispectrum[:, :, 1]); λ[isnan.(λ)] .= 0.0

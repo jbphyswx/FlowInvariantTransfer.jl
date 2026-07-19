@@ -4,7 +4,7 @@ using MPI: MPI
 using PencilFFTs: PencilFFTs, PencilFFTPlan, Transforms, allocate_input, allocate_output
 using PencilArrays: PencilArrays, localgrid
 using LinearAlgebra: mul!, ldiv!
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractShellBinning, AbstractInvariant, KineticEnergy,
                                    AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
                                    AbstractShellGeometry, ShellMagnitude, IsotropicShells
@@ -27,14 +27,14 @@ using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, assign_she
 #   res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
 # ---------------------------------------------------------------------------
 
-# Implements the FET.build_pencil_plan stub (docstring lives on the core stub).
-function FET.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Float64) where {nd}
+# Implements the FIT.build_pencil_plan stub (docstring lives on the core stub).
+function FIT.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Float64) where {nd}
     proc_dims  = Tuple(Int.(MPI.Dims_create(MPI.Comm_size(comm), ntuple(_ -> 0, nd - 1))))
     transforms = ntuple(_ -> Transforms.FFT(), nd)
     return PencilFFTPlan(ns, transforms, proc_dims, comm, T)
 end
 
-function FET.pencil_spectral_flux(
+function FIT.pencil_spectral_flux(
     u_phys::NTuple{D, <:PencilArrays.PencilArray},
     plan,
     ks;
@@ -87,12 +87,14 @@ function FET.pencil_spectral_flux(
         out
     end
 
-    # Physical advecting velocity u_phys_j = real(ifft(keep ⊙ û_j))
+    # Physical advecting velocity u_phys_j = Σ_k û e^{ik·x} = bfft(û). PencilFFTs `ldiv!` is the
+    # NORMALIZED inverse (ifft = bfft/Np); since û already carries the 1/Nᵈ, multiply by Np to recover
+    # the physical field (the missing ×Np was the latent normalization bug — see NonlinearTerm docstring).
     uphys = ntuple(nd) do j
         spec = do_trunc ? (KEEP .* û[j]) : copy(û[j])
         ph   = allocate_input(plan)
         ldiv!(ph, plan, spec)
-        real.(ph)
+        real.(ph) .* Np
     end
 
     # N̂_i = fft( Σ_j u_j ∂_j u_i )/Np, dealiased
@@ -103,7 +105,7 @@ function FET.pencil_spectral_flux(
             spec = (im .* KC[j]) .* (do_trunc ? (KEEP .* û[i]) : û[i])   # i k_j û_i (dealiased)
             g = allocate_input(plan)
             ldiv!(g, plan, spec)
-            N_i .+= uphys[j] .* real.(g)
+            N_i .+= uphys[j] .* (real.(g) .* Np)   # ×Np: physical ∂_j u_i (see uphys note above)
         end
         out = allocate_output(plan)
         mul!(out, plan, N_i)

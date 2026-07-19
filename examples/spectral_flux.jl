@@ -10,7 +10,7 @@ Run from the repo root:
     julia --project=examples examples/spectral_flux.jl
 """
 
-using FlowInvariantTransfer: FlowInvariantTransfer as FET
+using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
@@ -18,8 +18,8 @@ function run_spectral_flux_example(; N=32)
     println("--- Spectral Flux Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FET.LinearBinning(2π / L)
-    result = FET.calculate_spectral_flux(û, ks; binning=b, dealiasing = FET.OrszagTwoThirds(), spectral=FET.FFTBackend())
+    b = FIT.LinearBinning(2π / L)
+    result = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
 
     imax = argmax(result.flux)
     println("Shells: ", length(result.k_shells))
