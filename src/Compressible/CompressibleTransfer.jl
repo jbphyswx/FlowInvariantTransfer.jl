@@ -340,7 +340,7 @@ function calculate_compressible_flux!(
     @inbounds for xI in CartesianIndices(ns), d in 1:nd; ws.divu[xI] += ws.gradu[xI, d, d]; end
 
     # 𝒩₁ = (u·∇)v + v(∇·u) ;  𝒩₂ = (u·∇)u ;  then N̂₁,N̂₂
-    _assemble_N!(ws.N1_phys, ws.N2_phys, ws.u_phys, ws.v_phys, ws.gradu, ws.gradv, ws.divu, ns, nd, FT)
+    _assemble_N!(ws.N1_phys, ws.N2_phys, ws.u_phys, ws.v_phys, ws.gradu, ws.gradv, ws.divu, ns, nd)
     @. ws.cscr = complex(ws.N1_phys); tf.dft!(ws.N̂1, ws.cscr)
     @. ws.cscr = complex(ws.N2_phys); tf.dft!(ws.N̂2, ws.cscr)
 
@@ -383,9 +383,12 @@ function _copy_trunc!(dst, src, ns::NTuple{nd,Int}, nd_::Int, trunc::Bool) where
 end
 
 # 𝒩₁ = (u·∇)v + v(∇·u), 𝒩₂ = (u·∇)u  (physical), into preallocated N1,N2.
-function _assemble_N!(N1, N2, u_phys, v_phys, gradu, gradv, divu, ns::NTuple{nd,Int}, nd_::Int, FT) where {nd}
+function _assemble_N!(N1, N2, u_phys, v_phys, gradu, gradv, divu, ns::NTuple{nd,Int}, nd_::Int) where {nd}
+    # Accumulate in the concrete output element type. A `FT` passed as a runtime *value* (a `DataType`)
+    # would make `zero(FT)` infer to `Any` and box every `+=` in the inner loop — `eltype(N1)` is concrete.
+    RT = eltype(N1)
     @inbounds for c in 1:nd_, xI in CartesianIndices(ns)
-        adv_v = zero(FT); adv_u = zero(FT)
+        adv_v = zero(RT); adv_u = zero(RT)
         for d in 1:nd_
             adv_v += u_phys[xI, d] * gradv[xI, c, d]
             adv_u += u_phys[xI, d] * gradu[xI, c, d]
@@ -417,7 +420,7 @@ function _rc_channels!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where 
     giver_N!(N̂1_out, N̂2_out, u_giv, v_giv) = begin
         @. ws.cscr = complex(v_giv); tf.dft!(ws.sscr, ws.cscr); tf.grad!(ws.gradvc, ws.sscr); @. ws.gradv = real(ws.gradvc)
         @. ws.cscr = complex(u_giv); tf.dft!(ws.sscr, ws.cscr); tf.grad!(ws.graduc, ws.sscr); @. ws.gradu = real(ws.graduc)
-        _assemble_N!(ws.N1_phys, ws.N2_phys, ws.u_phys, v_giv, ws.gradu, ws.gradv, ws.divu, ns, nd, FT)
+        _assemble_N!(ws.N1_phys, ws.N2_phys, ws.u_phys, v_giv, ws.gradu, ws.gradv, ws.divu, ns, nd)
         @. ws.cscr = complex(ws.N1_phys); tf.dft!(N̂1_out, ws.cscr)
         @. ws.cscr = complex(ws.N2_phys); tf.dft!(N̂2_out, ws.cscr)
     end
@@ -516,7 +519,7 @@ end
 
 # Shell-sum a per-mode density. With `dealias=true`, the 2/3 discard band (|k| ≥ N/3) is excluded so
 # aliased contributions never enter the retained shells (Orszag 2/3 output zeroing).
-function _bin(td, sidx, N_sh, FT, ns::NTuple{nd,Int}, dealias::Bool) where {nd}
+function _bin(td, sidx, N_sh, ::Type{FT}, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
     T = zeros(FT, N_sh)
     @inbounds for I in CartesianIndices(ns)
         n = sidx[I]; n == 0 && continue

@@ -175,8 +175,10 @@ Test.@testset "Allocations" begin
         fb = sizeof(û2)
         ρ̂  = randn(ComplexF64, N, N)
         wsc = FIT.CompressibleWorkspace(û2, ks2)
-        # ~34× field (shell-binning setup + per-shell result vectors); NOT the 93× of the allocating form.
-        Test.@test _alloc_comp!(wsc, û2, ρ̂, ks2, b2) <= 45fb skip = _ALLOC_COV
+        # <1× field: the shell-binning arrays + per-shell result vectors (output). The previous "34×"
+        # was a type-instability boxing bug (`zero(FT)` with FT a runtime value → Any → ~15k boxed
+        # `+=` in the nonlinear-assembly / shell-sum inner loops), now fixed.
+        Test.@test _alloc_comp!(wsc, û2, ρ̂, ks2, b2) <= 3fb skip = _ALLOC_COV
     end
 
     Test.@testset "bounded in-place variants — one shared workspace, output-only allocation" begin
