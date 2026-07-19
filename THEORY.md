@@ -281,7 +281,8 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 | Smooth band-to-band `T(K,Q)` | done (`BandTransfer.calculate_band_to_band_transfer`) |
 | Anisotropic shells `(k_⊥,k_∥)` | partial (directional shell geometries `PerpendicularShells`/`ParallelShells`) |
 | Spherical spectral transfer `T_E(l)`, `T_Z(l)` (2D barotropic) | done (`SphericalTransferMethod`; FSH regular grid + NUFSHT scattered; §6.1) |
-| **Compressible energy budget (momentum-weighted transfer + KE↔IE pressure-dilatation)** | planned (#1 / Part G; spec transcribed in §0.5, Singh–Tiwari–Sharma–Verma 2025) |
+| Compressible energy budget (momentum-weighted transfer, R/C Helmholtz channels, KE↔IE pressure-dilatation) | done (`calculate_compressible_flux`; Singh–Tiwari–Sharma–Verma 2025, §0.5) |
+| Compressible **coarse-graining** budget (Favre filter, deformation-work + baropycnal + pressure-dilatation) | belongs in CoarseGrainingEnergyFluxes.jl (Aluie 2011/2013); tracked there |
 
 ---
 
