@@ -2,7 +2,8 @@ module Spherical
 
 using ..Types: SphericalTransferResult
 
-export calculate_spherical_transfer, calculate_spherical_transfer!, SphericalTransferWorkspace
+export calculate_spherical_transfer, calculate_spherical_transfer!,
+       SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace
 
 # ---------------------------------------------------------------------------
 # Spectral energy/enstrophy transfer for 2D non-divergent (barotropic) flow on the sphere.
@@ -65,8 +66,47 @@ end
 
 function SphericalTransferWorkspace(args...; kwargs...)
     throw(ArgumentError(
-        "SphericalTransferWorkspace requires a spherical-transform extension. " *
-        "Run `using FastSphericalHarmonics` (regular grid) or `using NUFSHT` (scattered)."))
+        "SphericalTransferWorkspace requires `using FastSphericalHarmonics` (regular grid)."))
+end
+
+"""
+    ScatteredSphericalTransferWorkspace(coords, lmax; ...)
+
+Reusable buffers for the SCATTERED-point spherical transfer `!()` (NUFSHT extension). Holds the three
+NUFSHT spin plans (spin-0 at `lmax`, spin-1 at `lmax`, spin-0 at the dealiased `lwork = 2·lmax`) with
+the scattered points preset, plus every coefficient/gradient/reduction buffer and the result vectors.
+The plans are the dominant cost (FINUFFT planning + the CG least-squares setup); building them once
+lets a snapshot time series on the same points reuse them. NUFSHT plans self-finalize their FINUFFT
+resources, so this struct needs no finalizer. Fields are typed via parameters so the core names no
+NUFSHT type. Requires `using NUFSHT`.
+"""
+struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, IV, RES, R}
+    plan0::P0        # spin-0 analysis plan at lmax
+    plan1::P1        # spin-1 synthesis plan at lmax
+    plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
+    ζ_lm::CM         # (lmax+1, 2lmax+1) vorticity coefficients
+    ψ_lm::CM         # streamfunction coefficients
+    ðψ::CM           # spin-1 gradient coefficients of ψ
+    ðζ::CM           # spin-1 gradient coefficients of ζ
+    A_lw::CM         # (lwork+1, 2lwork+1) advection coefficients
+    Gψ::CV           # (M,) ðψ at the scattered points
+    Gζ::CV           # (M,) ðζ at the scattered points
+    ζdata::CV        # (M,) vorticity as complex (solve input)
+    Jc::CV           # (M,) Jacobian A = J(ψ,ζ) as complex (solve input)
+    degs::IV         # per-mode degree l
+    ψv::CV           # per-mode ψ̂ (reduction input)
+    ζv::CV           # per-mode ζ̂
+    Av::CV           # per-mode Â
+    result::RES      # reused SphericalTransferResult
+    radius::R
+    lmax::Int
+    lwork::Int
+    rtol::R
+    maxiter::Int
+end
+
+function ScatteredSphericalTransferWorkspace(args...; kwargs...)
+    throw(ArgumentError("ScatteredSphericalTransferWorkspace requires `using NUFSHT` (scattered points)."))
 end
 
 """

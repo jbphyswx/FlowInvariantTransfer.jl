@@ -1469,6 +1469,22 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # Guard: too few points for the dealiased solve.
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(
             FIT.SphericalTransferMethod(), ζscat[1:10], (θs[1:10], φs[1:10]); lmax = lmax)
+
+        # In-place workspace form: reuses the three NUFSHT plans (the dominant cost) + all buffers, so
+        # a snapshot sweep on the same points re-plans nothing. Matches the allocating path to the CG
+        # tolerance; a repeat call allocates far less (only the NUFSHT-internal CG scratch remains).
+        ws = FIT.ScatteredSphericalTransferWorkspace((θs, φs), lmax; radius = a, tol = 1e-12, rtol = 1e-13)
+        ip = FIT.calculate_spherical_transfer!(ws, ζscat)
+        Test.@test ip isa FIT.SphericalTransferResult
+        Test.@test maximum(abs.(ip.energy_transfer .- res.energy_transfer)) < 1e-10 * scaleE
+        Test.@test maximum(abs.(ip.enstrophy_transfer .- res.enstrophy_transfer)) < 1e-10 * scaleZ
+        Test.@test abs(sum(ip.energy_transfer)) < 1e-8 * scaleE
+        FIT.calculate_spherical_transfer!(ws, ζscat)  # warm
+        a_fresh = @allocated FIT.calculate_energy_transfer(
+            FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+        a_reuse = @allocated FIT.calculate_spherical_transfer!(ws, ζscat)
+        Test.@test a_reuse < a_fresh ÷ 3 skip = (Base.JLOptions().code_coverage != 0)
+        Test.@test_throws DimensionMismatch FIT.calculate_spherical_transfer!(ws, ζscat[1:end-1])
     end
 
     # -----------------------------------------------------------------------

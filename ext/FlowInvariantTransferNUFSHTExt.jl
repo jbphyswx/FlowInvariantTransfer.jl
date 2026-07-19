@@ -2,8 +2,8 @@ module FlowInvariantTransferNUFSHTExt
 
 using NUFSHT: NUFSHT
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SphericalTransferMethod
-using FlowInvariantTransfer.Spherical: spherical_transfer_reduce
+using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult
+using FlowInvariantTransfer.Spherical: spherical_transfer_reduce, spherical_transfer_reduce!
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer at SCATTERED points on the sphere, via NUFSHT
@@ -40,6 +40,98 @@ dealiased by solving it at degree `2·lmax`, so `M ≥ (2·lmax+1)²` is require
 Keyword `dealias=false` skips the 2·lmax dealiasing (aliased). `tol` is the FINUFFT tolerance;
 `rtol`/`maxiter` control the CG solve. Requires `using NUFSHT`.
 """
+function FIT.ScatteredSphericalTransferWorkspace(
+    coords::Tuple{<:AbstractVector, <:AbstractVector},
+    lmax::Integer;
+    radius::Real = 1.0,
+    dealias::Bool = true,
+    tol::Real = 1e-10,
+    rtol::Real = 1e-10,
+    maxiter::Integer = 4000,
+    T::Type = Float64,
+)
+    θ, φ = coords
+    M = length(θ)
+    length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
+    lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
+    lwork = dealias ? 2 * lmax : lmax
+    M ≥ (lwork + 1)^2 || throw(ArgumentError(
+        "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
+        "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    FT = float(T)
+    CT = Complex{FT}
+
+    # The three NUFSHT spin plans (points preset) — the dominant, reusable cost.
+    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,  0; tol = tol, T = FT)
+    plan1  = NUFSHT.make_spin_plan(θ, φ, lmax,  1; tol = tol, T = FT)
+    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT)
+
+    ζ_lm = zeros(CT, lmax + 1, 2lmax + 1)
+    ψ_lm = zeros(CT, lmax + 1, 2lmax + 1)
+    ðψ   = zeros(CT, lmax + 1, 2lmax + 1)
+    ðζ   = zeros(CT, lmax + 1, 2lmax + 1)
+    A_lw = zeros(CT, lwork + 1, 2lwork + 1)
+    Gψ = zeros(CT, M); Gζ = zeros(CT, M); ζdata = zeros(CT, M); Jc = zeros(CT, M)
+    nmode = (lmax + 1)^2
+    degs = Vector{Int}(undef, nmode)
+    ψv = Vector{CT}(undef, nmode); ζv = Vector{CT}(undef, nmode); Av = Vector{CT}(undef, nmode)
+    result = SphericalTransferResult(
+        collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1))
+
+    return FIT.Spherical.ScatteredSphericalTransferWorkspace(
+        plan0, plan1, plan0w, ζ_lm, ψ_lm, ðψ, ðζ, A_lw, Gψ, Gζ, ζdata, Jc,
+        degs, ψv, ζv, Av, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+end
+
+function FIT.calculate_spherical_transfer!(
+    ws::FIT.Spherical.ScatteredSphericalTransferWorkspace,
+    vorticity::AbstractVector{<:Real},
+)
+    M = length(ws.Gψ)
+    length(vorticity) == M || throw(DimensionMismatch(
+        "vorticity length $(length(vorticity)) ≠ workspace points $M."))
+    lmax = ws.lmax; lwork = ws.lwork
+    a = ws.radius
+    CT = eltype(ws.ζ_lm); FT = real(CT)
+
+    # Analyse ζ → spin-0 coefficients (CG solve reuses ws.ζ_lm, points preset in plan0).
+    ws.ζdata .= vorticity
+    fill!(ws.ζ_lm, zero(CT))
+    NUFSHT.nusht_solve_spin!(ws.ζ_lm, ws.ζdata, ws.plan0; rtol = ws.rtol, maxiter = ws.maxiter)
+
+    # ψ = ∇⁻²ζ and the eth ladder → spin-1 gradient coefficients (reused buffers).
+    fill!(ws.ψ_lm, zero(CT)); fill!(ws.ðψ, zero(CT)); fill!(ws.ðζ, zero(CT))
+    @inbounds for ℓ in 1:lmax, m in -ℓ:ℓ
+        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
+        ws.ψ_lm[i] = -a^2 / (ℓ * (ℓ + 1)) * ws.ζ_lm[i]
+        c = sqrt(FT(ℓ * (ℓ + 1)))
+        ws.ðψ[i] = c * ws.ψ_lm[i]
+        ws.ðζ[i] = c * ws.ζ_lm[i]
+    end
+
+    # Synthesise ðψ, ðζ at the points; A = J(ψ,ζ) into the complex solve buffer.
+    NUFSHT.nusht_type2_spin!(ws.Gψ, ws.ðψ, ws.plan1)
+    NUFSHT.nusht_type2_spin!(ws.Gζ, ws.ðζ, ws.plan1)
+    @. ws.Jc = imag(conj(ws.Gψ) * ws.Gζ) / a^2
+
+    # Analyse A at degree lwork (dealiased); reduce over l ≤ lmax into the reused result.
+    fill!(ws.A_lw, zero(CT))
+    NUFSHT.nusht_solve_spin!(ws.A_lw, ws.Jc, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
+
+    k = 0
+    @inbounds for ℓ in 0:lmax, m in -ℓ:ℓ
+        k += 1
+        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
+        iw = NUFSHT.spin_coeff_index(ℓ, m, lwork)
+        ws.degs[k] = ℓ
+        ws.ψv[k] = ws.ψ_lm[i]
+        ws.ζv[k] = ws.ζ_lm[i]
+        ws.Av[k] = ws.A_lw[iw]
+    end
+    return spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
+end
+
 function FIT.calculate_energy_transfer(
     method::SphericalTransferMethod,
     vorticity::AbstractVector{<:Real},
@@ -51,67 +143,13 @@ function FIT.calculate_energy_transfer(
     maxiter::Integer = 4000,
     kwargs...,
 )
-    θ, φ = coords
     M = length(vorticity)
-    (length(θ) == M && length(φ) == M) ||
-        throw(ArgumentError("vorticity and both coordinate vectors must have equal length; got $((M, length(θ), length(φ)))."))
-    lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
-    lwork = dealias ? 2 * lmax : lmax
-    M ≥ (lwork + 1)^2 || throw(ArgumentError(
-        "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
-        "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
-
-    # Compute type follows the input (NUFSHT's plans are parametric via `T`); Complex{FT} coefficients.
-    FT = float(eltype(vorticity))
-    CT = Complex{FT}
-    a = FT(method.radius)
-    ζdata = CT.(vorticity)
-
-    # Analyse ζ → complex spin-0 coefficients (spin_coeff_index layout).
-    plan0 = NUFSHT.make_spin_plan(θ, φ, lmax, 0; tol = tol, T = FT)
-    ζ_lm = zeros(CT, lmax + 1, 2lmax + 1)
-    NUFSHT.nusht_solve_spin!(ζ_lm, ζdata, plan0; rtol = rtol, maxiter = maxiter)
-
-    # ψ = ∇⁻²ζ (ψ̂_lm = -a²/(l(l+1)) ζ̂_lm) and the eth ladder → spin-1 gradient coefficients.
-    ψ_lm = zeros(CT, lmax + 1, 2lmax + 1)
-    ðψ = zeros(CT, lmax + 1, 2lmax + 1)
-    ðζ = zeros(CT, lmax + 1, 2lmax + 1)
-    @inbounds for ℓ in 1:lmax, m in -ℓ:ℓ
-        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
-        ψ_lm[i] = -a^2 / (ℓ * (ℓ + 1)) * ζ_lm[i]
-        c = sqrt(FT(ℓ * (ℓ + 1)))
-        ðψ[i] = c * ψ_lm[i]
-        ðζ[i] = c * ζ_lm[i]
-    end
-
-    # Synthesise the gradient fields ðψ, ðζ at the scattered points (spin-1).
-    plan1 = NUFSHT.make_spin_plan(θ, φ, lmax, 1; tol = tol, T = FT)
-    Gψ = zeros(CT, M); NUFSHT.nusht_type2_spin!(Gψ, ðψ, plan1)
-    Gζ = zeros(CT, M); NUFSHT.nusht_type2_spin!(Gζ, ðζ, plan1)
-    J = @. imag(conj(Gψ) * Gζ) / a^2                             # A = J(ψ,ζ) at the points
-
-    # Analyse A at degree lwork (dealiased), then keep l ≤ lmax.
-    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT)
-    A_lw = zeros(CT, lwork + 1, 2lwork + 1)
-    NUFSHT.nusht_solve_spin!(A_lw, CT.(J), plan0w; rtol = rtol, maxiter = maxiter)
-
-    # Flatten to per-mode arrays for the shared degree-spectrum reduction.
-    nmode = (lmax + 1)^2
-    degs = Vector{Int}(undef, nmode)
-    ψv = Vector{CT}(undef, nmode)
-    ζv = Vector{CT}(undef, nmode)
-    Av = Vector{CT}(undef, nmode)
-    k = 0
-    @inbounds for ℓ in 0:lmax, m in -ℓ:ℓ
-        k += 1
-        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
-        iw = NUFSHT.spin_coeff_index(ℓ, m, lwork)
-        degs[k] = ℓ
-        ψv[k] = ψ_lm[i]
-        ζv[k] = ζ_lm[i]
-        Av[k] = A_lw[iw]
-    end
-    return spherical_transfer_reduce(degs, ψv, ζv, Av, lmax)
+    (length(coords[1]) == M && length(coords[2]) == M) || throw(ArgumentError(
+        "vorticity and both coordinate vectors must have equal length; got $((M, length(coords[1]), length(coords[2])))."))
+    ws = FIT.ScatteredSphericalTransferWorkspace(
+        coords, lmax; radius = float(method.radius), dealias = dealias,
+        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)))
+    return FIT.calculate_spherical_transfer!(ws, vorticity)
 end
 
 end # module FlowInvariantTransferNUFSHTExt
