@@ -408,6 +408,82 @@ end
 # Serial triad loop
 # ---------------------------------------------------------------------------
 
+# Reusable scratch for the per-triad SVD, reused across every triad in the serial loop so the
+# hot loop's matrix products (Xw, RᵀX, YYᴴ, YᴴU, QU) write into fixed buffers via `mul!` instead
+# of reallocating each triad. All buffers are sized by `r = min(nStateNx, nBlks)` (the QR/SVD rank
+# bound), which is correct whether the state-space is taller or wider than the block count. The
+# scalar `weights` and its √/1-over-√ (constant across triads) are hoisted out of the loop too.
+# `qr!`, `eigen!`, and the thin `Matrix(Q)`/eigenvector arrays are the residual per-triad allocs
+# (all O(nBlks²), small); the large O(nStateNx·nBlks) products are the ones eliminated here.
+struct _TriadSVDScratch{M<:AbstractMatrix}
+    Xw::M    # nBlks × nStateNx      — (Q̂_n·√w)ᴴ / nBlks
+    Q3::M    # nStateNx × nBlks      — Q̂_kl·√w   (consumed by qr!)
+    Y::M     # r × nStateNx          — R · Xw
+    Mmat::M  # r × r                 — Y · Yᴴ
+    Ubuf::M  # nStateNx × r          — convective modes (view [:,1:nz] returned)
+    Vbuf::M  # nStateNx × r          — recipient modes  (view [:,1:nz] returned)
+end
+function _TriadSVDScratch(::Type{CT}, nStateNx::Int, nBlks::Int) where {CT}
+    r = min(nStateNx, nBlks)
+    return _TriadSVDScratch(
+        zeros(CT, nBlks, nStateNx), zeros(CT, nStateNx, nBlks), zeros(CT, r, nStateNx),
+        zeros(CT, r, r), zeros(CT, nStateNx, r), zeros(CT, nStateNx, r),
+    )
+end
+
+# Fused, allocation-reusing per-triad SVD for the serial loop: identical math to
+# `triadic_svd` → `lowrank_svd` → `sirovich_svd`, but every large product goes through `mul!` into
+# `sc`. Returns views into `sc.Ubuf`/`sc.Vbuf` (overwritten by the next triad — the caller copies
+# out the truncated `[:,1:nm]` modes it stores).
+function _triadic_svd_serial!(sc::_TriadSVDScratch, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
+    nStateNx = size(Q_hat_n, 1)
+    RT = real(eltype(Q_hat_n))
+    # Xw = (Q̂_n .* √w)ᴴ ./ nBlks ; Q3 = Q̂_kl .* √w
+    Xw, Q3 = sc.Xw, sc.Q3
+    @inbounds for i in 1:nStateNx
+        wi = sqrt_w[i]
+        for b in 1:nBlks
+            Xw[b, i] = conj(Q_hat_n[i, b] * wi) / nBlks
+            Q3[i, b] = Q_hat_kl[i, b] * wi
+        end
+    end
+    # Q3 = QR ; Y = R · Xw
+    F = LinearAlgebra.qr!(Q3)
+    Qmat = Matrix(F.Q)                       # thin Q (nStateNx × r); residual small alloc
+    Y = sc.Y
+    LinearAlgebra.mul!(Y, F.R, Xw)
+    # Method-of-snapshots SVD of Y: eig(Y·Yᴴ), sort ↓, recover V = Yᴴ·U·diag(1/√λ)
+    M = sc.Mmat
+    LinearAlgebra.mul!(M, Y, Y')
+    eig = LinearAlgebra.eigen!(LinearAlgebra.Hermitian(M))
+    λ = real.(eig.values)
+    Uev = eig.vectors
+    perm = sortperm(λ; rev = true)
+    λ = λ[perm]
+    Uev = Uev[:, perm]
+    λ = max.(λ, 0)
+    sqrt_λ = sqrt.(λ)
+    nz = count(>(eps(RT) * 100), sqrt_λ)
+    if nz == 0
+        return view(sc.Ubuf, :, 1:0), similar(sqrt_λ, 0), view(sc.Vbuf, :, 1:0)
+    end
+    U_trunc = Uev[:, 1:nz]
+    s = sqrt_λ[1:nz]
+    Vv = view(sc.Vbuf, :, 1:nz)
+    LinearAlgebra.mul!(Vv, Y', U_trunc)      # V = Yᴴ · U_trunc
+    Uv = view(sc.Ubuf, :, 1:nz)
+    LinearAlgebra.mul!(Uv, Qmat, U_trunc)    # U = Q · U_trunc
+    @inbounds for j in 1:nz
+        isj = inv(s[j])
+        for i in 1:nStateNx
+            Vv[i, j] *= isj                  # · diag(1/√λ)
+            Vv[i, j] *= inv_sqrt_w[i]        # un-weight recipient modes
+            Uv[i, j] *= inv_sqrt_w[i]        # un-weight convective modes
+        end
+    end
+    return Uv, s, Vv
+end
+
 """
     _triadic_loop_serial!(L, P, T_budget, A_out, Xi_out,
                           Q_hat, f_idx, fk_idx, fl_idx, fn_idx,
@@ -428,23 +504,27 @@ function _triadic_loop_serial!(
     nTriads = length(fk_idx)
     nStateNx = nState * nx
 
+    # Hoisted out of the loop: √w and 1/√w are constant across triads; the SVD scratch is reused.
+    sqrt_w = sqrt.(weights)
+    inv_sqrt_w = inv.(sqrt_w)
+    sc = _TriadSVDScratch(eltype(Q_hat), nStateNx, nBlks)
+
     for i in 1:nTriads
         fi_k = fk_idx[i]
         fi_l = fl_idx[i]
         fi_n = fn_idx[i]
 
-        # Extract Fourier realizations for this triad
-        # Q_hat is (nFreq, nVar, nx, nBlks)
-        # LHS transforms (nVar, nx, nBlks) -> (nState, nx, nBlks)
-        Q_n_raw = Q_hat[fi_n, :, :, :]    # (nVar, nx, nBlks)
-        Q_k_raw = Q_hat[fi_k, :, :, :]
-        Q_l_raw = Q_hat[fi_l, :, :, :]
+        # Extract Fourier realizations for this triad (views — no per-triad copy).
+        # Q_hat is (nFreq, nVar, nx, nBlks); LHS transforms (nVar, nx, nBlks) -> (nState, nx, nBlks)
+        Q_n_raw = view(Q_hat, fi_n, :, :, :)    # (nVar, nx, nBlks)
+        Q_k_raw = view(Q_hat, fi_k, :, :, :)
+        Q_l_raw = view(Q_hat, fi_l, :, :, :)
 
         Q_hat_n = reshape(permutedims(LHS(Q_n_raw), (2, 1, 3)), nStateNx, nBlks)
         Q_hat_kl = reshape(Q_nonlinear(Q_k_raw, Q_l_raw), nStateNx, nBlks)
 
-        # Core SVD
-        U, s, V = triadic_svd(Q_hat_n, Q_hat_kl, weights, nBlks)
+        # Core SVD (reuses `sc` across triads)
+        U, s, V = _triadic_svd_serial!(sc, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
 
         # Store results (truncated to nmode)
         nm = min(nmode, length(s))
