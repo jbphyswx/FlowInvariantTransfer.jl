@@ -24,7 +24,8 @@ using ..Types: TriadicOrthogonalDecompositionMethod,
                AbstractExecutionBackend, SerialBackend, ThreadedBackend, resolve_execution,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
 
-export triadic_orthogonal_decomposition, hamming_window, hann_window, tukey_window
+export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace,
+       hamming_window, hann_window, tukey_window
 
 # ---------------------------------------------------------------------------
 # Extension stubs — overridden by FFTW / OhMyThreads / Distributed / GPU exts
@@ -519,14 +520,10 @@ function _triadic_loop_serial!(
     weights, nBlks, nFreq, nState, nx, nmode,
     Q_nonlinear, LHS,
     return_coefficients, return_auxiliary_modes,
+    sc, sqrt_w, inv_sqrt_w, permbuf,   # reusable scratch supplied by the caller (TODWorkspace)
 )
     nTriads = length(fk_idx)
     nStateNx = nState * nx
-
-    # Hoisted out of the loop: √w and 1/√w are constant across triads; the SVD scratch is reused.
-    sqrt_w = sqrt.(weights)
-    inv_sqrt_w = inv.(sqrt_w)
-    sc = _TriadSVDScratch(eltype(Q_hat), nStateNx, nBlks)
 
     for i in 1:nTriads
         fi_k = fk_idx[i]
@@ -539,7 +536,8 @@ function _triadic_loop_serial!(
         Q_k_raw = view(Q_hat, fi_k, :, :, :)
         Q_l_raw = view(Q_hat, fi_l, :, :, :)
 
-        Q_hat_n = reshape(permutedims(LHS(Q_n_raw), (2, 1, 3)), nStateNx, nBlks)
+        permutedims!(permbuf, LHS(Q_n_raw), (2, 1, 3))   # recipient reshape into the reused buffer
+        Q_hat_n = reshape(permbuf, nStateNx, nBlks)
         Q_hat_kl = reshape(Q_nonlinear(Q_k_raw, Q_l_raw), nStateNx, nBlks)
 
         # Core SVD (reuses `sc` across triads)
@@ -604,8 +602,212 @@ _dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
     _triadic_loop_threaded!(args...; kwargs...)
 
 # ---------------------------------------------------------------------------
+# Reusable workspace
+# ---------------------------------------------------------------------------
+
+"""
+    TODWorkspace(X; window, weight, noverlap, dt, Q, LHS, nmode, nfreq, isreal_data, mean_type, spectral)
+
+Preallocated, reusable state for [`triadic_orthogonal_decomposition!`](@ref): the temporal-DFT output
+`Q_hat`, the DFT plan + per-column scratch, the spatial weights and their √/1-over-√, the per-triad SVD
+scratch and permute buffer, and the `L`/`T_budget` output arrays. Sized once from `X`'s dimensions and
+the analysis parameters (all of which are fixed at construction); reuse it across snapshots of the same
+shape so a repeat decomposition allocates only the per-triad output modes (the genuine result). Every
+array field is its own type parameter (nothing hardcoded to `Array`).
+"""
+struct TODWorkspace{QH, SG, VC, PB, RV, L3, XM, IV, DP, SC, WW, LH, QF, SP}
+    Q_hat::QH
+    segment::SG
+    seg_before_mean::SG
+    windowed::VC
+    dft_col::VC
+    shifted::VC
+    dft_plan::DP
+    permbuf::PB
+    window_vec::RV
+    weight_vec::RV
+    weights::RV
+    sqrt_w::RV
+    inv_sqrt_w::RV
+    f::RV
+    L::L3
+    T_budget::L3
+    X_mean::XM
+    sc::SC
+    f_idx::IV
+    fk_idx::IV
+    fl_idx::IV
+    fn_idx::IV
+    win_weight::WW
+    LHS::LH
+    Q::QF
+    spectral::SP
+    nt::Int
+    nVar::Int
+    nx::Int
+    nDFT::Int
+    nBlks::Int
+    nFreq::Int
+    nState::Int
+    nmode_val::Int
+    noverlap_val::Int
+    shift::Int
+    blk_mean::Bool
+    isreal_data::Bool
+end
+
+function TODWorkspace(
+    X::AbstractArray;
+    window = nothing, weight = nothing, noverlap = nothing, dt = nothing,
+    Q = _default_nonlinear, LHS = identity, nmode = nothing, nfreq = nothing,
+    isreal_data = nothing, mean_type = :zero, spectral::AbstractSpectralBackend = DirectSumBackend(),
+)
+    dims = size(X)
+    ndims(X) >= 2 || throw(ArgumentError("X must have at least 2 dimensions (time × variables)"))
+    nt = dims[1]
+    nVar = dims[2]
+    nx = prod(dims[3:end]; init = 1)
+    isr = isreal_data === nothing ? eltype(X) <: Real : isreal_data
+
+    (window_vec, weight_vec, noverlap_val, dt_val, nDFT, nBlks) =
+        parse_parameters(nt, nx; window = window, weight = weight, noverlap = noverlap, dt = dt)
+    RT = real(float(eltype(X)))
+    CT = Complex{RT}
+    window_vec = convert(Vector{RT}, window_vec)
+    weight_vec = convert(Vector{RT}, weight_vec)
+    nmode_val = nmode === nothing ? nBlks : Int(nmode)
+    win_weight = RT(1) / (sum(window_vec) / length(window_vec))
+
+    X_mean = if mean_type === :zero || mean_type === :blockwise
+        zeros(CT, nVar, nx)
+    elseif mean_type isa AbstractArray
+        convert(Matrix{CT}, reshape(mean_type[1:nVar, :], nVar, nx))
+    else
+        throw(ArgumentError("mean_type must be :zero, :blockwise, or an array"))
+    end
+    blk_mean = mean_type === :blockwise
+
+    (f, nFreq, _include_triad, f_idx, fk_idx, fl_idx, fn_idx) =
+        frequency_axes(nDFT, dt_val; isreal_data = isr, nfreq = nfreq)
+    f = convert(Vector{RT}, f)
+
+    nState = size(LHS(zeros(CT, nVar, nx, 1)), 1)
+
+    Q_hat = zeros(CT, nFreq, nVar, nx, nBlks)
+    shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
+    dft_plan = _temporal_dft_plan(nDFT, spectral, CT)
+    segment  = Array{CT}(undef, nDFT, nx)
+    windowed = Array{CT}(undef, nDFT)
+    dft_col  = Array{CT}(undef, nDFT)
+    shifted  = Array{CT}(undef, nDFT)
+    seg_before_mean = blk_mean ? Array{CT}(undef, nDFT, nx) : segment
+
+    weights = repeat(weight_vec, nState)
+    sqrt_w = sqrt.(weights)
+    inv_sqrt_w = inv.(sqrt_w)
+    sc = _TriadSVDScratch(CT, nState * nx, nBlks)
+    permbuf = Array{CT}(undef, nx, nState, nBlks)
+    L = fill(RT(NaN), nFreq, nFreq, nmode_val)
+    T_budget = fill(RT(NaN), nFreq, nFreq, nmode_val)
+
+    return TODWorkspace(
+        Q_hat, segment, seg_before_mean, windowed, dft_col, shifted, dft_plan, permbuf,
+        window_vec, weight_vec, weights, sqrt_w, inv_sqrt_w, f, L, T_budget, X_mean, sc,
+        f_idx, fk_idx, fl_idx, fn_idx, win_weight, LHS, Q, spectral,
+        nt, nVar, nx, nDFT, nBlks, nFreq, nState, nmode_val, noverlap_val, shift, blk_mean, isr,
+    )
+end
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+"""
+    triadic_orthogonal_decomposition!(ws::TODWorkspace, X; return_coefficients=false,
+                                      return_auxiliary_modes=false, execution=SerialBackend())
+        -> TriadicOrthogonalDecompositionResult
+
+In-place Triadic Orthogonal Decomposition reusing the preallocated `ws` (its `Q_hat`, DFT plan/scratch,
+weights, SVD scratch, and `L`/`T_budget` buffers). `X` must match the workspace dimensions. Repeated
+calls on same-shaped snapshots re-plan nothing and allocate only the per-triad output modes; the
+returned result wraps the reused `L`/`T_budget` (a later call overwrites them — copy if persisting).
+The analysis parameters (`window`/`weight`/`LHS`/`Q`/…) are fixed at workspace construction.
+"""
+function triadic_orthogonal_decomposition!(
+    ws::TODWorkspace,
+    X::AbstractArray;
+    return_coefficients::Bool = false,
+    return_auxiliary_modes::Bool = false,
+    execution::AbstractExecutionBackend = SerialBackend(),
+)
+    dims = size(X)
+    (dims[1] == ws.nt && dims[2] == ws.nVar && prod(dims[3:end]; init = 1) == ws.nx) ||
+        throw(DimensionMismatch("X size $dims does not match workspace (nt=$(ws.nt), nVar=$(ws.nVar), nx=$(ws.nx))"))
+    CT = eltype(ws.Q_hat)
+    X_flat = reshape(X, ws.nt, ws.nVar, ws.nx)
+
+    nDFT = ws.nDFT; nx = ws.nx; nVar = ws.nVar; nBlks = ws.nBlks
+    blk_mean = ws.blk_mean; win_weight = ws.win_weight
+    segment = ws.segment; windowed = ws.windowed; dft_col = ws.dft_col; shifted = ws.shifted
+    seg_before_mean = ws.seg_before_mean; Q_hat = ws.Q_hat
+    window_vec = ws.window_vec; X_mean = ws.X_mean; dft_backend = ws.spectral
+
+    for iBlk in 1:nBlks
+        offset = min((iBlk - 1) * (nDFT - ws.noverlap_val) + nDFT, ws.nt) - nDFT
+        for iVar in 1:nVar
+            @inbounds for ix in 1:nx, t in 1:nDFT
+                segment[t, ix] = X_flat[offset + t, iVar, ix] - X_mean[iVar, ix]
+            end
+            if blk_mean
+                copyto!(seg_before_mean, segment)
+                @inbounds for ix in 1:nx
+                    blk_avg = zero(CT)
+                    for t in 1:nDFT; blk_avg += segment[t, ix]; end
+                    blk_avg /= nDFT
+                    for t in 1:nDFT; segment[t, ix] -= blk_avg; end
+                end
+            end
+            for ix in 1:nx
+                if dft_backend isa FFTBackend
+                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT, ws.dft_plan)
+                else
+                    @inbounds for t in 1:nDFT; windowed[t] = segment[t, ix] * window_vec[t]; end
+                    @inbounds for freq_k in 1:nDFT
+                        val = zero(CT)
+                        for t in 1:nDFT
+                            phase = -2π * (freq_k - 1) * (t - 1) / nDFT
+                            val += windowed[t] * exp(im * phase)
+                        end
+                        dft_col[freq_k] = val * (win_weight / nDFT)
+                    end
+                end
+                if blk_mean
+                    dc = zero(CT)
+                    @inbounds for t in 1:nDFT; dc += seg_before_mean[t, ix] * window_vec[t]; end
+                    dft_col[1] = dc * (win_weight / nDFT)
+                end
+                circshift!(shifted, dft_col, ws.shift)
+                @inbounds @views Q_hat[:, iVar, ix, iBlk] .= shifted
+            end
+        end
+    end
+
+    fill!(ws.L, real(eltype(ws.L))(NaN))
+    fill!(ws.T_budget, real(eltype(ws.T_budget))(NaN))
+    P = Dict{Tuple{Int,Int}, NamedTuple}()
+    A_out = return_coefficients ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing
+    Xi_out = return_auxiliary_modes ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing
+
+    _dispatch_triadic_loop!(
+        ws.L, P, ws.T_budget, A_out, Xi_out,
+        ws.Q_hat, ws.f_idx, ws.fk_idx, ws.fl_idx, ws.fn_idx,
+        ws.weights, ws.nBlks, ws.nFreq, ws.nState, ws.nx, ws.nmode_val,
+        ws.Q, ws.LHS, return_coefficients, return_auxiliary_modes,
+        ws.sc, ws.sqrt_w, ws.inv_sqrt_w, ws.permbuf;
+        execution = execution,
+    )
+    return TriadicOrthogonalDecompositionResult(ws.f, ws.L, P, ws.T_budget, A_out, Xi_out)
+end
 
 """
     triadic_orthogonal_decomposition(X; kwargs...)
@@ -672,151 +874,13 @@ function triadic_orthogonal_decomposition(
     spectral::AbstractSpectralBackend=DirectSumBackend(),
     execution::AbstractExecutionBackend=SerialBackend(),
 )
-    # --- Problem dimensions ---
-    dims = size(X)
     ndims(X) >= 2 || throw(ArgumentError("X must have at least 2 dimensions (time × variables)"))
-    nt = dims[1]
-    nVar = dims[2]
-    spatial_dims = dims[3:end]
-    nx = prod(spatial_dims; init=1)
-
-    # --- Auto-detect reality ---
-    if isreal_data === nothing
-        isreal_data = eltype(X) <: Real
-    end
-
-    # --- Parse parameters ---
-    (window_vec, weight_vec, noverlap_val, dt_val, nDFT, nBlks) =
-        parse_parameters(nt, nx; window=window, weight=weight, noverlap=noverlap, dt=dt)
-
-    # Compute precision follows the input snapshots; the temporal DFT/SVD run in Complex{RT}.
-    RT = real(float(eltype(X)))
-    CT = Complex{RT}
-    window_vec = convert(Vector{RT}, window_vec)
-    weight_vec = convert(Vector{RT}, weight_vec)
-
-    # Determine number of modes to store
-    nmode_val = nmode === nothing ? nBlks : Int(nmode)
-
-    # Window correction factor
-    win_weight = RT(1) / (sum(window_vec) / length(window_vec))
-
-    # --- Handle mean subtraction ---
-    X_mean = if mean_type === :zero || mean_type === :blockwise
-        zeros(eltype(X), nVar, nx)
-    elseif mean_type isa AbstractArray
-        # Reshape provided mean to (nVar, nx)
-        reshape(mean_type[1:nVar, :], nVar, nx)
-    else
-        throw(ArgumentError("mean_type must be :zero, :blockwise, or an array"))
-    end
-    blk_mean = mean_type === :blockwise
-
-    # --- Compute temporal DFT for all blocks ---
-    (f, nFreq, include_triad, f_idx, fk_idx, fl_idx, fn_idx) =
-        frequency_axes(nDFT, dt_val; isreal_data=isreal_data, nfreq=nfreq)
-
-    # Determine nState from LHS
-    # Apply LHS to a dummy to determine output size
-    dummy_input = zeros(CT, nVar, nx, 1)
-    nState = size(LHS(dummy_input), 1)
-
-    # Preallocate Q_hat: (nFreq, nVar, nx, nBlks)
-    Q_hat = zeros(CT, nFreq, nVar, nx, nBlks)
-
-    # Reshape X for processing: (nt, nVar, nx)
-    X_flat = reshape(X, nt, nVar, nx)
-
-    # Temporary for block DFT
-    # Temporal-DFT transform is chosen by the spectral backend.
-    dft_backend = spectral
-    shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
-    dft_plan = _temporal_dft_plan(nDFT, dft_backend, CT)   # built once; reused across every column
-
-    # Reusable per-block/column scratch — avoids per-column allocation in the hot DFT loop.
-    segment  = Array{CT}(undef, nDFT, nx)
-    windowed = Array{CT}(undef, nDFT)
-    dft_col  = Array{CT}(undef, nDFT)
-    shifted  = Array{CT}(undef, nDFT)
-    seg_before_mean = blk_mean ? Array{CT}(undef, nDFT, nx) : segment
-
-    for iBlk in 1:nBlks
-        offset = min((iBlk - 1) * (nDFT - noverlap_val) + nDFT, nt) - nDFT
-
-        for iVar in 1:nVar
-            # Extract this block/variable segment into the reused (nDFT, nx) buffer.
-            @inbounds for ix in 1:nx, t in 1:nDFT
-                segment[t, ix] = X_flat[offset + t, iVar, ix] - X_mean[iVar, ix]
-            end
-
-            # Blockwise mean subtraction (keep the pre-mean copy for the DC term below).
-            if blk_mean
-                copyto!(seg_before_mean, segment)
-                @inbounds for ix in 1:nx
-                    blk_avg = zero(CT)
-                    for t in 1:nDFT; blk_avg += segment[t, ix]; end
-                    blk_avg /= nDFT
-                    for t in 1:nDFT; segment[t, ix] -= blk_avg; end
-                end
-            end
-
-            # Apply window, DFT, normalize, fftshift → (nDFT,) per spatial point.
-            for ix in 1:nx
-                if dft_backend isa FFTBackend
-                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT, dft_plan)
-                else
-                    @inbounds for t in 1:nDFT; windowed[t] = segment[t, ix] * window_vec[t]; end
-                    @inbounds for freq_k in 1:nDFT
-                        val = zero(ComplexF64)
-                        for t in 1:nDFT
-                            phase = -2π * (freq_k - 1) * (t - 1) / nDFT
-                            val += windowed[t] * exp(im * phase)
-                        end
-                        dft_col[freq_k] = val * (win_weight / nDFT)
-                    end
-                end
-
-                # Blockwise mean: restore the DC component from the pre-mean data.
-                if blk_mean
-                    dc = zero(CT)
-                    @inbounds for t in 1:nDFT; dc += seg_before_mean[t, ix] * window_vec[t]; end
-                    dft_col[1] = dc * (win_weight / nDFT)
-                end
-
-                circshift!(shifted, dft_col, shift)
-                @inbounds @views Q_hat[:, iVar, ix, iBlk] .= shifted
-            end
-        end
-    end
-
-    # --- Build spatial weights for weighted inner products ---
-    weights = repeat(weight_vec, nState)
-
-    # --- Preallocate output arrays ---
-    L = fill(RT(NaN), nFreq, nFreq, nmode_val)
-    T_budget = fill(RT(NaN), nFreq, nFreq, nmode_val)
-    P = Dict{Tuple{Int,Int}, NamedTuple}()
-    A_out = return_coefficients ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing
-    Xi_out = return_auxiliary_modes ? Dict{Tuple{Int,Int}, NamedTuple}() : nothing
-
-    # --- Main triad loop ---
-    _dispatch_triadic_loop!(
-        L, P, T_budget, A_out, Xi_out,
-        Q_hat, f_idx, fk_idx, fl_idx, fn_idx,
-        weights, nBlks, nFreq, nState, nx, nmode_val,
-        Q, LHS,
-        return_coefficients, return_auxiliary_modes;
-        execution=execution
-    )
-
-    return TriadicOrthogonalDecompositionResult(
-        f,
-        L,
-        P,
-        T_budget,
-        A_out,
-        Xi_out,
-    )
+    ws = TODWorkspace(X; window = window, weight = weight, noverlap = noverlap, dt = dt, Q = Q,
+                      LHS = LHS, nmode = nmode, nfreq = nfreq, isreal_data = isreal_data,
+                      mean_type = mean_type, spectral = spectral)
+    return triadic_orthogonal_decomposition!(ws, X; return_coefficients = return_coefficients,
+                                             return_auxiliary_modes = return_auxiliary_modes,
+                                             execution = execution)
 end
 
 end # module TriadicOrthogonalDecomposition

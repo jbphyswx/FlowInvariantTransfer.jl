@@ -910,6 +910,21 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test res32 isa FIT.TriadicOrthogonalDecompositionResult
         Test.@test eltype(res32.mode_bispectrum) === Float32
         Test.@test isapprox(Float64.(res32.frequencies), res_serial.frequencies; atol=1e-4)
+
+        # 8. In-place workspace form: bit-identical to the allocating path (same buffers/math), and a
+        # repeat call on a same-shaped snapshot reuses Q_hat / DFT plan / SVD scratch / L / T_budget.
+        ws = FIT.TODWorkspace(X; dt=dt_sig, spectral=FIT.FFTBackend())
+        ip = FIT.triadic_orthogonal_decomposition!(ws, X)
+        Test.@test ip isa FIT.TriadicOrthogonalDecompositionResult
+        Test.@test isequal(ip.mode_bispectrum, res_fft.mode_bispectrum)   # NaN-aware; exact
+        for k in keys(res_fft.modes)
+            Test.@test ip.modes[k].convective == res_fft.modes[k].convective
+        end
+        FIT.triadic_orthogonal_decomposition!(ws, X)  # warm
+        a_alloc = @allocated FIT.triadic_orthogonal_decomposition(X; dt=dt_sig, spectral=FIT.FFTBackend())
+        a_reuse = @allocated FIT.triadic_orthogonal_decomposition!(ws, X)
+        Test.@test a_reuse < a_alloc skip = (Base.JLOptions().code_coverage != 0)
+        Test.@test_throws DimensionMismatch FIT.triadic_orthogonal_decomposition!(ws, X[:, :, 1:end-1])
     end
 
     # -----------------------------------------------------------------------

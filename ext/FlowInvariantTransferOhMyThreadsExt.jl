@@ -157,6 +157,7 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
     weights, nBlks, nFreq, nState, nx, nmode,
     Q_nonlinear, LHS,
     return_coefficients, return_auxiliary_modes,
+    _sc, _sqrt_w, _inv_sqrt_w, _permbuf,   # serial-loop scratch (unused here: each task allocates its own)
 )
     nTriads = length(fk_idx)
     nStateNx = nState * nx
