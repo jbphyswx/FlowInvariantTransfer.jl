@@ -7,7 +7,7 @@ using FlowInvariantTransfer.Invariants: transfer_density!
 using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
 using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
 using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
-using LinearAlgebra: mul!
+using LinearAlgebra: LinearAlgebra
 
 # ---------------------------------------------------------------------------
 # FFT plan/scratch bundle + allocation-free nonlinear term
@@ -128,7 +128,7 @@ function FIT.NonlinearTerm._nonlinear_term_fft!(
     for j in 1:nd
         a_j = selectdim(advecting_hat, nd+1, j)
         truncate ? (ct .= keep .* a_j) : (ct .= a_j)
-        mul!(ct2, pb.p_bfft, ct)
+        LinearAlgebra.mul!(ct2, pb.p_bfft, ct)
         uj = selectdim(ws.u_phys, nd+1, j)
         uj .= real.(ct2)
     end
@@ -139,7 +139,7 @@ function FIT.NonlinearTerm._nonlinear_term_fft!(
         for j in 1:nd
             truncate ? (ct .= im .* pb.k_comp[j] .* keep .* v_c) :
                          (ct .= im .* pb.k_comp[j] .* v_c)
-            mul!(ct2, pb.p_bfft, ct)
+            LinearAlgebra.mul!(ct2, pb.p_bfft, ct)
             gcj = selectdim(selectdim(ws.grad_phys, nd+2, j), nd+1, c)
             gcj .= real.(ct2)
         end
@@ -160,7 +160,7 @@ function FIT.NonlinearTerm._nonlinear_term_fft!(
     for c in 1:M
         Nc = selectdim(ws.N_phys, nd+1, c)
         ct .= Nc
-        mul!(ct2, pb.p_fft, ct)
+        LinearAlgebra.mul!(ct2, pb.p_fft, ct)
         Nhat_c = selectdim(ws.N̂, nd+1, c)
         truncate ? (Nhat_c .= (ct2 .* keep) ./ Np) : (Nhat_c .= ct2 ./ Np)
     end
@@ -229,7 +229,7 @@ function FIT.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; adv
     # 1. Advecting velocity on the padded physical grid (spatial dirs only): u = bfft(embed(û)).
     for j in 1:nd
         _embed!(pad.spec, selectdim(advecting_hat, nd+1, j), emap)
-        mul!(pad.out, pad.p_bfft, pad.spec)
+        LinearAlgebra.mul!(pad.out, pad.p_bfft, pad.spec)
         selectdim(pad.u_phys, nd+1, j) .= real.(pad.out)
     end
 
@@ -241,7 +241,7 @@ function FIT.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; adv
         fill!(nc, zero(FT))
         for j in 1:nd
             _embed_deriv!(pad.spec, v_c, kc[j], emap)
-            mul!(pad.out, pad.p_bfft, pad.spec)
+            LinearAlgebra.mul!(pad.out, pad.p_bfft, pad.spec)
             g .= real.(pad.out)
             uj = selectdim(pad.u_phys, nd+1, j)
             @. nc += uj * g
@@ -252,7 +252,7 @@ function FIT.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; adv
     for c in 1:M
         nc = selectdim(pad.n_phys, nd+1, c)
         pad.spec .= nc                          # real → complex (fused, no allocation)
-        mul!(pad.out, pad.p_fft, pad.spec)      # DFT_Ms(𝒩_c)
+        LinearAlgebra.mul!(pad.out, pad.p_fft, pad.spec)      # DFT_Ms(𝒩_c)
         _truncate_scaled!(selectdim(ws.N̂, nd+1, c), pad.out, emap, invM)
     end
     return ws.N̂
@@ -345,14 +345,22 @@ end
 # Override TriadicOrthogonalDecomposition._temporal_block_dft_fft!
 # ---------------------------------------------------------------------------
 
-"""
-    _temporal_block_dft_fft!(dft_col, segment_col, window, win_weight, nDFT)
+# A reusable length-`nDFT` FFTW plan + windowed scratch, built once per `triadic_orthogonal_decomposition`
+# call and shared across every column — replacing the per-column `fft()` (which re-plans + allocates
+# on each of ~nBlks·nVar·nx calls).
+function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(nDFT, ::FIT.Types.FFTBackend, ::Type{CT}) where {CT}
+    windowed = Vector{CT}(undef, nDFT)
+    return (plan = FFTW.plan_fft(windowed), windowed = windowed)
+end
 
-FFTW-accelerated temporal block DFT for a single spatial point. Applies the window, transforms
-via FFTW, and normalizes — returning the DFT in **natural (unshifted) bin order** `0,1,…,nDFT-1`,
-exactly like the direct-sum path. The caller (`triadic_orthogonal_decomposition`) applies the
-single `fftshift` to centre the spectrum; this routine must NOT shift as well, or the result is
-shifted twice (a full wrap for even `nDFT`) and `Q_hat` ends up misaligned with the frequency axis.
+"""
+    _temporal_block_dft_fft!(dft_col, segment_col, window, win_weight, nDFT, ctx)
+
+FFTW-accelerated temporal block DFT for a single spatial point, through the reused plan/scratch `ctx`.
+Applies the window, transforms via FFTW, and normalizes — returning the DFT in **natural (unshifted)
+bin order** `0,1,…,nDFT-1`, exactly like the direct-sum path. The caller
+(`triadic_orthogonal_decomposition`) applies the single `fftshift`; this routine must NOT shift as
+well, or the result is shifted twice and `Q_hat` ends up misaligned with the frequency axis.
 """
 function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     dft_col,
@@ -360,9 +368,12 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     window,
     win_weight,
     nDFT,
+    ctx,
 )
-    windowed = segment_col .* window
-    dft_col .= FFTW.fft(windowed) .* (win_weight / nDFT)
+    windowed = ctx.windowed
+    @. windowed = segment_col * window
+    LinearAlgebra.mul!(dft_col, ctx.plan, windowed)
+    dft_col .*= (win_weight / nDFT)
     return dft_col
 end
 
@@ -390,7 +401,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
         out = Array{CT}(undef, ns..., C)
         @inbounds for c in 1:C
             for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
-            mul!(outbuf, p_bfft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
             for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
         end
         return out
@@ -400,7 +411,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
         out = Array{CT}(undef, ns..., C)
         @inbounds for c in 1:C
             for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
-            mul!(outbuf, p_fft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_fft, inbuf)
             for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
         end
         return out
@@ -410,7 +421,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
         g = Array{CT}(undef, ns..., C, nd)
         @inbounds for d in 1:nd, c in 1:C
             for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
-            mul!(outbuf, p_bfft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
             for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
         end
         return g
@@ -419,7 +430,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
     idft! = function (out, fh)
         @inbounds for c in 1:size(fh, nd + 1)
             for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
-            mul!(outbuf, p_bfft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
             for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
         end
         return out
@@ -427,7 +438,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
     dft! = function (out, fp)
         @inbounds for c in 1:size(fp, nd + 1)
             for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
-            mul!(outbuf, p_fft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_fft, inbuf)
             for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
         end
         return out
@@ -435,7 +446,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {
     grad! = function (g, fh)
         @inbounds for d in 1:nd, c in 1:size(fh, nd + 1)
             for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
-            mul!(outbuf, p_bfft, inbuf)
+            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
             for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
         end
         return g

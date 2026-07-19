@@ -40,6 +40,11 @@ function _temporal_block_dft_fft!(args...; kwargs...)
         "FFT-accelerated temporal DFT requires FFTW. Run `using FFTW` to load the extension."))
 end
 
+# Reusable temporal-DFT plan (+ scratch), built once per call and shared across all the per-column
+# DFTs — otherwise `fft()` re-plans and allocates on every column. `nothing` for the direct-sum path
+# (which needs no plan) and the FFT path when FFTW is not loaded; the FFTW extension overrides it.
+_temporal_dft_plan(nDFT, backend, ::Type) = nothing
+
 """
     _triadic_loop_threaded!(args...; kwargs...)
 
@@ -416,18 +421,21 @@ end
 # `qr!`, `eigen!`, and the thin `Matrix(Q)`/eigenvector arrays are the residual per-triad allocs
 # (all O(nBlks²), small); the large O(nStateNx·nBlks) products are the ones eliminated here.
 struct _TriadSVDScratch{M<:AbstractMatrix}
-    Xw::M    # nBlks × nStateNx      — (Q̂_n·√w)ᴴ / nBlks
-    Q3::M    # nStateNx × nBlks      — Q̂_kl·√w   (consumed by qr!)
-    Y::M     # r × nStateNx          — R · Xw
-    Mmat::M  # r × r                 — Y · Yᴴ
-    Ubuf::M  # nStateNx × r          — convective modes (view [:,1:nz] returned)
-    Vbuf::M  # nStateNx × r          — recipient modes  (view [:,1:nz] returned)
+    Xw::M     # nBlks × nStateNx      — (Q̂_n·√w)ᴴ / nBlks
+    Q3::M     # nStateNx × nBlks      — Q̂_kl·√w   (consumed by qr!)
+    Qmat::M   # nStateNx × r          — thin Q (materialized via lmul! into this buffer)
+    Y::M      # r × nStateNx          — R · Xw
+    Mmat::M   # r × r                 — Y · Yᴴ
+    Uperm::M  # r × r                 — eigenvectors, columns reordered by descending eigenvalue
+    Ubuf::M   # nStateNx × r          — convective modes (view [:,1:nz] returned)
+    Vbuf::M   # nStateNx × r          — recipient modes  (view [:,1:nz] returned)
 end
 function _TriadSVDScratch(::Type{CT}, nStateNx::Int, nBlks::Int) where {CT}
     r = min(nStateNx, nBlks)
     return _TriadSVDScratch(
-        zeros(CT, nBlks, nStateNx), zeros(CT, nStateNx, nBlks), zeros(CT, r, nStateNx),
-        zeros(CT, r, r), zeros(CT, nStateNx, r), zeros(CT, nStateNx, r),
+        zeros(CT, nBlks, nStateNx), zeros(CT, nStateNx, nBlks), zeros(CT, nStateNx, r),
+        zeros(CT, r, nStateNx), zeros(CT, r, r), zeros(CT, r, r),
+        zeros(CT, nStateNx, r), zeros(CT, nStateNx, r),
     )
 end
 
@@ -447,9 +455,15 @@ function _triadic_svd_serial!(sc::_TriadSVDScratch, sqrt_w, inv_sqrt_w, Q_hat_n,
             Q3[i, b] = Q_hat_kl[i, b] * wi
         end
     end
-    # Q3 = QR ; Y = R · Xw
+    # Q3 = QR ; thin Q into sc.Qmat via lmul! (bit-identical to Matrix(F.Q), reuses the buffer) ; Y = R · Xw
+    r = min(nStateNx, nBlks)
     F = LinearAlgebra.qr!(Q3)
-    Qmat = Matrix(F.Q)                       # thin Q (nStateNx × r); residual small alloc
+    Qmat = sc.Qmat
+    fill!(Qmat, zero(eltype(Qmat)))
+    @inbounds for i in 1:r
+        Qmat[i, i] = one(eltype(Qmat))
+    end
+    LinearAlgebra.lmul!(F.Q, Qmat)
     Y = sc.Y
     LinearAlgebra.mul!(Y, F.R, Xw)
     # Method-of-snapshots SVD of Y: eig(Y·Yᴴ), sort ↓, recover V = Yᴴ·U·diag(1/√λ)
@@ -459,15 +473,20 @@ function _triadic_svd_serial!(sc::_TriadSVDScratch, sqrt_w, inv_sqrt_w, Q_hat_n,
     λ = real.(eig.values)
     Uev = eig.vectors
     perm = sortperm(λ; rev = true)
+    # Reorder eigenvector columns by descending eigenvalue into sc.Uperm (reused) — avoids the
+    # Uev[:,perm] and U_trunc[:,1:nz] copies (each O(nBlks²)).
+    Uperm = sc.Uperm
+    @inbounds for j in 1:r, i in 1:r
+        Uperm[i, j] = Uev[i, perm[j]]
+    end
     λ = λ[perm]
-    Uev = Uev[:, perm]
     λ = max.(λ, 0)
     sqrt_λ = sqrt.(λ)
     nz = count(>(eps(RT) * 100), sqrt_λ)
     if nz == 0
         return view(sc.Ubuf, :, 1:0), similar(sqrt_λ, 0), view(sc.Vbuf, :, 1:0)
     end
-    U_trunc = Uev[:, 1:nz]
+    U_trunc = view(Uperm, :, 1:nz)
     s = sqrt_λ[1:nz]
     Vv = view(sc.Vbuf, :, 1:nz)
     LinearAlgebra.mul!(Vv, Y', U_trunc)      # V = Yᴴ · U_trunc
@@ -712,6 +731,7 @@ function triadic_orthogonal_decomposition(
     # Temporal-DFT transform is chosen by the spectral backend.
     dft_backend = spectral
     shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
+    dft_plan = _temporal_dft_plan(nDFT, dft_backend, CT)   # built once; reused across every column
 
     # Reusable per-block/column scratch — avoids per-column allocation in the hot DFT loop.
     segment  = Array{CT}(undef, nDFT, nx)
@@ -743,7 +763,7 @@ function triadic_orthogonal_decomposition(
             # Apply window, DFT, normalize, fftshift → (nDFT,) per spatial point.
             for ix in 1:nx
                 if dft_backend isa FFTBackend
-                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT)
+                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT, dft_plan)
                 else
                     @inbounds for t in 1:nDFT; windowed[t] = segment[t, ix] * window_vec[t]; end
                     @inbounds for freq_k in 1:nDFT
