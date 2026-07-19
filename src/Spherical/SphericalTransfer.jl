@@ -2,7 +2,7 @@ module Spherical
 
 using ..Types: SphericalTransferResult
 
-export calculate_spherical_transfer
+export calculate_spherical_transfer, calculate_spherical_transfer!, SphericalTransferWorkspace
 
 # ---------------------------------------------------------------------------
 # Spectral energy/enstrophy transfer for 2D non-divergent (barotropic) flow on the sphere.
@@ -30,6 +30,46 @@ packages provides the method. Prefer the unified `calculate_energy_transfer(Sphe
 function calculate_spherical_transfer end
 
 """
+    calculate_spherical_transfer!(ws::SphericalTransferWorkspace, vorticity; kwargs...) -> SphericalTransferResult
+
+In-place spherical spectral transfer reusing `ws`. Implemented in the FastSphericalHarmonics /
+NUFSHT extensions. Reuses the workspace's spectral work arrays, per-mode reduction buffers, and the
+result vectors, so a repeat call on the same grid re-allocates only what the underlying transform
+library itself allocates (FastSphericalHarmonics has no in-place transform API — that portion is an
+irreducible floor). Build the workspace once with [`SphericalTransferWorkspace`](@ref).
+"""
+function calculate_spherical_transfer! end
+
+"""
+    SphericalTransferWorkspace(lmax; ...)
+
+Reusable buffers for [`calculate_spherical_transfer!`](@ref). Constructed by the FastSphericalHarmonics
+(regular grid) or NUFSHT (scattered) extension; loading one provides the constructor. The buffer
+fields are typed via parameters so the core names no extension type.
+"""
+struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, RES, R}
+    Cζ::CW           # spectral work array — vorticity coefficients (extension layout)
+    Cψ::CW           # spectral work array — streamfunction coefficients
+    Gψ::GC           # complex spin-1 gradient ðψ on the grid (reused)
+    Gζ::GC           # complex spin-1 gradient ðζ on the grid (reused)
+    J::JW            # Jacobian A = J(ψ,ζ) on the (dealiased) grid
+    degs::IV         # per-mode degree l
+    ψv::RV           # per-mode ψ̂ (reduction input)
+    ζv::RV           # per-mode ζ̂
+    Av::RV           # per-mode Â
+    result::RES      # reused SphericalTransferResult (TE/TZ/ΠE/ΠZ)
+    radius::R
+    lmax::Int
+    dealias::Bool
+end
+
+function SphericalTransferWorkspace(args...; kwargs...)
+    throw(ArgumentError(
+        "SphericalTransferWorkspace requires a spherical-transform extension. " *
+        "Run `using FastSphericalHarmonics` (regular grid) or `using NUFSHT` (scattered)."))
+end
+
+"""
     spherical_transfer_reduce(degree_of_mode, ψ_lm, ζ_lm, A_lm, lmax) -> SphericalTransferResult
 
 Shared degree-spectrum reduction (extension-agnostic). Given, over every `(l,m)` mode `i`,
@@ -50,24 +90,43 @@ function spherical_transfer_reduce(
     lmax::Integer,
 )
     FT = real(eltype(A_lm))
-    TE = zeros(FT, lmax + 1)
-    TZ = zeros(FT, lmax + 1)
+    result = SphericalTransferResult(
+        collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1))
+    return spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm)
+end
+
+"""
+    spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm) -> result
+
+In-place degree-spectrum reduction: writes `T_E`/`T_Z` and the cumulative fluxes into the
+preallocated `result` vectors (which are zeroed first), reusing them across calls.
+"""
+function spherical_transfer_reduce!(
+    result::SphericalTransferResult,
+    degree_of_mode::AbstractVector{<:Integer},
+    ψ_lm::AbstractVector,
+    ζ_lm::AbstractVector,
+    A_lm::AbstractVector,
+)
+    TE = result.energy_transfer
+    TZ = result.enstrophy_transfer
+    fill!(TE, zero(eltype(TE)))
+    fill!(TZ, zero(eltype(TZ)))
     @inbounds for i in eachindex(degree_of_mode)
         l = degree_of_mode[i]
         a = A_lm[i]
         TE[l + 1] += -real(conj(ψ_lm[i]) * a)
         TZ[l + 1] +=  real(conj(ζ_lm[i]) * a)
     end
-    ΠE = _neg_cumsum(TE)
-    ΠZ = _neg_cumsum(TZ)
-    degrees = collect(FT, 0:lmax)
-    return SphericalTransferResult(degrees, TE, TZ, ΠE, ΠZ)
+    _neg_cumsum!(result.energy_flux, TE)
+    _neg_cumsum!(result.enstrophy_flux, TZ)
+    return result
 end
 
-# Π(L) = -Σ_{l≤L} T(l)  (matches the Cartesian SpectralFlux flux convention).
-function _neg_cumsum(T::AbstractVector{FT}) where {FT}
-    Π = similar(T)
-    acc = zero(FT)
+# Π(L) = -Σ_{l≤L} T(l)  (matches the Cartesian SpectralFlux flux convention), into a preallocated Π.
+function _neg_cumsum!(Π::AbstractVector, T::AbstractVector)
+    acc = zero(eltype(Π))
     @inbounds for i in eachindex(T)
         acc += T[i]
         Π[i] = -acc

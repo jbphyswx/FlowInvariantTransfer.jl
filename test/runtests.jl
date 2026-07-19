@@ -1409,6 +1409,23 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
         # Grid-shape guard.
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), randn(N, N))
+
+        # In-place workspace form: matches the allocating path exactly (same math), and a repeat call
+        # reuses the embed/gradient/Jacobian/reduction buffers — the FastSphericalHarmonics transforms
+        # (no in-place API) are the irreducible floor, so this saves the FIT-side portion, not all of it.
+        ws = FIT.SphericalTransferWorkspace(lmax; radius = 1.0, dealias = true)
+        ip = FIT.calculate_spherical_transfer!(ws, ζ)
+        Test.@test ip isa FIT.SphericalTransferResult
+        Test.@test ip.energy_transfer == res.energy_transfer
+        Test.@test ip.enstrophy_transfer == res.enstrophy_transfer
+        Test.@test ip.energy_flux == res.energy_flux
+        Test.@test abs(sum(ip.enstrophy_transfer)) < 1e-12 * scaleZ
+        FIT.calculate_spherical_transfer!(ws, ζ)  # warm
+        a_fresh = @allocated FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζ)
+        a_reuse = @allocated FIT.calculate_spherical_transfer!(ws, ζ)
+        Test.@test a_reuse < a_fresh skip = (Base.JLOptions().code_coverage != 0)
+        # Workspace grid must match the field.
+        Test.@test_throws ArgumentError FIT.calculate_spherical_transfer!(ws, randn(N, N))
     end
 
     # -----------------------------------------------------------------------

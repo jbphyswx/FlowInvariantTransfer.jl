@@ -2,8 +2,8 @@ module FlowInvariantTransferFSHExt
 
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SphericalTransferMethod
-using FlowInvariantTransfer.Spherical: spherical_transfer_reduce
+using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult
+using FlowInvariantTransfer.Spherical: spherical_transfer_reduce, spherical_transfer_reduce!
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer on a regular colatitude–longitude grid, via
@@ -20,10 +20,15 @@ using FlowInvariantTransfer.Spherical: spherical_transfer_reduce
 # ---------------------------------------------------------------------------
 
 # ðf = -(∂_θ + i/sinθ ∂_φ)f as a complex field, from real spin-0 coefficients `C0`.
-function _sph_grad(C0::AbstractMatrix{<:Real})
+# `spinsph_eth`/`spinsph_evaluate` allocate internally (FSH has no in-place API — floor); the
+# assembled complex grid is written into the caller-provided `out` buffer.
+function _sph_grad!(out::AbstractMatrix{<:Complex}, C0::AbstractMatrix{<:Real})
     ðC = FSH.spinsph_eth(C0, 0)             # Array{SVector{2,Float64},2}
     G  = FSH.spinsph_evaluate(ðC, 1)        # SVector(re, im) of ðf at each grid point
-    return [complex(G[i, j][1], G[i, j][2]) for i in axes(G, 1), j in axes(G, 2)]
+    @inbounds for j in axes(G, 2), i in axes(G, 1)
+        out[i, j] = complex(G[i, j][1], G[i, j][2])
+    end
+    return out
 end
 
 """
@@ -44,6 +49,73 @@ so the retained transfers `l ≤ lmax` are alias-free and conserve `Σ_l T_E = �
 precision. `dealias=false` computes on the native grid (aliased; conservation only for fields
 band-limited well below `lmax`). Requires `using FastSphericalHarmonics`.
 """
+# Build the reusable work arrays for a given resolution. FastSphericalHarmonics is Float64-only, so
+# every buffer is Float64. `dealias` fixes the work-grid size (2·lmax vs lmax), so it is a
+# workspace-level choice. The FSH transforms themselves (spinsph_transform/eth/evaluate) allocate
+# internally on every call — no in-place API — so that portion is an irreducible floor; the workspace
+# reuses the embed/Jacobian/reduction buffers (~20% of the per-call allocation here).
+function FIT.SphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true)
+    lwork = dealias ? 2 * lmax : lmax
+    Nwork = lwork + 1
+    Cζ = zeros(Float64, Nwork, 2Nwork - 1)
+    Cψ = zeros(Float64, Nwork, 2Nwork - 1)
+    Gψ = zeros(ComplexF64, Nwork, 2Nwork - 1)
+    Gζ = zeros(ComplexF64, Nwork, 2Nwork - 1)
+    J  = zeros(Float64, Nwork, 2Nwork - 1)
+    nmode = (lmax + 1)^2
+    degs = Vector{Int}(undef, nmode)
+    ψv = Vector{Float64}(undef, nmode)
+    ζv = Vector{Float64}(undef, nmode)
+    Av = Vector{Float64}(undef, nmode)
+    result = SphericalTransferResult(
+        collect(Float64, 0:lmax), zeros(Float64, lmax + 1), zeros(Float64, lmax + 1),
+        zeros(Float64, lmax + 1), zeros(Float64, lmax + 1))
+    return FIT.Spherical.SphericalTransferWorkspace(
+        Cζ, Cψ, Gψ, Gζ, J, degs, ψv, ζv, Av, result, Float64(radius), Int(lmax), dealias)
+end
+
+function FIT.calculate_spherical_transfer!(
+    ws::FIT.Spherical.SphericalTransferWorkspace,
+    vorticity::AbstractMatrix{<:Real},
+)
+    lmax = ws.lmax
+    Nθ, Nφ = size(vorticity)
+    (Nθ == lmax + 1 && Nφ == 2lmax + 1) || throw(ArgumentError(
+        "vorticity size $((Nθ, Nφ)) does not match the workspace lmax=$lmax grid (lmax+1, 2lmax+1)."))
+    a = ws.radius
+
+    # ζ̂_lm (real spinsph(0) layout) — FSH-internal allocation (floor).
+    Cζ0 = FSH.spinsph_transform(Matrix{Float64}(vorticity), 0)
+
+    # Embed into the (dealiased) work grid, recovering ψ = ∇⁻²ζ mode-by-mode. Reuses ws.Cζ/ws.Cψ.
+    fill!(ws.Cζ, 0.0)
+    fill!(ws.Cψ, 0.0)
+    @inbounds for l in 0:lmax, m in -l:l
+        i = FSH.spinsph_mode(0, l, m)
+        ws.Cζ[i] = Cζ0[i]
+        l ≥ 1 && (ws.Cψ[i] = -a^2 / (l * (l + 1)) * Cζ0[i])
+    end
+
+    # A = J(ψ,ζ) = (1/a²) Im{ conj(ðψ)·ðζ }. The eth transforms are FSH-internal (floor); the assembled
+    # complex gradients (ws.Gψ/ws.Gζ) and ws.J are reused.
+    _sph_grad!(ws.Gψ, ws.Cψ)
+    _sph_grad!(ws.Gζ, ws.Cζ)
+    @. ws.J = imag(conj(ws.Gψ) * ws.Gζ) / a^2
+    CA = FSH.spinsph_transform(ws.J, 0)                            # Â_lm — FSH-internal (floor)
+
+    # Flatten to per-mode arrays (reused) and reduce into the reused result vectors.
+    k = 0
+    @inbounds for l in 0:lmax, m in -l:l
+        k += 1
+        i = FSH.spinsph_mode(0, l, m)
+        ws.degs[k] = l
+        ws.ψv[k] = ws.Cψ[i]
+        ws.ζv[k] = ws.Cζ[i]
+        ws.Av[k] = CA[i]
+    end
+    return spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
+end
+
 function FIT.calculate_energy_transfer(
     method::SphericalTransferMethod,
     vorticity::AbstractMatrix{<:Real};
@@ -53,50 +125,8 @@ function FIT.calculate_energy_transfer(
     Nθ, Nφ = size(vorticity)
     Nφ == 2Nθ - 1 || throw(ArgumentError(
         "vorticity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
-    lmax = Nθ - 1
-    a = float(method.radius)
-
-    # FastSphericalHarmonics (a double-precision FastTransforms C library) is Float64-only — its
-    # spinsph_transform/eth/evaluate accept only `Array{Float64}`/`Array{Complex{Float64}}` — so this
-    # path necessarily computes (and returns) in Float64 regardless of the input element type.
-    Cζ0 = FSH.spinsph_transform(Matrix{Float64}(vorticity), 0)     # ζ̂_lm (real, spinsph(0) layout)
-
-    # Dealiasing: evaluate the quadratic Jacobian on a grid resolving 2·lmax (exact for a product of
-    # two lmax-band-limited fields), then keep l ≤ lmax. Embed mode-by-mode — spinsph_mode(s,l,m) is
-    # grid-size-independent, but the unused entries of a smaller coefficient array must NOT be copied
-    # (they map to valid higher-degree modes on the larger grid).
-    lwork = dealias ? 2 * lmax : lmax
-    Nwork = lwork + 1
-    Cζ = zeros(Float64, Nwork, 2Nwork - 1)
-    Cψ = zeros(Float64, Nwork, 2Nwork - 1)
-    @inbounds for l in 0:lmax, m in -l:l
-        i = FSH.spinsph_mode(0, l, m)
-        Cζ[i] = Cζ0[i]
-        l ≥ 1 && (Cψ[i] = -a^2 / (l * (l + 1)) * Cζ0[i])          # ψ = ∇⁻²ζ  (l=0 → 0)
-    end
-
-    # A = J(ψ,ζ) = (1/a²) Im{ conj(ðψ)·ðζ }, evaluated on the (dealiased) work grid.
-    Gψ = _sph_grad(Cψ)
-    Gζ = _sph_grad(Cζ)
-    J = @. imag(conj(Gψ) * Gζ) / a^2
-    CA = FSH.spinsph_transform(J, 0)                               # Â_lm on the work grid
-
-    # Reduce over the resolved input degrees l ≤ lmax (higher work-grid modes carry no ψ/ζ content).
-    nmode = (lmax + 1)^2
-    degs = Vector{Int}(undef, nmode)
-    ψv = Vector{Float64}(undef, nmode)
-    ζv = Vector{Float64}(undef, nmode)
-    Av = Vector{Float64}(undef, nmode)
-    k = 0
-    @inbounds for l in 0:lmax, m in -l:l
-        k += 1
-        i = FSH.spinsph_mode(0, l, m)
-        degs[k] = l
-        ψv[k] = Cψ[i]
-        ζv[k] = Cζ[i]
-        Av[k] = CA[i]
-    end
-    return spherical_transfer_reduce(degs, ψv, ζv, Av, lmax)
+    ws = FIT.SphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias)
+    return FIT.calculate_spherical_transfer!(ws, vorticity)
 end
 
 end # module FlowInvariantTransferFSHExt
