@@ -57,6 +57,18 @@ function _alloc_comp!(ws, û, ρ̂, ks, b)
     FIT.calculate_compressible_flux!(ws, û, ρ̂, ks; binning=b)
     return @allocated FIT.calculate_compressible_flux!(ws, û, ρ̂, ks; binning=b)
 end
+function _alloc_scalar_flux!(res, ws, û, θ̂, ks, sidx)
+    FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx)
+    return @allocated FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx)
+end
+function _alloc_scalar_m2m!(res, ws, ûp, û, θ̂, ks)
+    FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks)
+    return @allocated FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks)
+end
+function _alloc_partial!(ws, û, ks, b, decomp)
+    FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
+    return @allocated FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
+end
 
 Test.@testset "Allocations" begin
     L = 2π
@@ -145,6 +157,18 @@ Test.@testset "Allocations" begin
         bws   = FIT.BandTransferWorkspace(û2, ks2, bands)
         Tb    = zeros(2, 2); netb = zeros(2)
         Test.@test _alloc_band!(Tb, netb, bws, û2, ks2) == 0 skip = _ALLOC_COV
+        # scalar flux!
+        wsf   = FIT.SpectralFluxWorkspace(θ̂c, ks2, b2)
+        kmag  = FIT.shell_coordinate(FIT.IsotropicShells(), ks2)
+        edges = FIT.shell_edges(b2, maximum(kmag)); sidx = FIT.assign_shells(kmag, edges)
+        centers = collect(FIT.shell_centers(b2, maximum(kmag)))
+        resf  = FIT.SpectralFluxResult(centers, similar(centers), similar(centers))
+        Test.@test _alloc_scalar_flux!(resf, wsf, û2, θ̂c, ks2, sidx) == 0 skip = _ALLOC_COV
+        # scalar mode-to-mode!  (delegates to the 0-alloc mode-to-mode! with PassiveScalar)
+        wssm  = FIT.NonlinearTermWorkspace(θ̂c, ks2); ûps = similar(θ̂c)
+        Ssc   = similar(û2, Float64, ns..., ns...); netsc = similar(û2, Float64, ns...)
+        ressm = FIT.ModeToModeTriadResult(FIT.PassiveScalar(), ks2, netsc, Ssc)
+        Test.@test _alloc_scalar_m2m!(ressm, wssm, ûps, û2, θ̂c, ks2) == 0 skip = _ALLOC_COV
     end
 
     Test.@testset "compressible! — reuses workspace (field intermediates not reallocated)" begin
@@ -153,5 +177,21 @@ Test.@testset "Allocations" begin
         wsc = FIT.CompressibleWorkspace(û2, ks2)
         # ~34× field (shell-binning setup + per-shell result vectors); NOT the 93× of the allocating form.
         Test.@test _alloc_comp!(wsc, û2, ρ̂, ks2, b2) <= 45fb skip = _ALLOC_COV
+    end
+
+    Test.@testset "bounded in-place variants — one shared workspace, output-only allocation" begin
+        # partial_fluxes! reuses ONE NonlinearTermWorkspace across every decomposition-channel pair
+        # (the allocating form built a fresh workspace per pair); only the channel/total result vectors
+        # and the decomposition components remain (output). Helmholtz split needs the loaded ext.
+        fb = sizeof(û2)
+        wsp = FIT.NonlinearTermWorkspace(û2, ks2)
+        Test.@test _alloc_partial!(wsp, û2, ks2, b2, FIT.HelmholtzDecomposition()) <= 15fb skip = _ALLOC_COV
+
+        # TOD serial loop: per-triad SVD scratch reused across triads; residual is the eigen!/qr! LAPACK
+        # internals + the per-triad output-mode matrices stored in the result (both inherent).
+        X = randn(64, 2, 8) .+ 0.1
+        FIT.triadic_orthogonal_decomposition(X; nmode=3, spectral=FIT.FFTBackend())  # warmup
+        Test.@test (@allocated FIT.triadic_orthogonal_decomposition(X; nmode=3, spectral=FIT.FFTBackend())) <=
+            260 * sizeof(X) skip = _ALLOC_COV
     end
 end
