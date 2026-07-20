@@ -3,11 +3,12 @@ module FlowInvariantTransferDistributedExt
 using Distributed: Distributed
 using SharedArrays: SharedArrays
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: DistributedBackend, ThreadedBackend, ShellToShellResult, AbstractInvariant, KineticEnergy, local_backend
+using FlowInvariantTransfer.Backends: DistributedBackend, ThreadedBackend, local_backend
+using FlowInvariantTransfer.Types: ShellToShellResult, AbstractInvariant, KineticEnergy
 using FlowInvariantTransfer.ShellBinning: assign_shells
 
-# Distributed Shell-to-Shell Transfer Implementation
-function FIT.ShellToShellTransfer._calculate_shell_to_shell!(
+# Distributed Shell-to-Shell Transfer Implementation (overrides the core `_shell_to_shell_distributed!` stub)
+function FIT.ShellToShellTransfer._shell_to_shell_distributed!(
     result::ShellToShellResult,
     ws::FIT.Workspaces.ShellToShellWorkspace,
     velocity_hat,
@@ -115,7 +116,7 @@ function FIT.SpectralFlux._spectral_flux_distributed!(
 end
 
 # Helper function executed on worker processes for Shell-to-Shell
-function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat, inner=FIT.Types.SerialBackend())
+function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat, inner=FIT.Backends.SerialBackend())
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     M  = size(velocity_hat, nd+1)   # components of the binned/carried primary field
@@ -166,6 +167,44 @@ function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, 
         end
     end
     return col
+end
+
+# ---------------------------------------------------------------------------
+# Distributed Triadic Orthogonal Decomposition (overrides the core `_triadic_loop_distributed!` stub).
+# Triads are independent, so they are distributed over worker processes with `@distributed (vcat)`: each
+# worker runs `_triad_result` (the SAME allocation-reusing SVD as the serial loop → bit-identical) for
+# its triads and ships the per-triad outputs back; the master assembles L / T_budget / P (and the
+# optional A_out / Xi_out). Only plain arrays are captured by the closure (Q_hat, weights, indices),
+# never the workspace (whose FFT-plan bundle workers may not be able to deserialize). Worker processes
+# must have `using FlowInvariantTransfer` loaded.
+function FIT.TriadicOrthogonalDecomposition._triadic_loop_distributed!(
+    L, P, T_budget, A_out, Xi_out,
+    Q_hat, f_idx, fk_idx, fl_idx, fn_idx,
+    weights, nBlks, nFreq, nState, nx, nmode,
+    Q_nonlinear, LHS,
+    return_coefficients, return_auxiliary_modes,
+    _sc, sqrt_w, inv_sqrt_w, _permbuf, _permbuf_kl,
+    execution::DistributedBackend,
+)
+    nTriads = length(fk_idx)
+    results = Distributed.@distributed (vcat) for i in 1:nTriads
+        [FIT.TriadicOrthogonalDecomposition._triad_result(
+            i, Q_hat, fk_idx, fl_idx, fn_idx, weights, sqrt_w, inv_sqrt_w,
+            nBlks, nState, nx, nmode, Q_nonlinear, LHS,
+            return_coefficients, return_auxiliary_modes)]
+    end
+    for r in results
+        @inbounds for j in 1:r.nm
+            L[r.fi_l, r.fi_n, j] = r.s[j]
+            T_budget[r.fi_l, r.fi_n, j] = r.Tb[j]
+        end
+        P[(r.fi_l, r.fi_n)] = (convective = r.u, recipient = r.v)
+        if return_coefficients
+            A_out[(r.fi_l, r.fi_n)] = (convective = r.A_conv, recipient = r.A_recip)
+            return_auxiliary_modes && (Xi_out[(r.fi_l, r.fi_n)] = (donor = r.donor, catalyst = r.catalyst))
+        end
+    end
+    return nothing
 end
 
 end # module

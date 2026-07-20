@@ -18,19 +18,20 @@ using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using NUFSHT: NUFSHT
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using JLArrays: JLArrays   # reference GPU-array backend: allowscalar(false) → catches non-device-generic code
 
 Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
     # -----------------------------------------------------------------------
     Test.@testset "Aqua Code Quality" begin
-        Aqua.test_all(FIT; ambiguities = false, stale_deps = (ignore=[:Documenter],))
+        Aqua.test_all(FIT; ambiguities = true, stale_deps = (ignore=[:Documenter],))
     end
 
     # -----------------------------------------------------------------------
     Test.@testset "Utils — wavenumber_grid" begin
         N = 8
         L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         Test.@test length(ks) == 2
         Test.@test length(ks[1]) == N
         # FFTW order: ks[1] should contain 0, 1, 2, 3, -4, -3, -2, -1 * (2π/L)
@@ -39,7 +40,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(ks[1][2], dk, atol=1e-14)
         Test.@test isapprox(ks[1][N], -dk, atol=1e-14)
 
-        k_mag = FIT.wavenumber_magnitude_grid(ks)
+        k_mag = FIT.Utils.wavenumber_magnitude_grid(ks)
         Test.@test size(k_mag) == (N, N)
         Test.@test all(k_mag .>= 0)
         Test.@test isapprox(k_mag[1, 1], 0.0)
@@ -48,7 +49,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "Utils — dealiasing_mask" begin
         N = 12
-        mask = FIT.dealiasing_mask((N, N))
+        mask = FIT.Utils.dealiasing_mask((N, N))
         Test.@test size(mask) == (N, N)
         # All modes with |k_d| >= N/3 = 4 along any dim should be zeroed
         # k_idx=0:3 kept, 4:8 removed (FFTW order: 0..N/2 then -(N/2-1)..-1)
@@ -60,17 +61,17 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "ShellBinning — LinearBinning" begin
         b = FIT.LinearBinning(1.0)
-        edges = FIT.shell_edges(b, 5.0)
+        edges = FIT.ShellBinning.shell_edges(b, 5.0)
         Test.@test edges[1] == 0.0
         Test.@test edges[end] >= 5.0
-        centers = FIT.shell_centers(b, 5.0)
+        centers = FIT.ShellBinning.shell_centers(b, 5.0)
         Test.@test length(centers) == length(edges) - 1
         Test.@test all(diff(centers) .> 0)
     end
 
     Test.@testset "ShellBinning — LogarithmicBinning" begin
         b = FIT.LogarithmicBinning(1.0, 2.0)
-        edges = FIT.shell_edges(b, 16.0)
+        edges = FIT.ShellBinning.shell_edges(b, 16.0)
         Test.@test edges[1] == 1.0
         Test.@test issorted(edges)
         Test.@test all(edges[2:end] ./ edges[1:end-1] .≈ 2.0)
@@ -80,22 +81,22 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         k_max = 16.0
         b_d = FIT.DyadicBinning(1.0)
         b_l = FIT.LogarithmicBinning(1.0, 2.0)
-        Test.@test FIT.shell_edges(b_d, k_max) == FIT.shell_edges(b_l, k_max)
+        Test.@test FIT.ShellBinning.shell_edges(b_d, k_max) == FIT.ShellBinning.shell_edges(b_l, k_max)
     end
 
     Test.@testset "ShellBinning — CustomBinning" begin
         edges = [0.0, 1.0, 3.0, 6.0, 10.0]
         b = FIT.CustomBinning(edges)
-        Test.@test FIT.shell_edges(b, 10.0) == edges
-        Test.@test FIT.n_shells(b, 10.0) == 4
+        Test.@test FIT.ShellBinning.shell_edges(b, 10.0) == edges
+        Test.@test FIT.ShellBinning.n_shells(b, 10.0) == 4
     end
 
     Test.@testset "ShellBinning — assign_shells" begin
-        ks = FIT.wavenumber_grid((8,), (2π,))
-        k_mag_1d = FIT.wavenumber_magnitude_grid(ks)
+        ks = FIT.Utils.wavenumber_grid((8,), (2π,))
+        k_mag_1d = FIT.Utils.wavenumber_magnitude_grid(ks)
         b = FIT.LinearBinning(2π / 8)
-        edges = FIT.shell_edges(b, maximum(k_mag_1d))
-        idx = FIT.assign_shells(k_mag_1d, edges)
+        edges = FIT.ShellBinning.shell_edges(b, maximum(k_mag_1d))
+        idx = FIT.ShellBinning.assign_shells(k_mag_1d, edges)
         Test.@test size(idx) == size(k_mag_1d)
         Test.@test eltype(idx) === Int
         Test.@test all(0 .<= idx .<= length(edges) - 1)  # 0 = outside all shells
@@ -106,21 +107,21 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "Filters — spectral responses" begin
         k = 2.0; ℓ = 1.0
         # SharpSpectralFilter: passes k < π/ℓ ≈ 3.14
-        Test.@test FIT.filter_response(FIT.SharpSpectralFilter(), k, ℓ) == 1.0
-        Test.@test FIT.filter_response(FIT.SharpSpectralFilter(), 4.0, ℓ) == 0.0
+        Test.@test FIT.Filters.filter_response(FIT.SharpSpectralFilter(), k, ℓ) == 1.0
+        Test.@test FIT.Filters.filter_response(FIT.SharpSpectralFilter(), 4.0, ℓ) == 0.0
         # GaussianFilter: always in (0,1], decays with k
-        g1 = FIT.filter_response(FIT.GaussianFilter(), k, ℓ)
-        g2 = FIT.filter_response(FIT.GaussianFilter(), 4.0, ℓ)
+        g1 = FIT.Filters.filter_response(FIT.GaussianFilter(), k, ℓ)
+        g2 = FIT.Filters.filter_response(FIT.GaussianFilter(), 4.0, ℓ)
         Test.@test 0.0 < g2 < g1 <= 1.0
         # TopHatFilter: sinc, = 1 at k=0
-        Test.@test FIT.filter_response(FIT.TopHatFilter(), 0.0, ℓ) ≈ 1.0
+        Test.@test FIT.Filters.filter_response(FIT.TopHatFilter(), 0.0, ℓ) ≈ 1.0
     end
 
     Test.@testset "Filters — apply_filter_spectral!" begin
         k_mag = Float64[0, 1, 2, 3, 4]
         û_in  = ComplexF64[1.0, 1.0, 1.0, 1.0, 1.0]
         û_out = similar(û_in)
-        FIT.apply_filter_spectral!(û_out, û_in, k_mag, FIT.SharpSpectralFilter(), 1.0)
+        FIT.Filters.apply_filter_spectral!(û_out, û_in, k_mag, FIT.SharpSpectralFilter(), 1.0)
         # SharpSpectralFilter passes k < π/ℓ = π ≈ 3.14
         # k=0,1,2,3 < π → pass; k=4 > π → zeroed
         Test.@test û_out[1] ≈ 1.0  # k=0 passes
@@ -140,7 +141,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         û[N, 1] = 0.5 * N   # conjugate symmetric part
         # Divide by N to get FFTW-normalised coefficients
         û ./= N
-        ks = FIT.wavenumber_grid((N,), (L,))
+        ks = FIT.Utils.wavenumber_grid((N,), (L,))
 
         result = FIT.calculate_spectral_flux(û, ks;
             binning = FIT.LinearBinning(2π/L), dealiasing = FIT.NoDealiasing())
@@ -161,7 +162,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         x = range(0, 2π; length=N+1)[1:N]
         u = cos.(k1 .* x) .+ 0.3 .* sin.(k2 .* x)
         û_phys = ComplexF64.(reshape(FFTW.fft(u) ./ N, N, 1))
-        ks = FIT.wavenumber_grid((N,), (L,))
+        ks = FIT.Utils.wavenumber_grid((N,), (L,))
 
         # Direct path
         result_direct = FIT.calculate_spectral_flux(û_phys, ks;
@@ -190,15 +191,15 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Random.seed!(7)
         ψ  = randn(N, N)
         ψh = FFTW.fft(ψ) ./ N^2
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]
         ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
         Test.@test maximum(abs.(kx .* û[:, :, 1] .+ ky .* û[:, :, 2])) < 1e-12  # div-free
 
         for spectral in (FIT.DirectSumBackend(), FIT.FFTBackend())
-            N̂ = FIT.compute_nonlinear_term(û, ks; dealiasing = FIT.OrszagTwoThirds(), spectral = spectral)
-            t = FIT.transfer_density(FIT.KineticEnergy(), û, N̂, ks)
+            N̂ = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; dealiasing = FIT.OrszagTwoThirds(), spectral = spectral)
+            t = FIT.Invariants.transfer_density(FIT.KineticEnergy(), û, N̂, ks)
             scale = sum(abs, t)
             Test.@test abs(sum(t)) < 1e-10 * scale       # energy-conserving, alias-free
         end
@@ -213,7 +214,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         x = range(0, L; length = N + 1)[1:N]
         u = cos.(x) .+ 0.3 .* sin.(2 .* x) .+ 0.1 .* cos.(3 .* x)
         û = ComplexF64.(reshape(FFTW.fft(u) ./ N, N, 1))
-        ks = FIT.wavenumber_grid((N,), (L,))
+        ks = FIT.Utils.wavenumber_grid((N,), (L,))
         r = FIT.calculate_spectral_flux(û, ks; binning = FIT.LinearBinning(2π/L), dealiasing = FIT.NoDealiasing())
         Test.@test isapprox(r.flux, cumsum(r.transfer_spectrum); atol = 1e-12)
     end
@@ -229,16 +230,16 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         N = 16
         Random.seed!(5)
         ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
-        ks2 = FIT.wavenumber_grid((N, N), (L, L))
+        ks2 = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks2[1][i] for i in 1:N, j in 1:N]; ky = [ks2[2][j] for i in 1:N, j in 1:N]
         û2 = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
-        N̂2 = FIT.compute_nonlinear_term(û2, ks2; dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
-        tΩ2 = FIT.transfer_density(FIT.Enstrophy(), û2, N̂2, ks2)
+        N̂2 = FIT.NonlinearTerm.compute_nonlinear_term(û2, ks2; dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
+        tΩ2 = FIT.Invariants.transfer_density(FIT.Enstrophy(), û2, N̂2, ks2)
         Test.@test abs(sum(tΩ2)) < 1e-9 * sum(abs, tΩ2)        # 2D enstrophy conserved
 
         # 3D: vector-vorticity enstrophy transfer runs (non-conservative; sanity only).
         M = 8
-        ks3 = FIT.wavenumber_grid((M, M, M), (L, L, L))
+        ks3 = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
         Random.seed!(6)
         Â = randn(ComplexF64, M, M, M, 3)   # u = ∇×A ⇒ û = i k × Â is divergence-free
         kx3 = [ks3[1][i] for i in 1:M, j in 1:M, l in 1:M]
@@ -267,22 +268,22 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # since ∫θ(u·∇)θ = −½∫θ²(∇·u) = 0 for incompressible u).
         N = 12; L = 2π
         Random.seed!(31)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity (D=2)
         θ̂  = reshape(FFTW.fft(randn(N, N)) ./ N^2, N, N, 1)        # passive scalar (M=1)
 
         # N̂_θ = (u·∇)θ via direct DFT and FFT backends — must match.
-        N̂_dir = FIT.compute_nonlinear_term(θ̂, ks; dealiasing = FIT.OrszagTwoThirds(),
+        N̂_dir = FIT.NonlinearTerm.compute_nonlinear_term(θ̂, ks; dealiasing = FIT.OrszagTwoThirds(),
             spectral = FIT.DirectSumBackend(), advecting_hat = û)
-        N̂_fft = FIT.compute_nonlinear_term(θ̂, ks; dealiasing = FIT.OrszagTwoThirds(),
+        N̂_fft = FIT.NonlinearTerm.compute_nonlinear_term(θ̂, ks; dealiasing = FIT.OrszagTwoThirds(),
             spectral = FIT.FFTBackend(), advecting_hat = û)
         Test.@test size(N̂_dir) == (N, N, 1)
         Test.@test isapprox(N̂_dir, N̂_fft; atol = 1e-10 * maximum(abs, N̂_fft))
 
         # Scalar variance conservation: Σ_k Re{θ̂*(k) N̂_θ(k)} ≈ 0.
-        tθ = FIT.transfer_density(FIT.PassiveScalar(), θ̂, N̂_fft, ks)
+        tθ = FIT.Invariants.transfer_density(FIT.PassiveScalar(), θ̂, N̂_fft, ks)
         Test.@test abs(sum(tθ)) < 1e-9 * sum(abs, tθ)
     end
 
@@ -292,7 +293,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # on the shared retained band (validates normalization) and ALSO carry the N/3≤|k|<N/2
         # content the 2/3 rule discards (the whole point of padding).
         N = 24; L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         kmag = sqrt.(kx.^2 .+ ky.^2)
         Random.seed!(81)
@@ -306,8 +307,8 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         end
         û = cat(im .* ky .* ψ, -im .* kx .* ψ; dims = 3)        # div-free, band-limited |k|<N/3
 
-        N23  = FIT.compute_nonlinear_term(û, ks; dealiasing = FIT.OrszagTwoThirds(),   spectral = FIT.FFTBackend())
-        Npad = FIT.compute_nonlinear_term(û, ks; dealiasing = FIT.PaddedThreeHalves(), spectral = FIT.FFTBackend())
+        N23  = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; dealiasing = FIT.OrszagTwoThirds(),   spectral = FIT.FFTBackend())
+        Npad = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; dealiasing = FIT.PaddedThreeHalves(), spectral = FIT.FFTBackend())
         low = repeat(kmag .< 8, 1, 1, 2)
         mid = repeat((kmag .>= 8) .& (kmag .< 12), 1, 1, 2)
         Test.@test maximum(abs.(N23 .- Npad)[low]) < 1e-10 * maximum(abs.(Npad)[low])   # agree on |k|<N/3
@@ -319,7 +320,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test abs(sum(sf.transfer_spectrum)) < 1e-9 * sum(abs, sf.transfer_spectrum)
 
         # Padding requires the FFT path; the dependency-free DirectSumBackend errors clearly.
-        Test.@test_throws ArgumentError FIT.compute_nonlinear_term(û, ks;
+        Test.@test_throws ArgumentError FIT.NonlinearTerm.compute_nonlinear_term(û, ks;
             dealiasing = FIT.PaddedThreeHalves(), spectral = FIT.DirectSumBackend())
     end
 
@@ -327,7 +328,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "SpectralFlux — passive-scalar variance flux (conserved, cumulative→0)" begin
         N = 16; L = 2π
         Random.seed!(32)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
@@ -354,7 +355,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Random.seed!(7)
         N = 16; L = 2π   # large enough that the 2/3-retained band has real inter-shell coupling
         Np = N * N
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         # Random streamfunction in spectral space (Hermitian so IFFT is real)
         ψ̂ = zeros(ComplexF64, N, N)
         Random.seed!(7)
@@ -395,7 +396,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Random.seed!(13)
         ψ  = randn(N, N)
         ψh = FFTW.fft(ψ) ./ N^2
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]
         ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
@@ -421,7 +422,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "ShellToShell — passive scalar T_θ(n,m): antisym, direct==FFT, reduces" begin
         N = 16; L = 2π
         Random.seed!(14)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
@@ -447,7 +448,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "ModeToMode — passive scalar S_θ(k|p): antisym, conserves, reduces" begin
         N = 12; L = 2π
         Random.seed!(15)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free velocity
@@ -467,8 +468,8 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         b = FIT.LinearBinning(2π/L)
         sfθ = FIT.calculate_scalar_flux(û, θ, ks; binning = b, dealiasing = FIT.OrszagTwoThirds(),
             spectral = FIT.FFTBackend())
-        kmag = FIT.wavenumber_magnitude_grid(ks)
-        edges = FIT.shell_edges(b, maximum(kmag)); sidx = FIT.assign_shells(kmag, edges)
+        kmag = FIT.Utils.wavenumber_magnitude_grid(ks)
+        edges = FIT.ShellBinning.shell_edges(b, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
         netshell = zeros(length(edges) - 1)
         for I in CartesianIndices((N, N)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
         Test.@test isapprox(netshell, sfθ.transfer_spectrum; atol = 1e-9 * sqrt(sum(abs2, sfθ.transfer_spectrum)))
@@ -477,14 +478,14 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "Shell geometry — isotropic / perpendicular / parallel fluxes" begin
         M = 16; L = 2π
-        ks = FIT.wavenumber_grid((M, M, M), (L, L, L))
+        ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
         kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
         ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
         kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
         # shell coordinates: isotropic == |k|; perpendicular uses kx,ky; parallel uses kz
-        Test.@test FIT.shell_coordinate(FIT.IsotropicShells(), ks) ≈ FIT.wavenumber_magnitude_grid(ks)
-        Test.@test FIT.shell_coordinate(FIT.PerpendicularShells(), ks) ≈ sqrt.(kx.^2 .+ ky.^2)
-        Test.@test FIT.shell_coordinate(FIT.ParallelShells(), ks)      ≈ abs.(kz)
+        Test.@test FIT.ShellBinning.shell_coordinate(FIT.IsotropicShells(), ks) ≈ FIT.Utils.wavenumber_magnitude_grid(ks)
+        Test.@test FIT.ShellBinning.shell_coordinate(FIT.PerpendicularShells(), ks) ≈ sqrt.(kx.^2 .+ ky.^2)
+        Test.@test FIT.ShellBinning.shell_coordinate(FIT.ParallelShells(), ks)      ≈ abs.(kz)
 
         # Divergence-free 3D velocity û = i k × Â (non-degenerate after dealiasing at M=16)
         Random.seed!(41)
@@ -519,7 +520,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "HelicalDecomposition — reconstruct, orthonormal, helicity split, flux" begin
         M = 16; L = 2π
-        ks = FIT.wavenumber_grid((M, M, M), (L, L, L))
+        ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
         kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
         ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
         kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
@@ -530,7 +531,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
         û  = cat(ûx, ûy, ûz; dims = 4)                     # divergence-free by construction
 
-        dec = FIT.decompose_field(FIT.HelicalDecomposition(), û, ks)
+        dec = FIT.Decomposition.decompose_field(FIT.HelicalDecomposition(), û, ks)
         up = dec.positive; um = dec.negative
         # 1. reconstruction u₊ + u₋ ≈ û (incompressible)
         Test.@test isapprox(up .+ um, û; atol = 1e-12 * maximum(abs, û))
@@ -560,7 +561,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "Helical partial fluxes — 8 channels sum to the total energy flux" begin
         M = 16; L = 2π
-        ks = FIT.wavenumber_grid((M, M, M), (L, L, L))
+        ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
         kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
         ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
         kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
@@ -590,7 +591,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # non-zero and it equals the full flux; the rot↔div cross channels are ≈ 0.
         N = 16; L = 2π
         Random.seed!(92)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free (rotational only)
@@ -613,7 +614,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "ToroidalPoloidalDecomposition — reconstruct, div-free, toroidal has w=0" begin
         M = 8; L = 2π
-        ks = FIT.wavenumber_grid((M, M, M), (L, L, L))
+        ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
         kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
         ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
         kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
@@ -624,7 +625,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         ûz = im .* (kx .* Â[:, :, :, 2] .- ky .* Â[:, :, :, 1])
         û  = cat(ûx, ûy, ûz; dims = 4)                     # solenoidal
 
-        dec = FIT.decompose_field(FIT.ToroidalPoloidalDecomposition(), û, ks)
+        dec = FIT.Decomposition.decompose_field(FIT.ToroidalPoloidalDecomposition(), û, ks)
         tor = dec.toroidal; pol = dec.poloidal
         Test.@test isapprox(tor .+ pol, û; atol = 1e-12 * maximum(abs, û))            # reconstruction
         Test.@test isapprox(sum(abs2, tor) + sum(abs2, pol), sum(abs2, û); rtol = 1e-12)  # orthogonal
@@ -638,10 +639,33 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "HelmholtzDecomposition — 3D Leray: reconstruct, rot div-free, div curl-free" begin
+        M = 8; L = 2π
+        ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
+        kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
+        ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
+        kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+        Random.seed!(53)
+        û = randn(ComplexF64, M, M, M, 3)                     # generic: both rotational + divergent parts
+        dec = FIT.Decomposition.decompose_field(FIT.HelmholtzDecomposition(), û, ks)
+        rot = dec.rotational; div = dec.divergent
+        Test.@test isapprox(rot .+ div, û; atol = 1e-12 * maximum(abs, û))                # reconstruction
+        drot = kx .* rot[:,:,:,1] .+ ky .* rot[:,:,:,2] .+ kz .* rot[:,:,:,3]             # rot: k·û_rot ≈ 0
+        Test.@test maximum(abs, drot) < 1e-10 * maximum(abs, û)
+        cx = ky .* div[:,:,:,3] .- kz .* div[:,:,:,2]                                     # div: k×û_div ≈ 0
+        cy = kz .* div[:,:,:,1] .- kx .* div[:,:,:,3]
+        cz = kx .* div[:,:,:,2] .- ky .* div[:,:,:,1]
+        Test.@test max(maximum(abs, cx), maximum(abs, cy), maximum(abs, cz)) < 1e-10 * maximum(abs, û)
+        # RotationalDecomposition / DivergentDecomposition return the single corresponding component.
+        Test.@test FIT.Decomposition.decompose_field(FIT.RotationalDecomposition(), û, ks) ≈ rot
+        Test.@test FIT.Decomposition.decompose_field(FIT.DivergentDecomposition(), û, ks) ≈ div
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "BandToBand — smooth T(K,Q): antisymmetric, conserves, reduces" begin
         N = 16; L = 2π
         Random.seed!(71)
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)        # div-free
@@ -669,6 +693,31 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         result = FIT.calculate_coarse_graining_flux(
             (u, v), (x, y), π/2, FIT.GaussianFilter())
         Test.@test result isa FIT.CoarseGrainingFluxResult
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "CoarseGrainingFlux — 3D Cartesian Π_ℓ + diagnostics == CGEF directly" begin
+        FT = Float64; N = 12; L = 2π
+        xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs); zs = copy(xs)
+        Random.seed!(29)
+        u = randn(N, N, N); v = randn(N, N, N); w = randn(N, N, N); ℓ = L / 4
+        r = FIT.calculate_coarse_graining_flux((u, v, w), (xs, ys, zs), ℓ, FIT.GaussianFilter())
+        Test.@test r isa FIT.CoarseGrainingFluxResult
+        Test.@test size(r.flux_field) == (N, N, N)
+        Test.@test all(isfinite, r.flux_field)
+        # Exact match to the sibling's true-3D compute_Π! on the same field/grid (wiring correctness).
+        dx = FT((xs[end] - xs[begin]) / (N - 1))
+        geom = CoarseGrainingEnergyFluxes.Geometry.CartesianGeometry(dx, dx, dx)
+        grid = CoarseGrainingEnergyFluxes.Grids.StructuredGrid(geom, FT.(xs), FT.(ys), FT.(zs), trues(N, N, N))
+        Πref = zeros(FT, N, N, N)
+        CoarseGrainingEnergyFluxes.Diagnostics.compute_Π!(Πref, u, v, w, grid,
+            CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), FT(ℓ))
+        Test.@test maximum(abs, r.flux_field .- Πref) == 0.0
+        # 3D diagnostics: (ns, 3, 3) symmetric stress/strain tensors.
+        rd = FIT.calculate_coarse_graining_flux((u, v, w), (xs, ys, zs), ℓ, FIT.GaussianFilter(); return_diagnostics = true)
+        Test.@test size(rd.stress_tensor) == (N, N, N, 3, 3)
+        Test.@test maximum(abs, rd.stress_tensor .- permutedims(rd.stress_tensor, (1,2,3,5,4))) == 0.0
+        Test.@test maximum(abs, rd.strain_rate  .- permutedims(rd.strain_rate,  (1,2,3,5,4))) == 0.0
     end
 
     # -----------------------------------------------------------------------
@@ -705,18 +754,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             Test.@test maximum(abs.(ra.flux_field .- rb.flux_field)) == 0.0
         end
 
-        # Plan cache: a repeated snapshot at a fixed scale reuses the cached filter plan, so it
-        # allocates far less than a fresh call (which rebuilds the scale-dependent footprint).
-        FIT.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)  # warm + cache the plan
-        alloc_fresh = @allocated FIT.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
-        alloc_reuse = @allocated FIT.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
-        Test.@test alloc_reuse < alloc_fresh ÷ 20 skip = (Base.JLOptions().code_coverage != 0)
+        # (workspace-reuse allocation ratio asserted in test_allocs.jl)
     end
 
     # -----------------------------------------------------------------------
     Test.@testset "calculate_energy_transfer — unified dispatch" begin
         N = 8; L = 2π
-        ks = FIT.wavenumber_grid((N,), (L,))
+        ks = FIT.Utils.wavenumber_grid((N,), (L,))
         û = zeros(ComplexF64, N, 1)
 
         r1 = FIT.calculate_energy_transfer(
@@ -738,11 +782,11 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
 
     # -----------------------------------------------------------------------
     Test.@testset "assign_shells" begin
-        ks  = FIT.wavenumber_grid((8,), (2π,))
-        k_mag = FIT.wavenumber_magnitude_grid(ks)
+        ks  = FIT.Utils.wavenumber_grid((8,), (2π,))
+        k_mag = FIT.Utils.wavenumber_magnitude_grid(ks)
         b     = FIT.LinearBinning(2π/8)
-        edges = FIT.shell_edges(b, maximum(k_mag))
-        idx   = FIT.assign_shells(k_mag, edges)
+        edges = FIT.ShellBinning.shell_edges(b, maximum(k_mag))
+        idx   = FIT.ShellBinning.assign_shells(k_mag, edges)
         Test.@test size(idx) == size(k_mag)
         Test.@test eltype(idx) == Int
         N_sh  = length(edges) - 1
@@ -759,14 +803,14 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "SpectralFlux !-variant" begin
         N = 8; L = 2π
-        ks  = FIT.wavenumber_grid((N,), (L,))
+        ks  = FIT.Utils.wavenumber_grid((N,), (L,))
         û  = zeros(ComplexF64, N, 1)
         b   = FIT.LinearBinning(2π/L)
         ws  = FIT.SpectralFluxWorkspace(û, ks, b)
-        k_mag     = FIT.wavenumber_magnitude_grid(ks)
-        edges     = FIT.shell_edges(b, maximum(k_mag))
-        centers   = FIT.shell_centers(b, maximum(k_mag))
-        shell_idx = FIT.assign_shells(k_mag, edges)
+        k_mag     = FIT.Utils.wavenumber_magnitude_grid(ks)
+        edges     = FIT.ShellBinning.shell_edges(b, maximum(k_mag))
+        centers   = FIT.ShellBinning.shell_centers(b, maximum(k_mag))
+        shell_idx = FIT.ShellBinning.assign_shells(k_mag, edges)
         result    = FIT.SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
         FIT.calculate_spectral_flux!(result, ws, û, ks, shell_idx; dealiasing = FIT.NoDealiasing())
         Test.@test result isa FIT.SpectralFluxResult
@@ -776,13 +820,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # -----------------------------------------------------------------------
     Test.@testset "ShellToShellTransfer !-variant" begin
         N = 6; L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         û  = zeros(ComplexF64, N, N, 2)
         b   = FIT.LinearBinning(2π/L)
         ws  = FIT.ShellToShellWorkspace(û, ks, b)
-        k_mag   = FIT.wavenumber_magnitude_grid(ks)
-        edges   = FIT.shell_edges(b, maximum(k_mag))
-        centers = FIT.shell_centers(b, maximum(k_mag))
+        k_mag   = FIT.Utils.wavenumber_magnitude_grid(ks)
+        edges   = FIT.ShellBinning.shell_edges(b, maximum(k_mag))
+        centers = FIT.ShellBinning.shell_centers(b, maximum(k_mag))
         N_sh    = length(centers)
         FT      = Float64
         result  = FIT.ShellToShellResult(
@@ -801,15 +845,15 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "Float32 propagation" begin
         N = 8
         Ls = (Float32(2π), Float32(2π))
-        ks = FIT.wavenumber_grid((N, N), Ls)
+        ks = FIT.Utils.wavenumber_grid((N, N), Ls)
         Test.@test eltype(ks[1]) == Float32
         Test.@test eltype(ks[2]) == Float32
-        k_mag = FIT.wavenumber_magnitude_grid(ks)
+        k_mag = FIT.Utils.wavenumber_magnitude_grid(ks)
         Test.@test eltype(k_mag) == Float32
         b     = FIT.LinearBinning(Float32(2π) / N)
-        edges = FIT.shell_edges(b, maximum(k_mag))
+        edges = FIT.ShellBinning.shell_edges(b, maximum(k_mag))
         Test.@test eltype(edges) == Float32
-        centers = FIT.shell_centers(b, maximum(k_mag))
+        centers = FIT.ShellBinning.shell_centers(b, maximum(k_mag))
         Test.@test eltype(centers) == Float32
 
         û = zeros(ComplexF32, N, N, 2)
@@ -920,28 +964,25 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         for k in keys(res_fft.modes)
             Test.@test ip.modes[k].convective == res_fft.modes[k].convective
         end
-        FIT.triadic_orthogonal_decomposition!(ws, X)  # warm
-        a_alloc = @allocated FIT.triadic_orthogonal_decomposition(X; dt=dt_sig, spectral=FIT.FFTBackend())
-        a_reuse = @allocated FIT.triadic_orthogonal_decomposition!(ws, X)
-        Test.@test a_reuse < a_alloc skip = (Base.JLOptions().code_coverage != 0)
+        # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         Test.@test_throws DimensionMismatch FIT.triadic_orthogonal_decomposition!(ws, X[:, :, 1:end-1])
     end
 
     # -----------------------------------------------------------------------
     Test.@testset "TOD windows — Hann / Tukey generators" begin
         n = 64
-        h = FIT.hann_window(n)
+        h = FIT.TriadicOrthogonalDecomposition.hann_window(n)
         Test.@test length(h) == 64
         Test.@test h[1] < 1e-12 && h[end] < 1e-12        # tapers to zero at both ends
         Test.@test 0.99 < maximum(h) <= 1.0              # ≈unity at centre (exact 1 falls between samples for even N)
         # Tukey limits: α=0 is rectangular, α=1 is Hann
-        Test.@test FIT.tukey_window(n; α=0.0) ≈ ones(n)
-        Test.@test isapprox(FIT.tukey_window(n; α=1.0), h; atol=1e-12)
-        Test.@test_throws ArgumentError FIT.tukey_window(n; α=1.5)
+        Test.@test FIT.TriadicOrthogonalDecomposition.tukey_window(n; α=0.0) ≈ ones(n)
+        Test.@test isapprox(FIT.TriadicOrthogonalDecomposition.tukey_window(n; α=1.0), h; atol=1e-12)
+        Test.@test_throws ArgumentError FIT.TriadicOrthogonalDecomposition.tukey_window(n; α=1.5)
         # a custom window flows through TOD
         X = zeros(128, 1, 4)
         for ix in 1:4; X[:, 1, ix] = sin.(2π * 2.0 .* (0:127) .* 0.05); end
-        r = FIT.triadic_orthogonal_decomposition(X; dt=0.05, window=FIT.hann_window(64), noverlap=32)
+        r = FIT.triadic_orthogonal_decomposition(X; dt=0.05, window=FIT.TriadicOrthogonalDecomposition.hann_window(64), noverlap=32)
         Test.@test r isa FIT.TriadicOrthogonalDecompositionResult
     end
 
@@ -994,7 +1035,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
         # 1. Spectral flux decomposition test
         N = 8; L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         û = zeros(ComplexF64, N, N, 2)
         û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5   # k=(1,0) in u
         û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5   # k=(0,1) in v
@@ -1030,6 +1071,18 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test haskey(cg_helm, :rotational) && haskey(cg_helm, :divergent)
         Test.@test cg_rot isa FIT.CoarseGrainingFluxResult
         Test.@test cg_div isa FIT.CoarseGrainingFluxResult
+
+        # 3. 3D coarse-graining with Helmholtz decomposition (physical-space decompose + 3D CGEF flux).
+        M = 8; x3 = collect(range(0, L; length=M+1)[1:M]); y3 = copy(x3); z3 = copy(x3)
+        u3 = [cos(xi) * sin(zi) for xi in x3, yi in y3, zi in z3]
+        v3 = [sin(yi)           for xi in x3, yi in y3, zi in z3]
+        w3 = [cos(zi)           for xi in x3, yi in y3, zi in z3]
+        cg3_none = FIT.calculate_coarse_graining_flux((u3, v3, w3), (x3, y3, z3), 1.0, FIT.GaussianFilter(); decomposition=FIT.NoDecomposition())
+        cg3_helm = FIT.calculate_coarse_graining_flux((u3, v3, w3), (x3, y3, z3), 1.0, FIT.GaussianFilter(); decomposition=FIT.HelmholtzDecomposition())
+        Test.@test cg3_none isa FIT.CoarseGrainingFluxResult && size(cg3_none.flux_field) == (M, M, M)
+        Test.@test cg3_helm isa NamedTuple && haskey(cg3_helm, :rotational) && haskey(cg3_helm, :divergent)
+        Test.@test size(cg3_helm.rotational.flux_field) == (M, M, M)
+        Test.@test all(isfinite, cg3_helm.divergent.flux_field)
     end
 
     # -----------------------------------------------------------------------
@@ -1045,7 +1098,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # Create sample data
         Random.seed!(42)
         N = 8; L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         û = zeros(ComplexF64, N, N, 2)
         û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5
         û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5
@@ -1073,6 +1126,22 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         res_hybrid = FIT.calculate_shell_to_shell_transfer(s_û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), verify_antisymmetry=true, execution=FIT.DistributedBackend(FIT.ThreadedBackend()))
         Test.@test isapprox(res_serial.transfer_matrix, res_hybrid.transfer_matrix; atol=1e-12)
         Test.@test isapprox(res_serial.net_transfer, res_hybrid.net_transfer; atol=1e-12)
+
+        # 2. Triadic Orthogonal Decomposition parity — triads distributed over workers, each running the
+        # SAME allocation-reusing SVD as the serial loop → bit-identical L / T_budget / modes / coeffs.
+        # The temporal DFT (Q_hat) is master-side, so workers need only FlowInvariantTransfer (no FFTW).
+        Random.seed!(123)
+        Xtod = randn(64, 1, 4)
+        tod_serial = FIT.triadic_orthogonal_decomposition(Xtod; dt = 0.05, spectral = FIT.DirectSumBackend(), execution = FIT.SerialBackend(), return_coefficients = true, return_auxiliary_modes = true)
+        tod_dist   = FIT.triadic_orthogonal_decomposition(Xtod; dt = 0.05, spectral = FIT.DirectSumBackend(), execution = FIT.DistributedBackend(), return_coefficients = true, return_auxiliary_modes = true)
+        Test.@test isequal(tod_serial.mode_bispectrum, tod_dist.mode_bispectrum)
+        Test.@test isequal(tod_serial.modal_energy_budget, tod_dist.modal_energy_budget)
+        Test.@test length(tod_serial.modes) == length(tod_dist.modes)
+        let k = first(keys(tod_serial.modes))
+            Test.@test tod_serial.modes[k].convective == tod_dist.modes[k].convective
+            Test.@test tod_serial.expansion_coefficients[k].recipient == tod_dist.expansion_coefficients[k].recipient
+            Test.@test tod_serial.auxiliary_modes[k].donor == tod_dist.auxiliary_modes[k].donor
+        end
     end
 
     # -----------------------------------------------------------------------
@@ -1082,7 +1151,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "FFTW intra-transform threads — correctness invariance" begin
         Random.seed!(7)
         N = 24; L = 2π
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)   # incompressible 2D field
@@ -1109,11 +1178,11 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "ModeToMode — invariant/dimension guards" begin
         L = 2π
         # 2D field + Helicity() must error (Helicity is 3D-only); routed via transfer_density.
-        ks2 = FIT.wavenumber_grid((4, 4), (L, L))
+        ks2 = FIT.Utils.wavenumber_grid((4, 4), (L, L))
         û2  = zeros(ComplexF64, 4, 4, 2); û2[2, 1, 1] = 0.5; û2[1, 2, 2] = 0.5
         Test.@test_throws ArgumentError FIT.calculate_mode_to_mode_transfer(û2, ks2; invariant=FIT.Helicity())
         # 3D field + Enstrophy() now works (vector-vorticity transfer, routed).
-        ks3 = FIT.wavenumber_grid((4, 4, 4), (L, L, L))
+        ks3 = FIT.Utils.wavenumber_grid((4, 4, 4), (L, L, L))
         û3  = zeros(ComplexF64, 4, 4, 4, 3); û3[2, 1, 1, 1] = 0.5
         Test.@test FIT.calculate_mode_to_mode_transfer(û3, ks3; invariant=FIT.Enstrophy()) isa FIT.ModeToModeTriadResult
         # KineticEnergy works in both dimensionalities.
@@ -1128,7 +1197,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         N = 12; L = 2π
         Random.seed!(21)
         ψ  = randn(N, N); ψh = FFTW.fft(ψ) ./ N^2
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
         m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.OrszagTwoThirds(), spectral = FIT.FFTBackend())
@@ -1145,9 +1214,9 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         sf = FIT.calculate_spectral_flux(û, ks; binning = b, dealiasing = FIT.OrszagTwoThirds(), spectral = FIT.FFTBackend())
         ss = FIT.calculate_shell_to_shell_transfer(û, ks; binning = b, dealiasing = FIT.OrszagTwoThirds(),
             verify_antisymmetry = false, spectral = FIT.FFTBackend())
-        kmag  = FIT.wavenumber_magnitude_grid(ks)
-        edges = FIT.shell_edges(b, maximum(kmag))
-        sidx  = FIT.assign_shells(kmag, edges)
+        kmag  = FIT.Utils.wavenumber_magnitude_grid(ks)
+        edges = FIT.ShellBinning.shell_edges(b, maximum(kmag))
+        sidx  = FIT.ShellBinning.assign_shells(kmag, edges)
         # net (= Σ_p S) shell-summed == spectral transfer T(k)
         netshell = zeros(length(edges) - 1)
         for I in CartesianIndices((N, N)); n = sidx[I]; n == 0 && continue; netshell[n] += m2m.net_transfer[I]; end
@@ -1172,7 +1241,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         L = 2π
         # KE (2D)
         N = 16
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(Random.MersenneTwister(5), N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
@@ -1182,10 +1251,10 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test isapprox(ka.transfer_matrix, ref.transfer_matrix; atol=1e-12 * (maximum(abs, ref.transfer_matrix)+eps()))
         Test.@test isapprox(ka.net_transfer, ref.net_transfer; atol=1e-12 * (maximum(abs, ref.net_transfer)+eps()))
 
-        # Helicity (3D) and Enstrophy (2D) device kernels. Use a REAL divergence-free field (curl of a
+        # Helicity (3D) and Enstrophy (2D + 3D) device kernels. Use a REAL divergence-free field (curl of a
         # random vector potential) so the helicity transfer is genuine and well-conditioned — a random
         # complex field gives near-zero, heavily-cancelling transfer that no tolerance can match.
-        ks3 = FIT.wavenumber_grid((8, 8, 8), (L, L, L))
+        ks3 = FIT.Utils.wavenumber_grid((8, 8, 8), (L, L, L))
         kx3 = [ks3[1][i] for i in 1:8, j in 1:8, k in 1:8]
         ky3 = [ks3[2][j] for i in 1:8, j in 1:8, k in 1:8]
         kz3 = [ks3[3][k] for i in 1:8, j in 1:8, k in 1:8]
@@ -1202,6 +1271,11 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         re = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FIT.FFTBackend(), execution=FIT.SerialBackend(), invariant=FIT.Enstrophy())
         ge = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FIT.FFTBackend(), execution=FIT.GPUBackend(KA.CPU()), invariant=FIT.Enstrophy())
         Test.@test isapprox(ge.transfer_matrix, re.transfer_matrix; atol=1e-12 * (maximum(abs, re.transfer_matrix)+eps()))
+
+        # Enstrophy 3D (vector vorticity + vortex stretching) device kernel — reuse the ∇×A field above.
+        re3 = FIT.calculate_shell_to_shell_transfer(û3, ks3; binning=FIT.LinearBinning(2π/L), spectral=FIT.FFTBackend(), execution=FIT.SerialBackend(), invariant=FIT.Enstrophy())
+        ge3 = FIT.calculate_shell_to_shell_transfer(û3, ks3; binning=FIT.LinearBinning(2π/L), spectral=FIT.FFTBackend(), execution=FIT.GPUBackend(KA.CPU()), invariant=FIT.Enstrophy())
+        Test.@test isapprox(ge3.transfer_matrix, re3.transfer_matrix; atol=1e-12 * (maximum(abs, re3.transfer_matrix)+eps()))
     end
 
     # -----------------------------------------------------------------------
@@ -1213,7 +1287,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     Test.@testset "Spectral flux execution backends" begin
         L = 2π
         N = 16
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(Random.MersenneTwister(11), N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
@@ -1229,7 +1303,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         end
 
         # 3D helicity + 2D enstrophy device kernels through the spectral-flux GPU path.
-        ks3 = FIT.wavenumber_grid((8, 8, 8), (L, L, L))
+        ks3 = FIT.Utils.wavenumber_grid((8, 8, 8), (L, L, L))
         û3  = randn(Random.MersenneTwister(13), ComplexF64, 8, 8, 8, 3) .* 0.1
         rh = FIT.calculate_spectral_flux(û3, ks3; binning=FIT.LinearBinning(2π/L), spectral=FIT.FFTBackend(), invariant=FIT.Helicity())
         gh = FIT.calculate_spectral_flux(û3, ks3; binning=FIT.LinearBinning(2π/L), spectral=FIT.FFTBackend(), invariant=FIT.Helicity(), execution=FIT.GPUBackend(KA.CPU()))
@@ -1248,6 +1322,114 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    # Mode-to-mode S(k|p) and band-to-band T(n,m) on the KernelAbstractions GPU path (KA.CPU backend =
+    # the same device code exercised on CUDA/ROC/Metal): the per-giver / per-band nonlinear term + the
+    # device transfer-density kernel must reproduce the serial reduction to machine precision.
+    Test.@testset "mode-to-mode & band-to-band GPU (KA.CPU) parity" begin
+        L = 2π; N = 16
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(Random.MersenneTwister(17), N, N)) ./ N^2
+        û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
+        b  = FIT.LinearBinning(2π / L)
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend())
+            ms = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=sp, execution=FIT.SerialBackend())
+            mg = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=sp, execution=FIT.GPUBackend(KA.CPU()))
+            Test.@test isapprox(mg.transfer, ms.transfer; atol=1e-12 * (maximum(abs, ms.transfer)+eps()))
+            Test.@test isapprox(mg.net_transfer, ms.net_transfer; atol=1e-12 * (maximum(abs, ms.net_transfer)+eps()))
+
+            bnds = FIT.SmoothBands(collect(1.0:6.0))
+            bs = FIT.calculate_band_to_band_transfer(û, ks; bands=bnds, spectral=sp, execution=FIT.SerialBackend())
+            bg = FIT.calculate_band_to_band_transfer(û, ks; bands=bnds, spectral=sp, execution=FIT.GPUBackend(KA.CPU()))
+            Test.@test isapprox(bg.transfer_matrix, bs.transfer_matrix; atol=1e-12 * (maximum(abs, bs.transfer_matrix)+eps()))
+        end
+
+        # Partial (helical decomposition-channel) fluxes on the KA GPU path (3D): the device-generic
+        # broadcast decomposition + per-pair nonlinear term + device transfer-density + scatter-add bin
+        # must reproduce the serial channel fluxes to machine precision.
+        Nc = 12; xs3 = collect(range(0, L; length=Nc+1)[1:Nc])
+        u3 = [cos(x)*sin(y)*cos(z) for x in xs3, y in xs3, z in xs3]
+        v3 = [-sin(x)*cos(y)*cos(z) for x in xs3, y in xs3, z in xs3]
+        w3 = [sin(x)*sin(y)*sin(z) for x in xs3, y in xs3, z in xs3]
+        û3 = cat(FFTW.fft(u3), FFTW.fft(v3), FFTW.fft(w3); dims=4) ./ Nc^3
+        ks3p = FIT.Utils.wavenumber_grid((Nc, Nc, Nc), (L, L, L))
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend())
+            ps = FIT.calculate_partial_fluxes(û3, ks3p; spectral=sp, execution=FIT.SerialBackend())
+            pg = FIT.calculate_partial_fluxes(û3, ks3p; spectral=sp, execution=FIT.GPUBackend(KA.CPU()))
+            Test.@test length(pg.channels) == length(ps.channels)
+            for k in keys(ps.channels)
+                Test.@test isapprox(pg.channels[k].flux, ps.channels[k].flux;
+                                    atol=1e-12 * (maximum(abs, ps.channels[k].flux)+eps()))
+            end
+        end
+    end
+
+    # -----------------------------------------------------------------------
+    # Device-genericity on JLArrays (allowscalar(false) — real device semantics, unlike GPUBackend(KA.CPU)
+    # which runs on plain Arrays). Broadcast/kernel building blocks must run device-resident with no scalar
+    # indexing and reproduce the CPU result. (FFT-based full pipelines can't run here: JLArrays has no
+    # AbstractFFTs provider — those are device-generic by construction, verified on KA.CPU above.)
+    Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
+        N = 8; L = 2π
+        ks3 = FIT.Utils.wavenumber_grid((N, N, N), (L, L, L))
+        û3 = randn(Random.MersenneTwister(5), ComplexF64, N, N, N, 3)
+
+        # Helical decomposition — device-resident + bit-identical to CPU (pure broadcast projection).
+        up, um = FIT.Decomposition.decompose_field(FIT.HelicalDecomposition(), û3, ks3)
+        upj, umj = FIT.Decomposition.decompose_field(FIT.HelicalDecomposition(), JLArrays.JLArray(û3), ks3)
+        Test.@test upj isa JLArrays.JLArray
+        Test.@test maximum(abs, Array(upj) .- up) == 0
+        Test.@test maximum(abs, Array(umj) .- um) == 0
+
+        # Toroidal–poloidal decomposition — device-resident + bit-identical (broadcast Craya–Herring frame).
+        tp  = FIT.Decomposition.decompose_field(FIT.ToroidalPoloidalDecomposition(), û3, ks3)
+        tpj = FIT.Decomposition.decompose_field(FIT.ToroidalPoloidalDecomposition(), JLArrays.JLArray(û3), ks3)
+        Test.@test tpj.toroidal isa JLArrays.JLArray
+        Test.@test maximum(abs, Array(tpj.toroidal) .- tp.toroidal) == 0
+        Test.@test maximum(abs, Array(tpj.poloidal) .- tp.poloidal) == 0
+
+        # Helmholtz (Leray) decomposition — N-D device-generic projection, device-resident + bit-identical.
+        hm  = FIT.Decomposition.decompose_field(FIT.HelmholtzDecomposition(), û3, ks3)
+        hmj = FIT.Decomposition.decompose_field(FIT.HelmholtzDecomposition(), JLArrays.JLArray(û3), ks3)
+        Test.@test hmj.rotational isa JLArrays.JLArray
+        Test.@test maximum(abs, Array(hmj.rotational) .- hm.rotational) == 0
+        Test.@test maximum(abs, Array(hmj.divergent) .- hm.divergent) == 0
+
+        # transfer_density! (KE) — device kernel/broadcast matches the CPU reduction.
+        ks2 = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        û2 = randn(Random.MersenneTwister(6), ComplexF64, N, N, 2)
+        N̂2 = randn(Random.MersenneTwister(7), ComplexF64, N, N, 2)
+        td_h = similar(û2, Float64, N, N); FIT.Invariants.transfer_density!(td_h, FIT.KineticEnergy(), û2, N̂2, ks2)
+        td_d = JLArrays.JLArray(similar(û2, Float64, N, N))
+        FIT.Invariants.transfer_density!(td_d, FIT.KineticEnergy(), JLArrays.JLArray(û2), JLArrays.JLArray(N̂2), ks2)
+        Test.@test maximum(abs, Array(td_d) .- td_h) == 0
+        # Passive scalar (M=1) — same device-generic dot broadcast as KE. (Helicity/Enstrophy use the
+        # KA-extension vorticity kernels via GPUBackend, verified on KA.CPU above, not this broadcast path.)
+        θ2 = randn(Random.MersenneTwister(8), ComplexF64, N, N, 1)
+        θN = randn(Random.MersenneTwister(9), ComplexF64, N, N, 1)
+        ts_h = similar(θ2, Float64, N, N); FIT.Invariants.transfer_density!(ts_h, FIT.PassiveScalar(), θ2, θN, ks2)
+        ts_d = JLArrays.JLArray(similar(θ2, Float64, N, N))
+        FIT.Invariants.transfer_density!(ts_d, FIT.PassiveScalar(), JLArrays.JLArray(θ2), JLArrays.JLArray(θN), ks2)
+        Test.@test maximum(abs, Array(ts_d) .- ts_h) == 0
+
+        # Compressible device helpers (copy-trunc / Helmholtz split / shell bin) match the scalar CPU path.
+        dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, (N, N), 2, true)
+        dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), (N, N), 2, true)
+        Test.@test maximum(abs, Array(dcd) .- dch) == 0
+        rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, ks2, (N, N))
+        rd = JLArrays.JLArray(similar(û2)); cd = JLArrays.JLArray(similar(û2))
+        FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2), ks2, (N, N))
+        Test.@test maximum(abs, Array(rd) .- rh) < 1e-14 * (maximum(abs, rh) + eps())
+        Test.@test maximum(abs, Array(cd) .- ch) < 1e-14 * (maximum(abs, ch) + eps())
+        kmag = FIT.ShellBinning.shell_coordinate(FIT.IsotropicShells(), ks2); bb = FIT.LinearBinning(2π / L)
+        edges = FIT.ShellBinning.shell_edges(bb, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
+        Nsh = length(collect(FIT.ShellBinning.shell_centers(bb, maximum(kmag))))
+        Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, (N, N), true)
+        Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, (N, N), true)
+        Test.@test maximum(abs, Td .- Th) == 0
+    end
+
+    # -----------------------------------------------------------------------
     # Compressible KE spectral transfer (#1 / Singh–Tiwari–Sharma–Verma 2025). Validated by the
     # analytic identities that make it trustworthy: (a) the momentum-weighted nonlinear transfer
     # conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u to
@@ -1256,7 +1438,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # pressure ⇒ zero pressure-dilatation.
     Test.@testset "Compressible energy transfer (#1)" begin
         L = 2π; N = 16
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         # Broadband real divergence-free velocity from a random real streamfunction (nonzero net
         # inter-shell transfer, so the incompressible reference and the tolerances are non-degenerate).
@@ -1296,7 +1478,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # in its own testset once the genuine spherical implementation lands.
     Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" begin
         L = 2π; N = 16
-        ks = FIT.wavenumber_grid((N, N), (L, L))
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
         ψh = FFTW.fft(randn(Random.MersenneTwister(21), N, N)) ./ N^2
         û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)
@@ -1351,10 +1533,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
                 sweep_ip = FIT.nufft_coarse_graining_flux!(ws, (u, v), l, filt, ms)
                 Test.@test isapprox(sweep_alloc.flux_field, sweep_ip.flux_field; rtol=1e-10)
             end
-            FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)  # warm
-            a_fresh = @allocated FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
-            a_reuse = @allocated FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
-            Test.@test a_reuse < a_fresh ÷ 100 skip = (Base.JLOptions().code_coverage != 0)
+            # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         end
 
         Test.@testset "FlowFieldSpectra front-end" begin
@@ -1435,10 +1614,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test ip.enstrophy_transfer == res.enstrophy_transfer
         Test.@test ip.energy_flux == res.energy_flux
         Test.@test abs(sum(ip.enstrophy_transfer)) < 1e-12 * scaleZ
-        FIT.calculate_spherical_transfer!(ws, ζ)  # warm
-        a_fresh = @allocated FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζ)
-        a_reuse = @allocated FIT.calculate_spherical_transfer!(ws, ζ)
-        Test.@test a_reuse < a_fresh skip = (Base.JLOptions().code_coverage != 0)
+        # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         # Workspace grid must match the field.
         Test.@test_throws ArgumentError FIT.calculate_spherical_transfer!(ws, randn(N, N))
     end
@@ -1494,11 +1670,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test maximum(abs.(ip.energy_transfer .- res.energy_transfer)) < 1e-10 * scaleE
         Test.@test maximum(abs.(ip.enstrophy_transfer .- res.enstrophy_transfer)) < 1e-10 * scaleZ
         Test.@test abs(sum(ip.energy_transfer)) < 1e-8 * scaleE
-        FIT.calculate_spherical_transfer!(ws, ζscat)  # warm
-        a_fresh = @allocated FIT.calculate_energy_transfer(
-            FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs); lmax = lmax, tol = 1e-12, rtol = 1e-13)
-        a_reuse = @allocated FIT.calculate_spherical_transfer!(ws, ζscat)
-        Test.@test a_reuse < a_fresh ÷ 3 skip = (Base.JLOptions().code_coverage != 0)
+        # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         Test.@test_throws DimensionMismatch FIT.calculate_spherical_transfer!(ws, ζscat[1:end-1])
     end
 
@@ -1510,7 +1682,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Random.seed!(1)
         N = 16; L = 2π
         for T in (Float64, Float32)
-            ks0 = FIT.wavenumber_grid((N, N), (L, L))
+            ks0 = FIT.Utils.wavenumber_grid((N, N), (L, L))
             ks  = ntuple(d -> T.(ks0[d]), 2)
             kx  = [ks[1][i] for i in 1:N, j in 1:N]
             ky  = [ks[2][j] for i in 1:N, j in 1:N]

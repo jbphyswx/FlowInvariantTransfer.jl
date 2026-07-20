@@ -70,10 +70,10 @@ call), so it is not a numeric-payload field; `Π_out`/`diagnostics` carry the re
 Requires `CoarseGrainingEnergyFluxes` to be loaded. The grid/workspace fields are typed
 via parameters so the struct carries no hardcoded CGEF types into the core package.
 """
-struct CoarseGrainingFluxWorkspace{G, W, P<:AbstractMatrix, D}
+struct CoarseGrainingFluxWorkspace{G, W, P, D}
     grid::G                       # CGEF.Grids.StructuredGrid
     cgef_workspace::W             # CGEF.Diagnostics.ΠWorkspace
-    Π_out::P                      # reused Π_ℓ(x) output buffer
+    Π_out::P                      # reused Π_ℓ(x) output buffer (N-D: Matrix in 2D, Array{,3} in 3D)
     diagnostics::D                # nothing, or (τ_arr, S_arr) reused diagnostic buffers
     filter_plan::Base.RefValue{Any}  # scale-keyed cache of the CGEF filter plan
 end
@@ -182,5 +182,9 @@ function calculate_coarse_graining_flux!(
 )
     return _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
 end
+
+# One-line show (the workspace caches a CGEF filter plan in `filter_plan` → default show can segfault).
+Base.show(io::IO, ::CoarseGrainingFluxWorkspace) = print(io, "CoarseGrainingFluxWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::CoarseGrainingFluxWorkspace) = show(io, w)
 
 end # module CoarseGrainingFlux

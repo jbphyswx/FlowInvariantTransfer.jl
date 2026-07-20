@@ -157,61 +157,214 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
     weights, nBlks, nFreq, nState, nx, nmode,
     Q_nonlinear, LHS,
     return_coefficients, return_auxiliary_modes,
-    _sc, _sqrt_w, _inv_sqrt_w, _permbuf,   # serial-loop scratch (unused here: each task allocates its own)
+    _sc, sqrt_w, inv_sqrt_w, _permbuf, _permbuf_kl,   # sqrt_w/inv_sqrt_w read-only (shared); sc/permbuf are per-chunk
 )
     nTriads = length(fk_idx)
     nStateNx = nState * nx
-
+    CT = eltype(Q_hat)
     lk = ReentrantLock()
 
-    OhMyThreads.@tasks for i in 1:nTriads
-        fi_k = fk_idx[i]
-        fi_l = fl_idx[i]
-        fi_n = fn_idx[i]
+    # Chunk the triads so each task reuses ONE set of scratch (SVD buffers + reshape buffers) across its
+    # triads — exactly like the serial loop — instead of allocating per triad. The pool is built ONCE,
+    # outside the parallel region (per-triad allocation inside would put GC contention in the hot loop).
+    # `sqrt_w`/`inv_sqrt_w` are constant across triads → shared read-only; sc/permbuf are written → per-chunk.
+    nchunks = max(1, min(Threads.nthreads(), nTriads))
+    rngs = collect(OhMyThreads.index_chunks(1:nTriads; n = nchunks))
+    pool = [(sc = FIT.TriadicOrthogonalDecomposition._TriadSVDScratch(CT, nStateNx, nBlks),
+             permbuf = similar(_permbuf), permbuf_kl = similar(_permbuf_kl)) for _ in 1:length(rngs)]
 
-        Q_n_raw = Q_hat[fi_n, :, :, :]
-        Q_k_raw = Q_hat[fi_k, :, :, :]
-        Q_l_raw = Q_hat[fi_l, :, :, :]
+    OhMyThreads.tforeach(eachindex(rngs)) do ci
+        p = pool[ci]
+        for i in rngs[ci]
+            fi_k = fk_idx[i]; fi_l = fl_idx[i]; fi_n = fn_idx[i]
 
-        Q_hat_n = reshape(permutedims(LHS(Q_n_raw), (2, 1, 3)), nStateNx, nBlks)
-        Q_hat_kl = reshape(Q_nonlinear(Q_k_raw, Q_l_raw), nStateNx, nBlks)
+            # Views (no per-triad copy); recipient + giver reshaped into this chunk's reused buffers.
+            Q_n_raw = view(Q_hat, fi_n, :, :, :)
+            Q_k_raw = view(Q_hat, fi_k, :, :, :)
+            Q_l_raw = view(Q_hat, fi_l, :, :, :)
+            permutedims!(p.permbuf, LHS(Q_n_raw), (2, 1, 3))
+            Q_hat_n = reshape(p.permbuf, nStateNx, nBlks)
+            FIT.TriadicOrthogonalDecomposition._apply_nonlinear!(p.permbuf_kl, Q_nonlinear, Q_k_raw, Q_l_raw)
+            Q_hat_kl = reshape(p.permbuf_kl, nStateNx, nBlks)
 
-        U, s, V = FIT.TriadicOrthogonalDecomposition.triadic_svd(Q_hat_n, Q_hat_kl, weights, nBlks)
+            # Same allocation-reusing SVD as the serial loop → threaded result is bit-identical to serial.
+            U, s, V = FIT.TriadicOrthogonalDecomposition._triadic_svd_serial!(
+                p.sc, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
 
-        nm = min(nmode, length(s))
-        u = U[:, 1:nm]
-        v = V[:, 1:nm]
+            nm = min(nmode, length(s))
+            u = U[:, 1:nm]     # copy out — p.sc buffers are overwritten by this chunk's next triad
+            v = V[:, 1:nm]
 
-        # L and T_budget are preallocated and each triad writes to disjoint (fi_l, fi_n) slices, so this is thread-safe
-        for j in 1:nm
-            L[fi_l, fi_n, j] = s[j]
-            T_budget[fi_l, fi_n, j] = s[j] * real(LinearAlgebra.dot(v[:, j], weights .* u[:, j]))
-        end
-
-        # Dict updates are protected by a lock to prevent concurrency corruption
-        lock(lk) do
-            P[(fi_l, fi_n)] = (convective=u, recipient=v)
-        end
-
-        if return_coefficients
-            A_conv = u' * (Q_hat_kl .* weights)
-            A_recip = v' * (Q_hat_n .* weights)
+            # L / T_budget: each triad writes a disjoint (fi_l, fi_n) slice → race-free without a lock.
+            for j in 1:nm
+                L[fi_l, fi_n, j] = s[j]
+            end
+            @inbounds for j in 1:nm
+                acc = zero(eltype(u))
+                for k in axes(u, 1)
+                    acc += conj(v[k, j]) * weights[k] * u[k, j]
+                end
+                T_budget[fi_l, fi_n, j] = s[j] * real(acc)
+            end
             lock(lk) do
-                A_out[(fi_l, fi_n)] = (convective=A_conv, recipient=A_recip)
+                P[(fi_l, fi_n)] = (convective = u, recipient = v)
             end
 
-            if return_auxiliary_modes
-                Q_hat_l = reshape(permutedims(LHS(Q_l_raw), (2, 1, 3)), nStateNx, nBlks)
-                Q_hat_k = reshape(permutedims(LHS(Q_k_raw), (2, 1, 3)), nStateNx, nBlks)
-                inv_s = 1 ./ s[1:nm]
-                donor_mode = Q_hat_l * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
-                catalyst_mode = Q_hat_k * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
+            if return_coefficients
+                A_conv = u' * (Q_hat_kl .* weights)
+                A_recip = v' * (Q_hat_n .* weights)
                 lock(lk) do
-                    Xi_out[(fi_l, fi_n)] = (donor=donor_mode[:, 1:nm], catalyst=catalyst_mode[:, 1:nm])
+                    A_out[(fi_l, fi_n)] = (convective = A_conv, recipient = A_recip)
+                end
+                if return_auxiliary_modes
+                    Q_hat_l = reshape(permutedims(LHS(Q_l_raw), (2, 1, 3)), nStateNx, nBlks)
+                    Q_hat_k = reshape(permutedims(LHS(Q_k_raw), (2, 1, 3)), nStateNx, nBlks)
+                    inv_s = 1 ./ s[1:nm]
+                    donor_mode = Q_hat_l * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
+                    catalyst_mode = Q_hat_k * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
+                    lock(lk) do
+                        Xi_out[(fi_l, fi_n)] = (donor = donor_mode[:, 1:nm], catalyst = catalyst_mode[:, 1:nm])
+                    end
                 end
             end
         end
     end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Thread-parallel mode-to-mode transfer S(k|p)
+# ---------------------------------------------------------------------------
+# Overrides the core `_mode_to_mode_threaded!` stub. Threads the outer giver loop — each giver `p`
+# writes a DISJOINT column `S[·, p]`, so it is embarrassingly parallel (near-linear: N_modes ≫ nthreads).
+# Each chunk keeps a private partial `net` (Σ_p S[·,p]) reduced with `+`; each task builds its OWN
+# single-threaded workspace + giver scratch (the shared one can't be reused concurrently, and the inner
+# FFTs stay single-threaded so the giver-loop threading is never oversubscribed).
+function FIT.ScaleToScaleTransfer._mode_to_mode_threaded!(
+    result, ws, û_p, velocity_hat, ks;
+    invariant::AbstractInvariant = KineticEnergy(),
+    dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
+    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+    advecting_hat = velocity_hat,
+)
+    nd = length(ks)
+    ns = size(velocity_hat)[1:nd]
+    M  = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat))
+    S       = result.transfer
+    Nmodes  = prod(ns)
+    cis     = CartesianIndices(ns)
+    colons  = ntuple(_ -> Colon(), nd)
+    nchunks = max(1, Threads.nthreads())
+    net_partial = OhMyThreads.tmapreduce(+, OhMyThreads.index_chunks(1:Nmodes; n = nchunks)) do rng
+        local_ws  = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
+        local_ûp  = similar(velocity_hat)
+        local_net = zeros(FT, ns...)
+        @inbounds for i in rng
+            p = cis[i]
+            fill!(local_ûp, zero(eltype(local_ûp)))
+            for c in 1:M
+                local_ûp[p, c] = velocity_hat[p, c]
+            end
+            FIT.NonlinearTerm.compute_nonlinear_term!(local_ws, local_ûp, ks;
+                dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
+            Sp = view(S, colons..., p)
+            FIT.Invariants.transfer_density!(Sp, invariant, velocity_hat, local_ws.N̂, ks)
+            local_net .+= Sp
+        end
+        local_net
+    end
+    copyto!(result.net_transfer, net_partial)
+    return result
+end
+
+# ---------------------------------------------------------------------------
+# Thread-parallel smooth band-to-band transfer T(n,m)
+# ---------------------------------------------------------------------------
+# Overrides the core `_band_to_band_threaded!` stub. Threads the outer band loop — each band `m`
+# writes a DISJOINT column `T[·, m]`, so it is embarrassingly parallel; each task builds its OWN
+# single-threaded workspace + band-field/density scratch (inner FFTs single-threaded → no
+# oversubscription). The band-weight masks `W` are shared read-only.
+function FIT.BandTransfer._band_to_band_threaded!(
+    T, bws, velocity_hat, ks;
+    dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
+    invariant::AbstractInvariant = KineticEnergy(),
+    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+    advecting_hat = velocity_hat,
+)
+    nd = length(ks)
+    ns = size(velocity_hat)[1:nd]
+    D  = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat))
+    nb = length(bws.centers)
+    W  = bws.W
+    # Chunk the bands so each task builds its workspace + scratch ONCE (per chunk) and reuses it across
+    # its bands — NOT once per band. Per-band allocation would put full-grid workspace+plan builds inside
+    # the parallel region (GC contention, a stop-the-world sync under threads → threading loses at large N).
+    nchunks = max(1, min(Threads.nthreads(), nb))
+    rngs = collect(OhMyThreads.index_chunks(1:nb; n = nchunks))
+    # Build the per-chunk pool (workspace + scratch) ONCE, serially, OUTSIDE the parallel region: doing
+    # it inside would allocate full-grid workspaces + plans concurrently, and the resulting GC (a
+    # stop-the-world sync under threads) contends with the compute — which made threading LOSE at large N.
+    pool = [(ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
+             fm = similar(velocity_hat), d = similar(velocity_hat, FT, ns...)) for _ in 1:length(rngs)]
+    OhMyThreads.tforeach(eachindex(rngs)) do ci
+        p = pool[ci]
+        for m in rngs[ci]
+            for c in 1:D, I in CartesianIndices(ns)
+                p.fm[I, c] = W[m][I] * velocity_hat[I, c]
+            end
+            FIT.NonlinearTerm.compute_nonlinear_term!(p.ws, p.fm, ks;
+                dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
+            FIT.Invariants.transfer_density!(p.d, invariant, velocity_hat, p.ws.N̂, ks)
+            for n in 1:nb
+                s = zero(FT)
+                for I in CartesianIndices(ns)
+                    s += W[n][I] * p.d[I]
+                end
+                T[n, m] = s
+            end
+        end
+    end
+    return T
+end
+
+# ---------------------------------------------------------------------------
+# Thread-parallel partial (decomposition-channel) fluxes
+# ---------------------------------------------------------------------------
+# Overrides the core `_partial_fluxes_threaded!` stub. Threads the n²-pair loop — each (sp,sq) pair
+# is an independent nonlinear-term build writing DISJOINT channel keys (sk,sp,sq); each task chunk
+# builds its OWN single-threaded workspace + density scratch + partial channel Dict ONCE (outside the
+# parallel region, so no full-grid/plan allocation contends with compute), then the partials are merged.
+function FIT.SpectralFlux._partial_fluxes_threaded!(
+    channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh;
+    dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
+    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+)
+    FT = real(eltype(velocity_hat)); nd = length(ks); ns = size(velocity_hat)[1:nd]
+    prs = [(sp, sq) for sp in names for sq in names]
+    np  = length(prs)
+    nchunks = max(1, min(Threads.nthreads(), np))
+    rngs = collect(OhMyThreads.index_chunks(1:np; n = nchunks))
+    pool = [(ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
+             d  = similar(velocity_hat, FT, ns...),
+             ch = Dict{NTuple{3,Symbol}, FIT.Types.SpectralFluxResult}()) for _ in 1:length(rngs)]
+    OhMyThreads.tforeach(eachindex(rngs)) do ci
+        p = pool[ci]
+        for pi in rngs[ci]
+            sp, sq = prs[pi]
+            FIT.NonlinearTerm.compute_nonlinear_term!(p.ws, comps[sq], ks;
+                advecting_hat = comps[sp], dealiasing = dealiasing, spectral = spectral)
+            for sk in names
+                FIT.Invariants.transfer_density!(p.d, KineticEnergy(), comps[sk], p.ws.N̂, ks)
+                p.ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(p.d, sidx, centers, Nsh)
+            end
+        end
+    end
+    for p in pool
+        merge!(channels, p.ch)
+    end
+    return channels
 end
 
 end # module FlowInvariantTransferOhMyThreadsExt

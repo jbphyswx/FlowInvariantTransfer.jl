@@ -2,6 +2,7 @@ module ShellBinning
 
 using ..Types: AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 using ..Types: AbstractShellGeometry, ShellMagnitude
+using ..Backends: AbstractExecutionBackend
 
 export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 
@@ -137,6 +138,20 @@ function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
         end
     end
     return idx
+end
+
+# Shell reduction `T_spec[shell_idx[I]] += density[I]` over all modes (shell index 0 = dropped),
+# zeroing `T_spec` first. The host method is a 0-alloc scalar loop; the KernelAbstractions extension
+# adds a `GPUBackend` method (atomic device scatter-add) so device-backed arrays reduce with no scalar
+# indexing. Backend-dispatched so the serial reductions and the distributed pencil flux share one op.
+function shell_scatter_add!(T_spec, density, shell_idx, ::AbstractExecutionBackend)
+    fill!(T_spec, zero(eltype(T_spec)))
+    @inbounds for I in CartesianIndices(density)
+        s = shell_idx[I]
+        s == 0 && continue
+        T_spec[s] += density[I]
+    end
+    return T_spec
 end
 
 end # module ShellBinning

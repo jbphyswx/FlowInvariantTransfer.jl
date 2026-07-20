@@ -3,6 +3,7 @@ module Compressible
 using ..Types: CompressibleFluxResult, AbstractShellBinning, LinearBinning, AbstractShellGeometry,
                IsotropicShells, AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
 using ..ShellBinning: shell_edges, shell_centers, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 using ..NonlinearTerm: _is_dealiased
@@ -221,12 +222,15 @@ _directsum_tf(ks, ns) = TransformContext(
 
 # The FFT context is provided by FlowInvariantTransferFFTWExt; this fallback (less specific than the
 # extension's method) gives a clear error when a non-DirectSum backend is requested without FFTW.
-_fft_tf(velocity_hat, ks, ns) = throw(ArgumentError(
+# `fft_nthreads` pins the FFTW plan thread count (baked into the plan → no per-call scratch alloc); the
+# threaded execution path passes `> 1` so the single-pipeline FFTs run multithreaded (no outer loop).
+_fft_tf(velocity_hat, ks, ns; fft_nthreads::Int = 1) = throw(ArgumentError(
     "calculate_compressible_flux with an FFT backend requires `using FFTW`; " *
     "or pass `spectral = DirectSumBackend()` for the dependency-free (slow, small-grid) path."))
 
-_resolve_tf(::DirectSumBackend, velocity_hat, ks, ns) = _directsum_tf(ks, ns)
-_resolve_tf(::AbstractSpectralBackend, velocity_hat, ks, ns) = _fft_tf(velocity_hat, ks, ns)
+_resolve_tf(::DirectSumBackend, velocity_hat, ks, ns; fft_nthreads::Int = 1) = _directsum_tf(ks, ns)
+_resolve_tf(::AbstractSpectralBackend, velocity_hat, ks, ns; fft_nthreads::Int = 1) =
+    _fft_tf(velocity_hat, ks, ns; fft_nthreads = fft_nthreads)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -241,7 +245,7 @@ momentum physical & spectral fields, gradients, nonlinear terms, and the R/C-cha
 dilatation scratch), so repeated per-snapshot calls allocate ~0 field memory (only the small shell
 vectors of each result). Build once for a given grid/precision and reuse across snapshots.
 """
-struct CompressibleWorkspace{TF, CA, CS, RA, RS, CG, RG}
+struct CompressibleWorkspace{TF, CA, CS, RA, RS, CG, RG, SI, CE}
     tf::TF
     vel::CA; ρh::CS; ûc::CA; ρc::CS; v̂::CA; N̂1::CA; N̂2::CA; cscr::CA; sscr::CA
     u_phys::RA; v_phys::RA; N1_phys::RA; N2_phys::RA
@@ -250,26 +254,43 @@ struct CompressibleWorkspace{TF, CA, CS, RA, RS, CG, RG}
     ûR::CA; ûC::CA; v̂R::CA; v̂C::CA; uR::RA; uC::RA; vR::RA; vC::RA
     N̂1R::CA; N̂2R::CA; N̂1C::CA; N̂2C::CA
     σh::CS; gradσc::CG; σ̃phys::CA; σ̃::CA
+    sidx::SI; centers::CE      # precomputed shell structure (geometry+binning are fixed for the workspace)
 end
 
-function CompressibleWorkspace(velocity_hat, ks; spectral::AbstractSpectralBackend = FFTBackend())
+function CompressibleWorkspace(velocity_hat, ks;
+                               spectral::AbstractSpectralBackend = FFTBackend(),
+                               binning::AbstractShellBinning = _default_binning(ks),
+                               geometry::AbstractShellGeometry = IsotropicShells(),
+                               execution::AbstractExecutionBackend = SerialBackend())
     nd = length(ks); ns = size(velocity_hat)[1:nd]; FT = real(eltype(velocity_hat)); CT = complex(FT)
-    ca()  = Array{CT}(undef, ns..., nd)
-    cs()  = Array{CT}(undef, ns..., 1)
-    ra()  = Array{FT}(undef, ns..., nd)
-    rs()  = Array{FT}(undef, ns...)
-    cg()  = Array{CT}(undef, ns..., nd, nd)
-    rg()  = Array{FT}(undef, ns..., nd, nd)
-    cg1() = Array{CT}(undef, ns..., 1, nd)
+    # Compressible is a single ~O(nd) FFT pipeline (not an outer loop), so ThreadedBackend threads the
+    # FFTs themselves — plans baked at nthreads (no per-call scratch alloc, no oversubscription).
+    fft_nthreads = execution isa ThreadedBackend ? Threads.nthreads() : 1
+    # Buffers built in `velocity_hat`'s own array type → device-resident for device input (the whole
+    # pipeline is device-generic broadcasts), plain `Array`s for host input (bit-identical to before).
+    ca()  = similar(velocity_hat, CT, ns..., nd)
+    cs()  = similar(velocity_hat, CT, ns..., 1)
+    ra()  = similar(velocity_hat, FT, ns..., nd)
+    rs()  = similar(velocity_hat, FT, ns...)
+    cg()  = similar(velocity_hat, CT, ns..., nd, nd)
+    rg()  = similar(velocity_hat, FT, ns..., nd, nd)
+    cg1() = similar(velocity_hat, CT, ns..., 1, nd)
+    # Shell structure depends only on (ks, geometry, binning) — hoisted here so the per-snapshot `!`
+    # never reallocates the full-grid magnitude/shell-index arrays.
+    k_mag   = shell_coordinate(geometry, ks)
+    edges   = shell_edges(binning, maximum(k_mag))
+    centers = collect(shell_centers(binning, maximum(k_mag)))
+    sidx    = assign_shells(k_mag, edges)
     return CompressibleWorkspace(
-        _resolve_tf(spectral, velocity_hat, ks, ns),
+        _resolve_tf(spectral, velocity_hat, ks, ns; fft_nthreads = fft_nthreads),
         ca(), cs(), ca(), cs(), ca(), ca(), ca(), ca(), ca(),
         ra(), ra(), ra(), ra(),
         rs(), rs(), rs(),
         cg(), cg(), rg(), rg(),
         ca(), ca(), ca(), ca(), ra(), ra(), ra(), ra(),
         ca(), ca(), ca(), ca(),
-        cs(), cg1(), ca(), ca())
+        cs(), cg1(), ca(), ca(),
+        sidx, centers)
 end
 
 """
@@ -289,12 +310,15 @@ function calculate_compressible_flux(
     density_hat,
     ks;
     spectral::AbstractSpectralBackend = FFTBackend(),
+    binning::AbstractShellBinning = _default_binning(ks),
+    geometry::AbstractShellGeometry = IsotropicShells(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     kwargs...,
 )
     nd = length(ks)
     size(velocity_hat, nd + 1) == nd ||
         throw(ArgumentError("compressible transfer needs D = nd velocity components (got $(size(velocity_hat, nd+1)) for nd=$nd)."))
-    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral)
+    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=execution)
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
 end
 
@@ -310,16 +334,15 @@ function calculate_compressible_flux!(
     velocity_hat,
     density_hat,
     ks;
-    binning::AbstractShellBinning = _default_binning(ks),
     pressure_hat = nothing,
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     decompose::Bool = true,
-    geometry::AbstractShellGeometry = IsotropicShells(),
 )
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))
     tf = ws.tf
+    colons = ntuple(_ -> Colon(), nd)   # component-slice views for device-generic broadcasts
 
     # Orszag 2/3 dealiasing: copy inputs into the workspace, zeroing the |k| ≥ N/3 discard band.
     trunc = dealiasing isa OrszagTwoThirds
@@ -329,15 +352,17 @@ function calculate_compressible_flux!(
     # Physical fields  u = idft(û),  ρ = idft(ρ̂),  v = ρu,  v̂ = dft(v)
     tf.idft!(ws.ûc, ws.vel); @. ws.u_phys = real(ws.ûc)
     tf.idft!(ws.ρc, ws.ρh)
-    @inbounds for xI in CartesianIndices(ns); ws.ρ_phys[xI] = real(ws.ρc[xI, 1]); end
-    @inbounds for c in 1:nd, xI in CartesianIndices(ns); ws.v_phys[xI, c] = ws.ρ_phys[xI] * ws.u_phys[xI, c]; end
+    ws.ρ_phys .= real.(reshape(ws.ρc, ns))
+    ws.v_phys .= reshape(ws.ρ_phys, ns..., 1) .* ws.u_phys
     @. ws.cscr = complex(ws.v_phys); tf.dft!(ws.v̂, ws.cscr)
 
     # Gradients of u, v and the divergence ∇·u
     tf.grad!(ws.graduc, ws.vel); @. ws.gradu = real(ws.graduc)
     tf.grad!(ws.gradvc, ws.v̂);   @. ws.gradv = real(ws.gradvc)
     fill!(ws.divu, zero(FT))
-    @inbounds for xI in CartesianIndices(ns), d in 1:nd; ws.divu[xI] += ws.gradu[xI, d, d]; end
+    for d in 1:nd
+        ws.divu .+= view(ws.gradu, colons..., d, d)
+    end
 
     # 𝒩₁ = (u·∇)v + v(∇·u) ;  𝒩₂ = (u·∇)u ;  then N̂₁,N̂₂
     _assemble_N!(ws.N1_phys, ws.N2_phys, ws.u_phys, ws.v_phys, ws.gradu, ws.gradv, ws.divu, ns, nd)
@@ -345,19 +370,16 @@ function calculate_compressible_flux!(
     @. ws.cscr = complex(ws.N2_phys); tf.dft!(ws.N̂2, ws.cscr)
 
     # Per-mode net transfer T_u(k) = −½Re{û*·𝒩̂₁} − ½Re{v̂*·𝒩̂₂}
-    @inbounds for kI in CartesianIndices(ns)
-        s = zero(FT)
-        for c in 1:nd
-            s += real(conj(ws.vel[kI, c]) * ws.N̂1[kI, c]) + real(conj(ws.v̂[kI, c]) * ws.N̂2[kI, c])
-        end
-        ws.td[kI] = -FT(0.5) * s
+    fill!(ws.td, zero(FT))
+    for c in 1:nd
+        ws.td .+= real.(conj.(view(ws.vel, colons..., c)) .* view(ws.N̂1, colons..., c) .+
+                        conj.(view(ws.v̂, colons..., c)) .* view(ws.N̂2, colons..., c))
     end
+    ws.td .*= -FT(0.5)
 
-    # Shell binning
-    k_mag   = shell_coordinate(geometry, ks)
-    edges   = shell_edges(binning, maximum(k_mag))
-    centers = collect(shell_centers(binning, maximum(k_mag)))
-    sidx    = assign_shells(k_mag, edges)
+    # Shell binning — precomputed in the workspace (0-alloc across snapshots)
+    sidx    = ws.sidx
+    centers = ws.centers
     N_sh    = length(centers)
 
     T_spec = _bin(ws.td, sidx, N_sh, FT, ns, trunc)
@@ -382,19 +404,18 @@ function _copy_trunc!(dst, src, ns::NTuple{nd,Int}, nd_::Int, trunc::Bool) where
     return dst
 end
 
-# 𝒩₁ = (u·∇)v + v(∇·u), 𝒩₂ = (u·∇)u  (physical), into preallocated N1,N2.
+# 𝒩₁ = (u·∇)v + v(∇·u), 𝒩₂ = (u·∇)u  (physical), into preallocated N1,N2. Device-generic: component
+# slices are broadcast/accumulated (no scalar indexing), so this runs on CPU `Array`s and device arrays.
 function _assemble_N!(N1, N2, u_phys, v_phys, gradu, gradv, divu, ns::NTuple{nd,Int}, nd_::Int) where {nd}
-    # Accumulate in the concrete output element type. A `FT` passed as a runtime *value* (a `DataType`)
-    # would make `zero(FT)` infer to `Any` and box every `+=` in the inner loop — `eltype(N1)` is concrete.
-    RT = eltype(N1)
-    @inbounds for c in 1:nd_, xI in CartesianIndices(ns)
-        adv_v = zero(RT); adv_u = zero(RT)
+    colons = ntuple(_ -> Colon(), nd)
+    @inbounds for c in 1:nd_
+        N1c = view(N1, colons..., c); N2c = view(N2, colons..., c)
+        fill!(N1c, zero(eltype(N1))); fill!(N2c, zero(eltype(N2)))
         for d in 1:nd_
-            adv_v += u_phys[xI, d] * gradv[xI, c, d]
-            adv_u += u_phys[xI, d] * gradu[xI, c, d]
+            N1c .+= view(u_phys, colons..., d) .* view(gradv, colons..., c, d)
+            N2c .+= view(u_phys, colons..., d) .* view(gradu, colons..., c, d)
         end
-        N1[xI, c] = adv_v + v_phys[xI, c] * divu[xI]
-        N2[xI, c] = adv_u
+        N1c .+= view(v_phys, colons..., c) .* divu
     end
     return nothing
 end
@@ -406,8 +427,9 @@ end
 # accumulated into a flux; the four channels sum to the total flux (validated in tests), and in the
 # incompressible limit only the rotational channel survives (paper Eqs. 48–50).
 # ---------------------------------------------------------------------------
-function _rc_channels!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where {nd}
+function _rc_channels!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}, trunc) where {nd, FT}
     tf = ws.tf
+    colons = ntuple(_ -> Colon(), nd)
     _helmholtz_split!(ws.ûR, ws.ûC, ws.vel, ks, ns)
     _helmholtz_split!(ws.v̂R, ws.v̂C, ws.v̂, ks, ns)
     tf.idft!(ws.cscr, ws.ûR); @. ws.uR = real(ws.cscr)
@@ -430,13 +452,12 @@ function _rc_channels!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where 
     # Transfer density: receiver β-part at k, giver α-part carried through the nonlinear term
     #   T^{βα}(k) = −½ Re{ û_β*(k)·𝒩̂₁[α] } − ½ Re{ v̂_β*(k)·𝒩̂₂[α] }  (into the reused ws.td)
     Π(û_recv, v̂_recv, N̂1, N̂2) = begin
-        @inbounds for kI in CartesianIndices(ns)
-            s = zero(FT)
-            for c in 1:nd
-                s += real(conj(û_recv[kI, c]) * N̂1[kI, c]) + real(conj(v̂_recv[kI, c]) * N̂2[kI, c])
-            end
-            ws.td[kI] = -FT(0.5) * s
+        fill!(ws.td, zero(FT))
+        for c in 1:nd
+            ws.td .+= real.(conj.(view(û_recv, colons..., c)) .* view(N̂1, colons..., c) .+
+                            conj.(view(v̂_recv, colons..., c)) .* view(N̂2, colons..., c))
         end
+        ws.td .*= -FT(0.5)
         _flux_from_transfer(_bin(ws.td, sidx, N_sh, FT, ns, trunc))
     end
     rr = Π(ws.ûR, ws.v̂R, ws.N̂1R, ws.N̂2R)   # R receiver, R giver
@@ -473,28 +494,32 @@ end
 #   Q_{I,C}(k) = ½ Re[σ̃(k)·v_C*(k)] − ½ Im[σ(k){k·u_C*(k)}]
 # with σ̃ = ∇σ/ρ (specific pressure gradient). Shell-binned. Vanishes for incompressible div-free flow.
 # ---------------------------------------------------------------------------
-function _pressure_dilatation!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, FT, trunc) where {nd}
+function _pressure_dilatation!(ws, ks, ns::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}, trunc) where {nd, FT}
     tf = ws.tf
+    colons = ntuple(_ -> Colon(), nd)
     _helmholtz_split!(ws.ûR, ws.ûC, ws.vel, ks, ns)       # ûC used below
     _helmholtz_split!(ws.v̂R, ws.v̂C, ws.v̂, ks, ns)         # ws.v̂ preserved (giver_N! uses ws.sscr)
     # σ̃ = ∇σ / ρ : physical gradient of σ divided by ρ, back to spectral.
     tf.grad!(ws.gradσc, ws.σh)                            # (ns..., 1, nd) complex
-    @inbounds for d in 1:nd, xI in CartesianIndices(ns)
-        ws.σ̃phys[xI, d] = real(ws.gradσc[xI, 1, d]) / ws.ρ_phys[xI]
+    for d in 1:nd
+        view(ws.σ̃phys, colons..., d) .= real.(view(ws.gradσc, colons..., 1, d)) ./ ws.ρ_phys
     end
     tf.dft!(ws.σ̃, ws.σ̃phys)
 
-    QR = ws.divu; QC = ws.td      # reuse main scratch (free after the main transfer + channels)
-    @inbounds for kI in CartesianIndices(ns)
-        qr = zero(FT); qc = zero(FT); kdotuC = zero(complex(FT))
-        for c in 1:nd
-            qr += real(ws.σ̃[kI, c] * conj(ws.v̂R[kI, c]))
-            qc += real(ws.σ̃[kI, c] * conj(ws.v̂C[kI, c]))
-            kdotuC += FT(ks[c][kI[c]]) * conj(ws.ûC[kI, c])
-        end
-        QR[kI] = FT(0.5) * qr
-        QC[kI] = FT(0.5) * qc - FT(0.5) * imag(ws.σh[kI, 1] * kdotuC)
+    # Per-dimension wavenumber grids (built on the fly; the pressure path is not on the 0-alloc contract).
+    kg = ntuple(nd) do c
+        v = similar(ws.σ̃, FT, ns[c]); copyto!(v, collect(FT, ks[c]))
+        reshape(v, ntuple(i -> i == c ? ns[c] : 1, nd))
     end
+    QR = ws.divu; QC = ws.td      # reuse main scratch (free after the main transfer + channels)
+    kdotuC = similar(ws.σ̃, ns)    # Σ_c k_c·conj(û_C,c)
+    fill!(QR, zero(FT)); fill!(QC, zero(FT)); fill!(kdotuC, zero(eltype(kdotuC)))
+    for c in 1:nd
+        QR .+= FT(0.5) .* real.(view(ws.σ̃, colons..., c) .* conj.(view(ws.v̂R, colons..., c)))
+        QC .+= FT(0.5) .* real.(view(ws.σ̃, colons..., c) .* conj.(view(ws.v̂C, colons..., c)))
+        kdotuC .+= kg[c] .* conj.(view(ws.ûC, colons..., c))
+    end
+    QC .-= FT(0.5) .* imag.(reshape(ws.σh, ns) .* kdotuC)
     return (rotational = _bin(QR, sidx, N_sh, FT, ns, trunc), compressive = _bin(QC, sidx, N_sh, FT, ns, trunc))
 end
 
@@ -550,5 +575,9 @@ function _default_binning(ks)
     end
     return LinearBinning(isfinite(min_dk) ? min_dk : 1.0)
 end
+
+# One-line show (the workspace's transform context holds FFTW plans → default show can segfault).
+Base.show(io::IO, ::CompressibleWorkspace) = print(io, "CompressibleWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::CompressibleWorkspace) = show(io, w)
 
 end # module Compressible

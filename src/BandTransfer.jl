@@ -2,6 +2,7 @@ module BandTransfer
 
 using ..Types: SmoothBands, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds, AbstractSpectralBackend,
                DirectSumBackend, AbstractShellGeometry, IsotropicShells
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace
@@ -84,31 +85,14 @@ function calculate_band_to_band_transfer!(
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
-    ws = bws.nlt; f_m = bws.f_m; d = bws.d; W = bws.W
-
-    @inbounds for m in 1:nb
-        # band-m field f_m = w_m ⊙ (primary field), advected by the full velocity
-        for c in 1:D, I in CartesianIndices(ns)
-            f_m[I, c] = W[m][I] * velocity_hat[I, c]
-        end
-        compute_nonlinear_term!(ws, f_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
-        transfer_density!(d, invariant, velocity_hat, ws.N̂, ks)
-        for n in 1:nb
-            s = zero(FT)
-            for I in CartesianIndices(ns)
-                s += W[n][I] * d[I]
-            end
-            T[n, m] = s
-        end
-    end
-
+    # Fill the transfer matrix (one nonlinear term per band m → column T[·,m]), dispatched on execution.
+    _band_to_band_fill!(resolve_execution(execution), T, bws, velocity_hat, ks;
+        dealiasing=dealiasing, invariant=invariant, spectral=spectral, advecting_hat=advecting_hat)
     @inbounds for n in 1:nb
         acc = zero(FT)
         for m in 1:nb; acc += T[n, m]; end
@@ -122,6 +106,44 @@ function calculate_band_to_band_transfer!(
     return (centers = bws.centers, transfer_matrix = T,
             net_transfer = net, max_antisymmetry_error = asym)
 end
+
+# Fill T[·,m] over bands, dispatched on execution. Bands are independent (disjoint columns) →
+# embarrassingly parallel; threaded/distributed/GPU override the named stubs, each worker using its
+# own single-threaded workspace (inner FFTs stay single-threaded → no oversubscription).
+function _band_to_band_fill!(::SerialBackend, T, bws::BandTransferWorkspace, velocity_hat, ks;
+                             dealiasing, invariant, spectral, advecting_hat)
+    nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat)); nb = length(bws.centers)
+    ws = bws.nlt; f_m = bws.f_m; d = bws.d; W = bws.W
+    @inbounds for m in 1:nb
+        for c in 1:D, I in CartesianIndices(ns)
+            f_m[I, c] = W[m][I] * velocity_hat[I, c]
+        end
+        compute_nonlinear_term!(ws, f_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+        transfer_density!(d, invariant, velocity_hat, ws.N̂, ks)
+        for n in 1:nb
+            s = zero(FT)
+            for I in CartesianIndices(ns)
+                s += W[n][I] * d[I]
+            end
+            T[n, m] = s
+        end
+    end
+    return T
+end
+_band_to_band_fill!(::ThreadedBackend, T, bws, velocity_hat, ks; kwargs...) =
+    _band_to_band_threaded!(T, bws, velocity_hat, ks; kwargs...)
+_band_to_band_fill!(exec::DistributedBackend, T, bws, velocity_hat, ks; kwargs...) =
+    _band_to_band_distributed!(T, bws, velocity_hat, ks, exec; kwargs...)
+_band_to_band_fill!(gpu::GPUBackend, T, bws, velocity_hat, ks; kwargs...) =
+    _band_to_band_gpu!(T, bws, velocity_hat, ks, gpu; kwargs...)
+
+_band_to_band_threaded!(args...; kwargs...) = throw(ArgumentError(
+    "Threaded band-to-band transfer requires OhMyThreads. Run `using OhMyThreads` to load the extension."))
+_band_to_band_distributed!(args...; kwargs...) = throw(ArgumentError(
+    "Distributed band-to-band transfer requires Distributed. Run `using Distributed` to load the extension."))
+_band_to_band_gpu!(args...; kwargs...) = throw(ArgumentError(
+    "GPU band-to-band transfer requires KernelAbstractions. Run `using KernelAbstractions` to load the extension."))
 
 """
     calculate_band_to_band_transfer(velocity_hat, ks; bands::SmoothBands, dealiasing=OrszagTwoThirds(),
@@ -143,6 +165,7 @@ function calculate_band_to_band_transfer(
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     invariant::AbstractInvariant = KineticEnergy(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
@@ -152,7 +175,13 @@ function calculate_band_to_band_transfer(
     T   = zeros(FT, nb, nb)
     net = zeros(FT, nb)
     return calculate_band_to_band_transfer!(T, net, bws, velocity_hat, ks;
-        dealiasing=dealiasing, invariant=invariant, spectral=spectral, advecting_hat=advecting_hat)
+        dealiasing=dealiasing, invariant=invariant, spectral=spectral, execution=execution,
+        advecting_hat=advecting_hat)
 end
+
+# One-line show (the workspace holds a NonlinearTermWorkspace whose FFTW plan bundle can segfault
+# under the default field-dump show).
+Base.show(io::IO, ::BandTransferWorkspace) = print(io, "BandTransferWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::BandTransferWorkspace) = show(io, w)
 
 end # module BandTransfer

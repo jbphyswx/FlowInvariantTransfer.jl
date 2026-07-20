@@ -1,6 +1,7 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend, ThreadedBackend, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves, resolve_execution
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid, as_component_field
@@ -170,6 +171,19 @@ _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::SerialBackend, spectr
 
 _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ThreadedBackend, spectral::AbstractSpectralBackend; kwargs...) =
     _shell_to_shell_threaded!(result, ws, velocity_hat, ks, spectral; kwargs...)
+
+# Distributed / GPU dispatch → named stubs overridden by the Distributed / KernelAbstractions
+# extensions (same pattern as the threaded path). Without the extension loaded these raise an
+# informative `using X` error rather than a bare `MethodError`.
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution::DistributedBackend, spectral::AbstractSpectralBackend; kwargs...) =
+    _shell_to_shell_distributed!(result, ws, velocity_hat, ks, execution, spectral; kwargs...)
+_calculate_shell_to_shell!(result, ws, velocity_hat, ks, gpu::GPUBackend, spectral::AbstractSpectralBackend; kwargs...) =
+    _shell_to_shell_gpu!(result, ws, velocity_hat, ks, gpu, spectral; kwargs...)
+
+_shell_to_shell_distributed!(args...; kwargs...) = throw(ArgumentError(
+    "Distributed shell-to-shell transfer requires Distributed. Run `using Distributed` to load the extension."))
+_shell_to_shell_gpu!(args...; kwargs...) = throw(ArgumentError(
+    "GPU shell-to-shell transfer requires KernelAbstractions. Run `using KernelAbstractions` to load the extension."))
 
 # ---------------------------------------------------------------------------
 # Direct reference implementation

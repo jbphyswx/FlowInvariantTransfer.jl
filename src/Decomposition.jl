@@ -51,8 +51,6 @@ end
 # Helical (Craya–Herring) decomposition — pure per-mode linear algebra, no external solver
 # ---------------------------------------------------------------------------
 
-@inline _cross3(a, b) = (a[2]*b[3] - a[3]*b[2], a[3]*b[1] - a[1]*b[3], a[1]*b[2] - a[2]*b[1])
-
 """
     decompose_field(::HelicalDecomposition, velocity_hat, ks) -> (positive=u₊, negative=u₋)
 
@@ -67,31 +65,50 @@ function _decompose_field_spectral(::HelicalDecomposition, velocity_hat::Abstrac
     D  = size(velocity_hat, nd + 1)
     D >= 3 || throw(ArgumentError("HelicalDecomposition needs ≥3 velocity components (got D=$D)."))
     FT = real(eltype(velocity_hat))
-    up = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
-    um = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
     invsqrt2 = inv(sqrt(FT(2)))
-    @inbounds for I in CartesianIndices(ns)
-        kx = FT(ks[1][I[1]]); ky = FT(ks[2][I[2]]); kz = FT(ks[3][I[3]])
-        kk = sqrt(kx*kx + ky*ky + kz*kz)
-        kk == 0 && continue                              # DC mode carries no helicity
-        k̂ = (kx/kk, ky/kk, kz/kk)
-        # Reference vector not (nearly) parallel to k̂, so k̂×ref is well-conditioned.
-        ref = abs(k̂[3]) < FT(0.9) ? (zero(FT), zero(FT), one(FT)) : (one(FT), zero(FT), zero(FT))
-        e1 = _cross3(k̂, ref)
-        n1 = sqrt(e1[1]^2 + e1[2]^2 + e1[3]^2)
-        e1 = (e1[1]/n1, e1[2]/n1, e1[3]/n1)              # unit, ⊥ k̂
-        e2 = _cross3(k̂, e1)                              # unit, ⊥ k̂ and e1
-        u1 = velocity_hat[I, 1]; u2 = velocity_hat[I, 2]; u3 = velocity_hat[I, 3]
-        ue1 = u1*e1[1] + u2*e1[2] + u3*e1[3]
-        ue2 = u1*e2[1] + u2*e2[2] + u3*e2[3]
-        # h_± = (e1 ± i e2)/√2 ; coefficients u_± = û·h_±*  (h_+* = (e1−ie2)/√2, h_-* = (e1+ie2)/√2)
-        upc = (ue1 - im*ue2) * invsqrt2
-        umc = (ue1 + im*ue2) * invsqrt2
-        for c in 1:3
-            hpc = (e1[c] + im*e2[c]) * invsqrt2          # h_+ component c
-            hmc = (e1[c] - im*e2[c]) * invsqrt2          # h_- component c
-            up[I, c] = upc * hpc
-            um[I, c] = umc * hmc
+
+    # Device-generic (broadcast) helical projection: every step is an elementwise array op over the mode
+    # grid — no scalar indexing — so identical code runs on CPU `Array`s and on device arrays (CuArray /
+    # JLArray), and needs no KA kernel/synchronize. Per-dimension wavenumber grids are materialised in
+    # `velocity_hat`'s own array type so all broadcasts stay on-device.
+    kg = ntuple(nd) do d
+        v = similar(velocity_hat, FT, ns[d]); copyto!(v, FT.(ks[d]))
+        reshape(v, ntuple(i -> i == d ? ns[d] : 1, nd))
+    end
+    kxg, kyg, kzg = kg[1], kg[2], kg[3]
+    kk    = @. sqrt(kxg^2 + kyg^2 + kzg^2)
+    invkk = @. ifelse(kk > 0, inv(kk), zero(FT))          # 0 at DC ⇒ k̂ = 0 ⇒ u_± = 0 (no helicity)
+    k̂x = @. kxg * invkk; k̂y = @. kyg * invkk; k̂z = @. kzg * invkk
+    # Reference not (nearly) ∥ k̂: e1 = k̂ × ẑ = (k̂y,−k̂x,0) when |k̂z|<0.9, else k̂ × x̂ = (0,k̂z,−k̂y).
+    sel = @. abs(k̂z) < FT(0.9)
+    e1x = @. ifelse(sel, k̂y, zero(FT))
+    e1y = @. ifelse(sel, -k̂x, k̂z)
+    e1z = @. ifelse(sel, zero(FT), -k̂y)
+    invn1 = @. ifelse((e1x^2 + e1y^2 + e1z^2) > 0, inv(sqrt(e1x^2 + e1y^2 + e1z^2)), zero(FT))
+    e1x = @. e1x * invn1; e1y = @. e1y * invn1; e1z = @. e1z * invn1   # unit, ⊥ k̂
+    e2x = @. k̂y*e1z - k̂z*e1y                              # e2 = k̂ × e1  (unit, ⊥ k̂ and e1)
+    e2y = @. k̂z*e1x - k̂x*e1z
+    e2z = @. k̂x*e1y - k̂y*e1x
+
+    u1 = selectdim(velocity_hat, nd + 1, 1)
+    u2 = selectdim(velocity_hat, nd + 1, 2)
+    u3 = selectdim(velocity_hat, nd + 1, 3)
+    ue1 = @. u1*e1x + u2*e1y + u3*e1z                     # û·e1, û·e2 (complex)
+    ue2 = @. u1*e2x + u2*e2y + u3*e2z
+    # h_± = (e1 ± i e2)/√2 ; coefficients u_± = û·h_±* (h_+* = (e1−ie2)/√2, h_-* = (e1+ie2)/√2)
+    upc = @. (ue1 - im*ue2) * invsqrt2
+    umc = @. (ue1 + im*ue2) * invsqrt2
+
+    up = similar(velocity_hat); um = similar(velocity_hat)
+    for (c, e1c, e2c) in ((1, e1x, e2x), (2, e1y, e2y), (3, e1z, e2z))
+        selectdim(up, nd + 1, c) .= upc .* (e1c .+ im .* e2c) .* invsqrt2   # u_+ component c
+        selectdim(um, nd + 1, c) .= umc .* (e1c .- im .* e2c) .* invsqrt2   # u_- component c
+    end
+    # Components beyond the first 3 (if any) carry no helicity.
+    if D > 3
+        for c in 4:D
+            selectdim(up, nd + 1, c) .= zero(eltype(up))
+            selectdim(um, nd + 1, c) .= zero(eltype(um))
         end
     end
     return (positive = up, negative = um)
@@ -111,37 +128,50 @@ function _decompose_field_spectral(::ToroidalPoloidalDecomposition, velocity_hat
     D  = size(velocity_hat, nd + 1)
     D >= 3 || throw(ArgumentError("ToroidalPoloidalDecomposition needs ≥3 velocity components (got D=$D)."))
     FT = real(eltype(velocity_hat))
+
+    # Device-generic (broadcast) Craya–Herring projection: every step is an elementwise op over the mode
+    # grid (no scalar indexing), so identical code runs on CPU `Array`s and device arrays (CuArray/JLArray)
+    # with no KA kernel. Per-dimension wavenumber grids live in `velocity_hat`'s array type (on-device).
+    kg = ntuple(nd) do d
+        v = similar(velocity_hat, FT, ns[d]); copyto!(v, FT.(ks[d]))
+        reshape(v, ntuple(i -> i == d ? ns[d] : 1, nd))
+    end
+    kxg, kyg, kzg = kg[1], kg[2], kg[3]
+    kk    = @. sqrt(kxg^2 + kyg^2 + kzg^2)
+    invkk = @. ifelse(kk > 0, inv(kk), zero(FT))
+    k̂x = @. kxg * invkk; k̂y = @. kyg * invkk; k̂z = @. kzg * invkk
+    nz = @. ifelse(kk > 0, one(FT), zero(FT))                # DC mode carries neither component
+
+    # Toroidal unit vector e1 = normalise(k̂ × ẑ) = (k̂y,−k̂x,0)/|k̂⊥|; when k ∥ ẑ (k̂⊥=0) fall back to x̂.
+    k̂perp = @. sqrt(k̂x^2 + k̂y^2)
+    selp  = @. k̂perp > 0
+    invkp = @. ifelse(selp, inv(k̂perp), zero(FT))
+    e1x = @. ifelse(selp, k̂y * invkp, one(FT))
+    e1y = @. ifelse(selp, -k̂x * invkp, zero(FT))            # e1z ≡ 0 in both branches
+    # Poloidal unit vector e2 = k̂ × e1 (with e1z = 0). Its sign is irrelevant — the projection c·e2 is
+    # sign-invariant — so the k ∥ ẑ fallback (0,±1,0) matches the reference (0,1,0).
+    e2x = @. -k̂z * e1y
+    e2y = @. k̂z * e1x
+    e2z = @. k̂x * e1y - k̂y * e1x
+
+    u1 = selectdim(velocity_hat, nd + 1, 1)
+    u2 = selectdim(velocity_hat, nd + 1, 2)
+    u3 = selectdim(velocity_hat, nd + 1, 3)
+    c1 = @. (u1 * e1x + u2 * e1y) * nz                       # toroidal coefficient û·e1 (e1z = 0)
+    c2 = @. (u1 * e2x + u2 * e2y + u3 * e2z) * nz            # poloidal coefficient û·e2
+
     tor = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
     pol = fill!(similar(velocity_hat), zero(eltype(velocity_hat)))
-    ẑ = (zero(FT), zero(FT), one(FT))
-    @inbounds for I in CartesianIndices(ns)
-        kx = FT(ks[1][I[1]]); ky = FT(ks[2][I[2]]); kz = FT(ks[3][I[3]])
-        kk = sqrt(kx*kx + ky*ky + kz*kz)
-        kk == 0 && continue
-        k̂ = (kx/kk, ky/kk, kz/kk)
-        kperp = sqrt(kx*kx + ky*ky)
-        if kperp > 0
-            e1 = _cross3(k̂, ẑ)                           # horizontal, ⊥ k (toroidal dir)
-            n1 = sqrt(e1[1]^2 + e1[2]^2 + e1[3]^2)
-            e1 = (e1[1]/n1, e1[2]/n1, e1[3]/n1)
-            e2 = _cross3(k̂, e1)                          # poloidal dir, unit, ⊥ k and e1
-        else
-            e1 = (one(FT), zero(FT), zero(FT))           # k ∥ ẑ: degenerate, arbitrary horizontal pair
-            e2 = (zero(FT), one(FT), zero(FT))
-        end
-        u1 = velocity_hat[I, 1]; u2 = velocity_hat[I, 2]; u3 = velocity_hat[I, 3]
-        c1 = u1*e1[1] + u2*e1[2] + u3*e1[3]              # toroidal coefficient
-        c2 = u1*e2[1] + u2*e2[2] + u3*e2[3]              # poloidal coefficient
-        for c in 1:3
-            tor[I, c] = c1 * e1[c]
-            pol[I, c] = c2 * e2[c]
-        end
-    end
+    selectdim(tor, nd + 1, 1) .= c1 .* e1x
+    selectdim(tor, nd + 1, 2) .= c1 .* e1y                   # tor component 3 = c1·e1z = 0 (stays zeroed)
+    selectdim(pol, nd + 1, 1) .= c2 .* e2x
+    selectdim(pol, nd + 1, 2) .= c2 .* e2y
+    selectdim(pol, nd + 1, 3) .= c2 .* e2z
     return (toroidal = tor, poloidal = pol)
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
-function _decompose_field_spectral(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+function _decompose_field_spectral(decomp::AbstractFieldDecomposition, ::AbstractArray{<:Complex}, ::Any)
     throw(ArgumentError(
         "Spectral-space decomposition ($(typeof(decomp))) requires HelmholtzDecomposition.jl. " *
         "Run `using HelmholtzDecomposition` to load the extension."

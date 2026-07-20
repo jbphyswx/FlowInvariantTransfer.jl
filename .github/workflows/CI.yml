@@ -20,9 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.11 is the floor: Project.toml [sources]/[workspace] (used for the unregistered sibling
-        # packages CGEF/HelmholtzDecomposition/FlowFieldSpectra/NUFSHT) require Julia >= 1.11.
-        version: ['1.11', '1.12', '1']
+        # 1.11 = floor: Project.toml [sources]/[workspace] (used for the unregistered sibling packages
+        # CGEF/HelmholtzDecomposition/FlowFieldSpectra/NUFSHT) require Julia >= 1.11. '1' = latest stable,
+        # auto-advancing to future minors (nightly is added below as the prerelease canary).
+        version: ['1.11', '1']
         os: [ubuntu-latest]
         arch: [x64]
         include:

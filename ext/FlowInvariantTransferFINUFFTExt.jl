@@ -5,6 +5,7 @@ using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxMethod, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 using FlowInvariantTransfer.Filters: filter_response
 using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
+using FlowInvariantTransfer.Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
 
 # ---------------------------------------------------------------------------
 # Non-uniform coarse-graining flux via FINUFFT type-1/type-2 round-trips.
@@ -21,12 +22,21 @@ using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
 @inline _page(A::AbstractArray, c::Int) = view(A, ntuple(_ -> Colon(), ndims(A) - 1)..., c)
 
 """
-    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8)
+    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8, execution=SerialBackend())
 
 Build the reusable FINUFFT plans (type-1 analysis, type-2 synthesis; points set) and every working
 buffer for [`nufft_coarse_graining_flux!`](@ref). 1D/2D/3D scattered Cartesian points.
+
+`execution` selects the FINUFFT plan thread count. `SerialBackend()` (default) → single-threaded
+transforms: 0 allocation per `finufft_exec!` (FINUFFT shares `libfftw3` with FFTW.jl, so a
+multithreaded plan routes its internal FFT through FFTW's Julia-thread spawn callback and allocates
+Task/Channel/lock scratch on every exec), and the right choice when the outer batch axis (a scale
+sweep or snapshot series) is itself parallelised one-worker-per-item — no oversubscription.
+`ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
 """
-function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol::Real = 1e-8)
+function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol::Real = 1e-8,
+                                          execution::AbstractExecutionBackend = SerialBackend())
+    fft_nthreads = execution isa ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
@@ -67,8 +77,8 @@ function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol:
     grad_j = zeros(FT, N)
 
     nmodes = Int64[ms...]
-    p1 = FINUFFT.finufft_makeplan(1, nmodes, 1, 1, FT(tol); dtype = FT)   # nonuniform → uniform
-    p2 = FINUFFT.finufft_makeplan(2, nmodes, 1, 1, FT(tol); dtype = FT)   # uniform → nonuniform
+    p1 = FINUFFT.finufft_makeplan(1, nmodes, 1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads)   # nonuniform → uniform
+    p2 = FINUFFT.finufft_makeplan(2, nmodes, 1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads)   # uniform → nonuniform
     FINUFFT.finufft_setpts!(p1, scaled_coords...)
     FINUFFT.finufft_setpts!(p2, scaled_coords...)
 
@@ -193,6 +203,8 @@ and all intermediate buffers are reused.
 # Keyword Arguments
 - `return_diagnostics::Bool=false`: also return τ̄ᵢⱼ and S̄ᵢⱼ at the points.
 - `tol=1e-8`: FINUFFT accuracy tolerance.
+- `execution=SerialBackend()`: `ThreadedBackend()` threads the FINUFFT transforms across cores (for a
+  lone/under-saturated call); `SerialBackend()` keeps them single-threaded (batch the outer axis instead).
 """
 function FIT.nufft_coarse_graining_flux(
     velocity_fields::Tuple,
@@ -202,8 +214,9 @@ function FIT.nufft_coarse_graining_flux(
     ms::Tuple;
     return_diagnostics::Bool = false,
     tol::Real = 1e-8,
+    execution::AbstractExecutionBackend = SerialBackend(),
 )
-    ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol = tol)
+    ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol = tol, execution = execution)
     return FIT.nufft_coarse_graining_flux!(
         ws, velocity_fields, ℓ, filter, ms; return_diagnostics = return_diagnostics)
 end

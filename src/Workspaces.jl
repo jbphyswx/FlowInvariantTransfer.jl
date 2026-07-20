@@ -1,7 +1,8 @@
 module Workspaces
 
-using ..Types: AbstractShellBinning, LinearBinning, AbstractExecutionBackend, SerialBackend,
+using ..Types: AbstractShellBinning, LinearBinning,
                AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
+using ..Backends: AbstractExecutionBackend, SerialBackend
 using ..ShellBinning: shell_edges, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 
@@ -20,7 +21,7 @@ extension overrides this to build pre-planned transforms + scratch buffers so th
 FFT-accelerated hot path allocates nothing. `dealiasing` is threaded through so the extension can
 preallocate the larger `PaddedThreeHalves` scratch at construction (and only then).
 """
-_make_fft_plans(advected_hat, ks, dealiasing) = nothing
+_make_fft_plans(advected_hat, ks, dealiasing, fft_nthreads) = nothing
 
 """
     NonlinearTermWorkspace{CA, RA, GA, P}
@@ -63,7 +64,8 @@ itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned tra
 `dealiasing` you will use so the extension can size the scratch (only `PaddedThreeHalves` needs the
 larger 3/2 buffers — the default 2/3 path builds none).
 """
-function NonlinearTermWorkspace(advected_hat, ks; dealiasing::AbstractDealiasing = OrszagTwoThirds())
+function NonlinearTermWorkspace(advected_hat, ks; dealiasing::AbstractDealiasing = OrszagTwoThirds(),
+                                fft_nthreads::Int = 1)
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
     ns  = size(advected_hat)[1:nd]
@@ -73,7 +75,10 @@ function NonlinearTermWorkspace(advected_hat, ks; dealiasing::AbstractDealiasing
     grad_phys = similar(advected_hat, FT, ns..., M, nd)
     N_phys    = similar(advected_hat, FT, ns..., M)
     N̂         = similar(advected_hat, ns..., M)         # keeps complex eltype
-    plans     = _make_fft_plans(advected_hat, ks, dealiasing)
+    # `fft_nthreads` bakes FFTW's per-transform thread count into the plans: 1 for the loop-heavy /
+    # serial paths (the outer loop provides the parallelism, 0-alloc), and `Threads.nthreads()` for a
+    # single-field method (spectral flux) whose only parallel axis IS the transform.
+    plans     = _make_fft_plans(advected_hat, ks, dealiasing, fft_nthreads)
     return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
 end
 
@@ -106,14 +111,15 @@ Construct a `SpectralFluxWorkspace` for the given input and binning.
 """
 function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
                                geometry::AbstractShellGeometry = IsotropicShells(),
-                               dealiasing::AbstractDealiasing = OrszagTwoThirds())
+                               dealiasing::AbstractDealiasing = OrszagTwoThirds(),
+                               fft_nthreads::Int = 1)
     k_mag  = shell_coordinate(geometry, ks)
     edges  = shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
     ns     = size(velocity_hat)[1:length(ks)]
     return SpectralFluxWorkspace(
-        NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
+        NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing, fft_nthreads=fft_nthreads),
         similar(velocity_hat, FT, N_sh),     # T_spec
         similar(velocity_hat, FT, N_sh),     # flux
         similar(velocity_hat, FT, ns...),    # transfer_density
@@ -173,5 +179,14 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
         similar(velocity_hat, FT, ns...),        # transfer_density
     )
 end
+
+# One-line show for the plan-owning workspaces: the default field-dump show of a struct holding an
+# FFTW plan bundle can SEGFAULT (fftw_sprint_plan, e.g. after close! or across a Distributed transfer).
+Base.show(io::IO, ::NonlinearTermWorkspace) = print(io, "NonlinearTermWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::NonlinearTermWorkspace) = show(io, w)
+Base.show(io::IO, ::SpectralFluxWorkspace) = print(io, "SpectralFluxWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::SpectralFluxWorkspace) = show(io, w)
+Base.show(io::IO, ::ShellToShellWorkspace) = print(io, "ShellToShellWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::ShellToShellWorkspace) = show(io, w)
 
 end # module Workspaces

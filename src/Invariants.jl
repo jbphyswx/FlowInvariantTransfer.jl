@@ -36,18 +36,17 @@ function transfer_density! end
 # Shared quadratic dot density t[I] = Σ_c Re{ conj(carrier_c) · N̂_c }. Serves kinetic energy
 # (carrier = û, M = D components) and passive-scalar variance (carrier = θ̂, M = 1) identically —
 # the only difference between those invariants is which field is advected/carried, handled by the
-# caller (the scalar passes θ̂ as the primary field). N-D, allocation-free.
+# caller (the scalar passes θ̂ as the primary field). N-D and DEVICE-GENERIC: `selectdim` gives a
+# per-component view and the fused `.+=` broadcast writes in place — 0 alloc on CPU, one kernel
+# launch on a device (no scalar indexing), so the same code runs on Array / CuArray / JLArray.
 function _transfer_density_dot!(t, carrier_hat, N̂, ks)
     nd = length(ks)
-    ns = size(carrier_hat)[1:nd]
     M  = size(carrier_hat, nd + 1)
-    FT = real(eltype(carrier_hat))
-    @inbounds for I in CartesianIndices(ns)
-        s = zero(FT)
-        for c in 1:M
-            s += real(conj(carrier_hat[I, c]) * N̂[I, c])
-        end
-        t[I] = s
+    fill!(t, zero(eltype(t)))
+    for c in 1:M
+        cc = selectdim(carrier_hat, nd + 1, c)
+        Nc = selectdim(N̂, nd + 1, c)
+        t .+= real.(conj.(cc) .* Nc)
     end
     return t
 end
@@ -58,6 +57,16 @@ transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks) =
 transfer_density!(t, ::PassiveScalar, scalar_hat, N̂, ks) =
     _transfer_density_dot!(t, scalar_hat, N̂, ks)
 
+# ---------------------------------------------------------------------------
+# Vorticity (k×û) invariants — host scalar-indexed kernels (allocation-free). Unlike the KE/scalar
+# dot density (which is a device-generic broadcast needing no wavenumbers), these need per-mode k
+# components; reshaping the 1-D k-axes to broadcast would allocate a small per-call header, so the
+# host path stays scalar. The DEVICE path for these runs through the KernelAbstractions extension's
+# own `transfer_density_{helicity,enstrophy}_kernel!` (via `GPUBackend`), which indexes device-resident
+# k-axes inside the kernel — so both host and device are covered with no host-path allocation.
+# ---------------------------------------------------------------------------
+
+# 3D helicity: ω̂ = i k×û; t[I] = Σ_c Re{ conj(ω̂_c) N̂_c }.
 function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
@@ -73,11 +82,12 @@ function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks)
     return t
 end
 
+# Enstrophy: 2D scalar vorticity (conserved dual cascade) / 3D vector vorticity (non-conservative via
+# vortex stretching — N̂_ω = i k×N̂ = curl[(u·∇)u] includes the stretching term).
 function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     if nd == 2
-        # Scalar vorticity ω̂ = i(k_x û_y − k_y û_x); N̂_ω = i(k_x N̂_y − k_y N̂_x). Conserved.
         @inbounds for I in CartesianIndices(ns)
             kx = ks[1][I[1]]; ky = ks[2][I[2]]
             ω̂   = im * (kx * velocity_hat[I, 2] - ky * velocity_hat[I, 1])
@@ -85,8 +95,6 @@ function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks)
             t[I] = real(conj(ω̂) * N̂_ω)
         end
     elseif nd == 3
-        # Vector vorticity ω̂ = i k × û; N̂_ω = i k × N̂ = curl[(u·∇)u] (= (u·∇)ω − (ω·∇)u),
-        # so the vortex-stretching term is included — 3D enstrophy is NOT conserved.
         @inbounds for I in CartesianIndices(ns)
             kx = ks[1][I[1]]; ky = ks[2][I[2]]; kz = ks[3][I[3]]
             ux = velocity_hat[I, 1]; uy = velocity_hat[I, 2]; uz = velocity_hat[I, 3]

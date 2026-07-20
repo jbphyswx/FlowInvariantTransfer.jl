@@ -2,6 +2,7 @@ module ScaleToScaleTransfer
 
 using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds,
                PassiveScalar, AbstractSpectralBackend, DirectSumBackend, FFTBackend
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
 using ..Workspaces: NonlinearTermWorkspace
@@ -53,6 +54,7 @@ function calculate_mode_to_mode_transfer(
     invariant::AbstractInvariant = KineticEnergy(),
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     max_modes::Int = 1024,
     force::Bool = false,
     advecting_hat = velocity_hat,
@@ -72,7 +74,8 @@ function calculate_mode_to_mode_transfer(
     net    = similar(velocity_hat, FT, ns...)
     result = ModeToModeTriadResult(invariant, ks, net, S)
     return calculate_mode_to_mode_transfer!(result, ws, û_p, velocity_hat, ks;
-        invariant=invariant, dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+        invariant=invariant, dealiasing=dealiasing, spectral=spectral, execution=execution,
+        advecting_hat=advecting_hat)
 end
 
 """
@@ -93,8 +96,20 @@ function calculate_mode_to_mode_transfer!(
     invariant::AbstractInvariant = KineticEnergy(),
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
+    _mode_to_mode_loop!(resolve_execution(execution), result, ws, û_p, velocity_hat, ks;
+        invariant=invariant, dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+    return result
+end
+
+# Per-giver loop, dispatched on the execution backend. Each giver `p` writes a DISJOINT column
+# `S[·, p]`, so the loop is embarrassingly parallel (near-linear scaling): the threaded/distributed/GPU
+# backends override the named stubs (extensions), each thread/rank using its OWN single-threaded
+# workspace (no nested FFT threads). `net[k] = Σ_p S[k,p]` is a `+`-reduction of per-worker partials.
+function _mode_to_mode_loop!(::SerialBackend, result, ws, û_p, velocity_hat, ks;
+                             invariant, dealiasing, spectral, advecting_hat)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     M  = size(velocity_hat, nd + 1)   # components of the giver/carried primary field
@@ -116,6 +131,19 @@ function calculate_mode_to_mode_transfer!(
     end
     return result
 end
+_mode_to_mode_loop!(::ThreadedBackend, result, ws, û_p, velocity_hat, ks; kwargs...) =
+    _mode_to_mode_threaded!(result, ws, û_p, velocity_hat, ks; kwargs...)
+_mode_to_mode_loop!(exec::DistributedBackend, result, ws, û_p, velocity_hat, ks; kwargs...) =
+    _mode_to_mode_distributed!(result, ws, û_p, velocity_hat, ks, exec; kwargs...)
+_mode_to_mode_loop!(gpu::GPUBackend, result, ws, û_p, velocity_hat, ks; kwargs...) =
+    _mode_to_mode_gpu!(result, ws, û_p, velocity_hat, ks, gpu; kwargs...)
+
+_mode_to_mode_threaded!(args...; kwargs...) = throw(ArgumentError(
+    "Threaded mode-to-mode transfer requires OhMyThreads. Run `using OhMyThreads` to load the extension."))
+_mode_to_mode_distributed!(args...; kwargs...) = throw(ArgumentError(
+    "Distributed mode-to-mode transfer requires Distributed. Run `using Distributed` to load the extension."))
+_mode_to_mode_gpu!(args...; kwargs...) = throw(ArgumentError(
+    "GPU mode-to-mode transfer requires KernelAbstractions. Run `using KernelAbstractions` to load the extension."))
 
 """
     calculate_scalar_mode_to_mode_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ModeToModeTriadResult

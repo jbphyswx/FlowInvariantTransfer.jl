@@ -21,8 +21,8 @@ module TriadicOrthogonalDecomposition
 using LinearAlgebra: LinearAlgebra
 using ..Types: TriadicOrthogonalDecompositionMethod,
                TriadicOrthogonalDecompositionResult,
-               AbstractExecutionBackend, SerialBackend, ThreadedBackend, resolve_execution,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, resolve_execution
 
 export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace,
        hamming_window, hann_window, tukey_window
@@ -72,35 +72,36 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    hamming_window(N) -> Vector{Float64}
+    hamming_window(N, ::Type{T} = Float64) -> Vector{T}
 
-Standard Hamming window of length N: w[n] = 0.54 − 0.46·cos(2πn/(N−1)).
+Standard Hamming window of length N: w[n] = 0.54 − 0.46·cos(2πn/(N−1)), in element type `T`.
 """
-function hamming_window(N)
-    return [0.54 - 0.46 * cospi(2 * (n - 1) / (N - 1)) for n in 1:N]
+function hamming_window(N, ::Type{T} = Float64) where {T}
+    return T[0.54 - 0.46 * cospi(2 * (n - 1) / (N - 1)) for n in 1:N]
 end
 
 """
-    hann_window(N) -> Vector{Float64}
+    hann_window(N, ::Type{T} = Float64) -> Vector{T}
 
-Hann (raised-cosine) window of length N: w[n] = ½(1 − cos(2πn/(N−1))). Tapers to zero at both
-ends — lower spectral leakage than Hamming. Pass to `triadic_orthogonal_decomposition` via `window`.
+Hann (raised-cosine) window of length N: w[n] = ½(1 − cos(2πn/(N−1))), in element type `T`. Tapers to
+zero at both ends — lower spectral leakage than Hamming. Pass to `triadic_orthogonal_decomposition`
+via `window`.
 """
-function hann_window(N)
-    return [0.5 * (1 - cospi(2 * (n - 1) / (N - 1))) for n in 1:N]
+function hann_window(N, ::Type{T} = Float64) where {T}
+    return T[0.5 * (1 - cospi(2 * (n - 1) / (N - 1))) for n in 1:N]
 end
 
 """
-    tukey_window(N; α=0.5) -> Vector{Float64}
+    tukey_window(N, ::Type{T} = Float64; α=0.5) -> Vector{T}
 
-Tukey (tapered-cosine) window of length N: a flat middle with cosine tapers over a fraction `α` of
-the length at each end. `α = 0` is rectangular (no taper), `α = 1` is the Hann window; intermediate
-`α` trades main-lobe width against leakage.
+Tukey (tapered-cosine) window of length N in element type `T`: a flat middle with cosine tapers over
+a fraction `α` of the length at each end. `α = 0` is rectangular (no taper), `α = 1` is the Hann
+window; intermediate `α` trades main-lobe width against leakage.
 """
-function tukey_window(N; α=0.5)
+function tukey_window(N, ::Type{T} = Float64; α=0.5) where {T}
     0 <= α <= 1 || throw(ArgumentError("tukey_window: α must be in [0,1] (got $α)."))
-    α == 0 && return ones(Float64, N)
-    w = ones(Float64, N)
+    α == 0 && return ones(T, N)
+    w = ones(T, N)
     edge = α * (N - 1) / 2
     @inbounds for n in 1:N
         x = n - 1
@@ -120,18 +121,18 @@ end
 Parse and validate spectral estimation parameters with sensible defaults.
 Follows the MATLAB `parser()` logic from the reference implementation.
 """
-function parse_parameters(nt, nx; window=nothing, weight=nothing, noverlap=nothing, dt=nothing)
-    # Window
+function parse_parameters(nt, nx, ::Type{RT} = Float64; window=nothing, weight=nothing, noverlap=nothing, dt=nothing) where {RT}
+    # Window (built directly in the compute element type RT)
     if window === nothing
         nDFT = 2^floor(Int, log2(nt / 5))
         nDFT > 256 && (nDFT = 256)
-        window_vec = hamming_window(nDFT)
+        window_vec = hamming_window(nDFT, RT)
     elseif window isa Integer
         nDFT = Int(window)
-        window_vec = hamming_window(nDFT)
+        window_vec = hamming_window(nDFT, RT)
     elseif window isa AbstractVector
         nDFT = length(window)
-        window_vec = Vector{Float64}(window)
+        window_vec = convert(Vector{RT}, window)
     else
         throw(ArgumentError("window must be nothing, an integer, or a vector"))
     end
@@ -145,13 +146,13 @@ function parse_parameters(nt, nx; window=nothing, weight=nothing, noverlap=nothi
     end
 
     # Time step
-    dt_val = dt === nothing ? 1.0 / nDFT : Float64(dt)
+    dt_val = dt === nothing ? one(RT) / nDFT : RT(dt)
 
-    # Spatial weight
+    # Spatial weight (in the compute element type RT)
     if weight === nothing
-        weight_vec = ones(Float64, nx)
+        weight_vec = ones(RT, nx)
     else
-        weight_vec = vec(Float64.(weight))
+        weight_vec = convert(Vector{RT}, vec(weight))
         length(weight_vec) == nx || throw(ArgumentError(
             "weight must have $(nx) elements (matching spatial dimensions), got $(length(weight_vec))"))
     end
@@ -410,6 +411,18 @@ function _default_nonlinear(q1, q2)
     return permutedims(product, (2, 1, ntuple(i -> i + 2, ndims(product) - 2)...))
 end
 
+# In-place quadratic nonlinearity into the reused giver buffer `out` (nx, nState, nBlks), avoiding the
+# default's per-triad product+permute allocation. The default Q(q1,q2)=permute(q1.*q2,(2,1,3)) is fused
+# directly into `out`; a user-supplied `Q` is evaluated (its own allocation is the user's) and copied in.
+function _apply_nonlinear!(out, ::typeof(_default_nonlinear), q1, q2)
+    nVar, nx, nBlks = size(q1)
+    @inbounds for b in 1:nBlks, iv in 1:nVar, ix in 1:nx
+        out[ix, iv, b] = q1[iv, ix, b] * q2[iv, ix, b]
+    end
+    return out
+end
+_apply_nonlinear!(out, Q, q1, q2) = copyto!(out, Q(q1, q2))
+
 # ---------------------------------------------------------------------------
 # Serial triad loop
 # ---------------------------------------------------------------------------
@@ -520,7 +533,7 @@ function _triadic_loop_serial!(
     weights, nBlks, nFreq, nState, nx, nmode,
     Q_nonlinear, LHS,
     return_coefficients, return_auxiliary_modes,
-    sc, sqrt_w, inv_sqrt_w, permbuf,   # reusable scratch supplied by the caller (TODWorkspace)
+    sc, sqrt_w, inv_sqrt_w, permbuf, permbuf_kl,   # reusable scratch supplied by the caller (TODWorkspace)
 )
     nTriads = length(fk_idx)
     nStateNx = nState * nx
@@ -538,7 +551,8 @@ function _triadic_loop_serial!(
 
         permutedims!(permbuf, LHS(Q_n_raw), (2, 1, 3))   # recipient reshape into the reused buffer
         Q_hat_n = reshape(permbuf, nStateNx, nBlks)
-        Q_hat_kl = reshape(Q_nonlinear(Q_k_raw, Q_l_raw), nStateNx, nBlks)
+        _apply_nonlinear!(permbuf_kl, Q_nonlinear, Q_k_raw, Q_l_raw)   # giver reshape into the reused buffer
+        Q_hat_kl = reshape(permbuf_kl, nStateNx, nBlks)
 
         # Core SVD (reuses `sc` across triads)
         U, s, V = _triadic_svd_serial!(sc, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
@@ -590,6 +604,53 @@ function _triadic_loop_serial!(
     end
 end
 
+# Compute one triad `i`'s outputs standalone (own scratch) — the unit of work for the distributed loop
+# (each worker process runs this for its triads and ships the result back for master-side assembly). Uses
+# the SAME `_triadic_svd_serial!` / `_apply_nonlinear!` as the serial loop, so results are bit-identical.
+function _triad_result(i, Q_hat, fk_idx, fl_idx, fn_idx, weights, sqrt_w, inv_sqrt_w,
+                       nBlks, nState, nx, nmode, Q_nonlinear, LHS,
+                       return_coefficients, return_auxiliary_modes)
+    CT = eltype(Q_hat)
+    nStateNx = nState * nx
+    fi_k = fk_idx[i]; fi_l = fl_idx[i]; fi_n = fn_idx[i]
+    Q_n_raw = view(Q_hat, fi_n, :, :, :)
+    Q_k_raw = view(Q_hat, fi_k, :, :, :)
+    Q_l_raw = view(Q_hat, fi_l, :, :, :)
+    permbuf = Array{CT}(undef, nx, nState, nBlks)
+    permbuf_kl = Array{CT}(undef, nx, nState, nBlks)
+    permutedims!(permbuf, LHS(Q_n_raw), (2, 1, 3))
+    Q_hat_n = reshape(permbuf, nStateNx, nBlks)
+    _apply_nonlinear!(permbuf_kl, Q_nonlinear, Q_k_raw, Q_l_raw)
+    Q_hat_kl = reshape(permbuf_kl, nStateNx, nBlks)
+    sc = _TriadSVDScratch(CT, nStateNx, nBlks)
+    U, s, V = _triadic_svd_serial!(sc, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
+    nm = min(nmode, length(s))
+    u = U[:, 1:nm]; v = V[:, 1:nm]
+    Tb = Vector{real(CT)}(undef, nm)
+    @inbounds for j in 1:nm
+        acc = zero(CT)
+        for k in axes(u, 1)
+            acc += conj(v[k, j]) * weights[k] * u[k, j]
+        end
+        Tb[j] = s[j] * real(acc)
+    end
+    sv = collect(s[1:nm])
+    A_conv = A_recip = donor = catalyst = nothing
+    if return_coefficients
+        A_conv = u' * (Q_hat_kl .* weights)
+        A_recip = v' * (Q_hat_n .* weights)
+        if return_auxiliary_modes
+            Q_hat_l = reshape(permutedims(LHS(Q_l_raw), (2, 1, 3)), nStateNx, nBlks)
+            Q_hat_k = reshape(permutedims(LHS(Q_k_raw), (2, 1, 3)), nStateNx, nBlks)
+            inv_s = 1 ./ sv
+            donor = (Q_hat_l * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks)[:, 1:nm]
+            catalyst = (Q_hat_k * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks)[:, 1:nm]
+        end
+    end
+    return (fi_l = fi_l, fi_n = fi_n, nm = nm, s = sv, Tb = Tb, u = u, v = v,
+            A_conv = A_conv, A_recip = A_recip, donor = donor, catalyst = catalyst)
+end
+
 # Dispatch the triad loop on the EXECUTION (parallelism) backend.
 function _dispatch_triadic_loop!(args_tuple...; execution::AbstractExecutionBackend=SerialBackend(), kwargs...)
     _dispatch_triadic_loop_impl!(resolve_execution(execution), args_tuple...; kwargs...)
@@ -600,6 +661,10 @@ _dispatch_triadic_loop_impl!(::SerialBackend, args...; kwargs...) =
 
 _dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
     _triadic_loop_threaded!(args...; kwargs...)
+
+# The DistributedBackend passes itself through so the ext can read its inner (per-worker) backend.
+_dispatch_triadic_loop_impl!(exec::DistributedBackend, args...; kwargs...) =
+    _triadic_loop_distributed!(args..., exec; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Reusable workspace
@@ -624,6 +689,7 @@ struct TODWorkspace{QH, SG, VC, PB, RV, L3, XM, IV, DP, SC, WW, LH, QF, SP}
     shifted::VC
     dft_plan::DP
     permbuf::PB
+    permbuf_kl::PB
     window_vec::RV
     weight_vec::RV
     weights::RV
@@ -669,12 +735,10 @@ function TODWorkspace(
     nx = prod(dims[3:end]; init = 1)
     isr = isreal_data === nothing ? eltype(X) <: Real : isreal_data
 
-    (window_vec, weight_vec, noverlap_val, dt_val, nDFT, nBlks) =
-        parse_parameters(nt, nx; window = window, weight = weight, noverlap = noverlap, dt = dt)
     RT = real(float(eltype(X)))
     CT = Complex{RT}
-    window_vec = convert(Vector{RT}, window_vec)
-    weight_vec = convert(Vector{RT}, weight_vec)
+    (window_vec, weight_vec, noverlap_val, dt_val, nDFT, nBlks) =
+        parse_parameters(nt, nx, RT; window = window, weight = weight, noverlap = noverlap, dt = dt)
     nmode_val = nmode === nothing ? nBlks : Int(nmode)
     win_weight = RT(1) / (sum(window_vec) / length(window_vec))
 
@@ -688,8 +752,7 @@ function TODWorkspace(
     blk_mean = mean_type === :blockwise
 
     (f, nFreq, _include_triad, f_idx, fk_idx, fl_idx, fn_idx) =
-        frequency_axes(nDFT, dt_val; isreal_data = isr, nfreq = nfreq)
-    f = convert(Vector{RT}, f)
+        frequency_axes(nDFT, dt_val; isreal_data = isr, nfreq = nfreq)   # f::Vector{RT} (dt_val::RT)
 
     nState = size(LHS(zeros(CT, nVar, nx, 1)), 1)
 
@@ -706,12 +769,13 @@ function TODWorkspace(
     sqrt_w = sqrt.(weights)
     inv_sqrt_w = inv.(sqrt_w)
     sc = _TriadSVDScratch(CT, nState * nx, nBlks)
-    permbuf = Array{CT}(undef, nx, nState, nBlks)
+    permbuf = Array{CT}(undef, nx, nState, nBlks)      # recipient (n) reshape scratch
+    permbuf_kl = Array{CT}(undef, nx, nState, nBlks)   # giver (k,l) nonlinear reshape scratch
     L = fill(RT(NaN), nFreq, nFreq, nmode_val)
     T_budget = fill(RT(NaN), nFreq, nFreq, nmode_val)
 
     return TODWorkspace(
-        Q_hat, segment, seg_before_mean, windowed, dft_col, shifted, dft_plan, permbuf,
+        Q_hat, segment, seg_before_mean, windowed, dft_col, shifted, dft_plan, permbuf, permbuf_kl,
         window_vec, weight_vec, weights, sqrt_w, inv_sqrt_w, f, L, T_budget, X_mean, sc,
         f_idx, fk_idx, fl_idx, fn_idx, win_weight, LHS, Q, spectral,
         nt, nVar, nx, nDFT, nBlks, nFreq, nState, nmode_val, noverlap_val, shift, blk_mean, isr,
@@ -803,7 +867,7 @@ function triadic_orthogonal_decomposition!(
         ws.Q_hat, ws.f_idx, ws.fk_idx, ws.fl_idx, ws.fn_idx,
         ws.weights, ws.nBlks, ws.nFreq, ws.nState, ws.nx, ws.nmode_val,
         ws.Q, ws.LHS, return_coefficients, return_auxiliary_modes,
-        ws.sc, ws.sqrt_w, ws.inv_sqrt_w, ws.permbuf;
+        ws.sc, ws.sqrt_w, ws.inv_sqrt_w, ws.permbuf, ws.permbuf_kl;
         execution = execution,
     )
     return TriadicOrthogonalDecompositionResult(ws.f, ws.L, P, ws.T_budget, A_out, Xi_out)
@@ -882,5 +946,9 @@ function triadic_orthogonal_decomposition(
                                              return_auxiliary_modes = return_auxiliary_modes,
                                              execution = execution)
 end
+
+# One-line show (the workspace holds a temporal-DFT FFTW plan → default show can segfault).
+Base.show(io::IO, ::TODWorkspace) = print(io, "TODWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::TODWorkspace) = show(io, w)
 
 end # module TriadicOrthogonalDecomposition

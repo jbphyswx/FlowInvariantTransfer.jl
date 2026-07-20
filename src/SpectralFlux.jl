@@ -1,6 +1,7 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds, AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
@@ -86,12 +87,16 @@ function _calculate_spectral_flux_decomposed(
     advecting_hat,
     geometry::AbstractShellGeometry,
 )
-    ws        = SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
+    # Single-field method: its only parallel axis is the transform, so under ThreadedBackend the FFTs
+    # run multithreaded (FFTW), else single-threaded (0-alloc). No outer loop to thread → no nesting.
+    ws        = SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing,
+                                       fft_nthreads = execution isa ThreadedBackend ? Threads.nthreads() : 1)
     k_mag     = shell_coordinate(geometry, ks)
     edges     = shell_edges(binning, maximum(k_mag))
     centers   = shell_centers(binning, maximum(k_mag))
     shell_idx = assign_shells(k_mag, edges)
-    result    = SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
+    RT        = real(eltype(velocity_hat))
+    result    = SpectralFluxResult(centers, similar(centers, RT, length(centers)), similar(centers, RT, length(centers)))
 
     if û_decomp === velocity_hat
         calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
@@ -126,9 +131,10 @@ function _calculate_spectral_flux_decomposed(
     edges     = shell_edges(binning, maximum(k_mag))
     centers   = shell_centers(binning, maximum(k_mag))
     shell_idx = assign_shells(k_mag, edges)
+    RT        = real(eltype(velocity_hat))
 
     return map(decomposed) do û_comp
-        res = SpectralFluxResult(centers, similar(ws.T_spec), similar(ws.flux))
+        res = SpectralFluxResult(centers, similar(centers, RT, length(centers)), similar(centers, RT, length(centers)))
         _calculate_spectral_flux_with_N̂!(res, ws, û_comp, N̂, ks, shell_idx, execution; invariant=invariant)
         return res
     end
@@ -204,9 +210,12 @@ end
 #   Π(K) = +Σ_{k≤K} T(k)  ⇒  Π>0 forward (down-scale) cascade, Π<0 inverse.
 # (Earlier code negated this, returning −Π — i.e. forward cascades read as negative.)
 function _finalize_spectral_flux!(result::SpectralFluxResult, ws::SpectralFluxWorkspace)
+    # Bring the (small, N_sh) shell spectrum to the host result and form Π = cumsum(T) there. Doing the
+    # cumsum on the result vectors keeps this device-agnostic: a device `ws.T_spec` is copied to the host
+    # result once and `cumsum!` never needs a device scan (Base's `cumsum!` scalar-indexes non-CUDA device
+    # arrays). The heavy per-mode work already ran on-device upstream; the summary is cheap on the host.
     copyto!(result.transfer_spectrum, ws.T_spec)
-    cumsum!(ws.flux, ws.T_spec)
-    copyto!(result.flux, ws.flux)
+    cumsum!(result.flux, result.transfer_spectrum)
     return result
 end
 
@@ -319,11 +328,9 @@ function calculate_partial_fluxes!(
     binning::AbstractShellBinning = _default_binning(ks),
     dealiasing::AbstractDealiasing = OrszagTwoThirds(),
     spectral::AbstractSpectralBackend = DirectSumBackend(),
+    execution::AbstractExecutionBackend = SerialBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
-    nd  = length(ks)
-    FT  = real(eltype(velocity_hat))
-    ns  = size(velocity_hat)[1:nd]
     comps = decompose_field(decomposition, velocity_hat, ks)
     comps isa NamedTuple || throw(ArgumentError(
         "calculate_partial_fluxes needs a decomposition that splits u into ≥2 named components " *
@@ -336,29 +343,56 @@ function calculate_partial_fluxes!(
     sidx    = assign_shells(k_coord, edges)
     Nsh     = length(centers)
 
-    binflux(t) = begin
-        T = zeros(FT, Nsh)
-        @inbounds for I in CartesianIndices(ns)
-            n = sidx[I]; n == 0 && continue; T[n] += t[I]
-        end
-        SpectralFluxResult(centers, T, cumsum(T))
-    end
-
     channels = Dict{NTuple{3,Symbol}, SpectralFluxResult}()
+    # Fill the n²-pair × n-channel decomposition, dispatched on execution: each (sp,sq) pair is an
+    # independent nonlinear-term build → embarrassingly parallel over the n² pairs (single-threaded
+    # inner FFTs per worker → no oversubscription). The channel `SpectralFluxResult`s are the output.
+    _partial_fluxes_fill!(resolve_execution(execution), channels, ws, comps, names,
+        velocity_hat, ks, sidx, centers, Nsh; dealiasing=dealiasing, spectral=spectral)
+    total = SpectralFluxResult(centers,
+        sum(c.transfer_spectrum for c in values(channels)),
+        sum(c.flux for c in values(channels)))
+    return (channels = channels, total = total, k_shells = centers)
+end
+
+# Bin a transfer density into shells → a channel SpectralFluxResult (part of the inherent output).
+function _partial_binflux(td, sidx, centers, Nsh)
+    FT = eltype(td)
+    T = zeros(FT, Nsh)
+    @inbounds for I in CartesianIndices(td)
+        n = sidx[I]; n == 0 && continue; T[n] += td[I]
+    end
+    return SpectralFluxResult(centers, T, cumsum(T))
+end
+
+# Serial channel fill: reuse the caller ws + one td scratch across every (sp,sq) pair.
+function _partial_fluxes_fill!(::SerialBackend, channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh;
+                               dealiasing, spectral)
+    FT = real(eltype(velocity_hat)); nd = length(ks); ns = size(velocity_hat)[1:nd]
     td = similar(velocity_hat, FT, ns...)
     for sp in names, sq in names
         # (u_{sp}·∇)u_{sq} into the shared workspace's N̂ (reused across every pair).
         compute_nonlinear_term!(ws, comps[sq], ks; advecting_hat=comps[sp], dealiasing=dealiasing, spectral=spectral)
         for sk in names
             transfer_density!(td, KineticEnergy(), comps[sk], ws.N̂, ks)
-            channels[(sk, sp, sq)] = binflux(td)
+            channels[(sk, sp, sq)] = _partial_binflux(td, sidx, centers, Nsh)
         end
     end
-    total = SpectralFluxResult(centers,
-        sum(c.transfer_spectrum for c in values(channels)),
-        sum(c.flux for c in values(channels)))
-    return (channels = channels, total = total, k_shells = centers)
+    return channels
 end
+_partial_fluxes_fill!(::ThreadedBackend, channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh; kwargs...) =
+    _partial_fluxes_threaded!(channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh; kwargs...)
+_partial_fluxes_fill!(exec::DistributedBackend, channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh; kwargs...) =
+    _partial_fluxes_distributed!(channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh, exec; kwargs...)
+_partial_fluxes_fill!(gpu::GPUBackend, channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh; kwargs...) =
+    _partial_fluxes_gpu!(channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh, gpu; kwargs...)
+
+_partial_fluxes_threaded!(args...; kwargs...) = throw(ArgumentError(
+    "Threaded partial fluxes require OhMyThreads. Run `using OhMyThreads` to load the extension."))
+_partial_fluxes_distributed!(args...; kwargs...) = throw(ArgumentError(
+    "Distributed partial fluxes require Distributed. Run `using Distributed` to load the extension."))
+_partial_fluxes_gpu!(args...; kwargs...) = throw(ArgumentError(
+    "GPU partial fluxes require KernelAbstractions. Run `using KernelAbstractions` to load the extension."))
 
 """
     calculate_helical_partial_fluxes(velocity_hat, ks; kwargs...)

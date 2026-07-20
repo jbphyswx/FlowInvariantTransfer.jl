@@ -7,6 +7,7 @@ using PrecompileTools: PrecompileTools
 # ---------------------------------------------------------------------------
 
 include("Types.jl")
+include("Backends.jl")
 include("Utils.jl")
 include("Invariants.jl")
 include("Decomposition.jl")
@@ -66,13 +67,6 @@ using .Types:
     NoDealiasing,
     OrszagTwoThirds,
     PaddedThreeHalves,
-    AbstractExecutionBackend,
-    SerialBackend,
-    ThreadedBackend,
-    DistributedBackend,
-    GPUBackend,
-    AutoBackend,
-    local_backend,
     AbstractSpectralBackend,
     DirectSumBackend,
     FFTBackend,
@@ -95,39 +89,17 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, local_backend
+using .Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
 
-using .Utils:
-    wavenumber_grid,
-    wavenumber_magnitude_grid,
-    dealiasing_mask,
-    dealiasing_mask!,
-    validate_velocity_input,
-    validate_uniform_grid,
-    domain_size_from_coords
-
-export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
-export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
-
-using .ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
-export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
-
-using .Invariants: transfer_density, transfer_density!
-export transfer_density, transfer_density!
-
-using .Decomposition: decompose_field, helmholtz_project_spectral!
-export decompose_field, helmholtz_project_spectral!
-
-using .Filters: filter_response, apply_filter_spectral, apply_filter_spectral!
-export filter_response, apply_filter_spectral, apply_filter_spectral!
+# Internal building blocks (grids/dealiasing, shell binning, invariant densities, field
+# decompositions, filters, the nonlinear term) are NOT re-exported or flattened onto the top-level
+# namespace; reach them through their submodules, e.g. `FlowInvariantTransfer.Utils.wavenumber_grid`.
 
 using .Workspaces: NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
-
-using .NonlinearTerm: compute_nonlinear_term, compute_nonlinear_term!
-export compute_nonlinear_term, compute_nonlinear_term!
 
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 using .Compressible: calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
@@ -138,7 +110,7 @@ using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_
 using .BandTransfer: calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
 using .ScaleToScaleTransfer: calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!,
                              calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
-using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace, hamming_window, hann_window, tukey_window
+using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace
 
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 export calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
@@ -148,7 +120,7 @@ export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGr
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
 export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
-export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace, hamming_window, hann_window, tukey_window
+export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace
 export calculate_energy_transfer
 
 # ---------------------------------------------------------------------------
@@ -200,7 +172,35 @@ function build_pencil_plan(args...; kwargs...)
     throw(ArgumentError("build_pencil_plan requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
 end
 
-export mpi_batch_map, pencil_spectral_flux, build_pencil_plan
+"""
+    PencilWorkspace(plan, ks, comm=MPI.COMM_WORLD; binning, dealiasing=OrszagTwoThirds(),
+                    geometry=IsotropicShells(), execution=SerialBackend()) -> PencilWorkspace
+
+Reusable workspace for [`pencil_spectral_flux!`](@ref): the (geometry/dealiasing/binning-fixed)
+wavenumber grids + shell structure and every per-snapshot scratch field, so a repeated distributed
+flux on the same plan allocates ~0 beyond the small per-shell result vectors. Requires
+`using MPI, PencilFFTs, PencilArrays`.
+
+`execution` composes an inner local backend with the MPI (pencil) axis, e.g.
+`execution=MPIBackend(GPUBackend(dev))` for a per-rank device pencil (multi-GPU) — the local shell
+reduction then runs as an on-device scatter-add. `SerialBackend()` (default) keeps the host scalar path.
+"""
+function PencilWorkspace(args...; kwargs...)
+    throw(ArgumentError("PencilWorkspace requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+"""
+    pencil_spectral_flux!(ws::PencilWorkspace, u_phys; invariant=KineticEnergy())
+        -> (centers, transfer_spectrum, flux)
+
+In-place distributed pencil spectral flux reusing `ws` (0 alloc beyond the small result vectors) — build
+`ws` once and loop over snapshots of the same distributed grid. Requires `using MPI, PencilFFTs, PencilArrays`.
+"""
+function pencil_spectral_flux!(args...; kwargs...)
+    throw(ArgumentError("pencil_spectral_flux! requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+end
+
+export mpi_batch_map, pencil_spectral_flux, pencil_spectral_flux!, build_pencil_plan, PencilWorkspace
 
 # ---------------------------------------------------------------------------
 # Extension stubs for CairoMakie
@@ -314,7 +314,7 @@ y = range(0.0, L; length=N+1)[1:N]
 u = [cos(x) for x in x, y in y]
 v = [sin(y) for x in x, y in y]
 û = cat(FFTW.fft(u), FFTW.fft(v); dims=3) ./ N^2  # (N,N,2)
-ks = wavenumber_grid((N,N), (L,L))
+ks = FlowInvariantTransfer.Utils.wavenumber_grid((N,N), (L,L))
 
 result = calculate_energy_transfer(SpectralFluxMethod(LinearBinning(2π/L)), û, ks)
 ```
@@ -384,8 +384,8 @@ PrecompileTools.@setup_workload begin
         _ = calculate_spectral_flux(û, ks; binning=LinearBinning(2π/L), dealiasing=NoDealiasing())
         _ = calculate_shell_to_shell_transfer(û, ks;
                 binning=LinearBinning(2π/L), dealiasing=NoDealiasing(), verify_antisymmetry=false)
-        _ = wavenumber_grid((N,N), (L,L))
-        _ = dealiasing_mask((N,N))
+        _ = Utils.wavenumber_grid((N,N), (L,L))
+        _ = Utils.dealiasing_mask((N,N))
     end
 end
 

@@ -39,10 +39,10 @@ end
 # SpectralFluxResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_spectral_flux(r::SpectralFluxResult{FT};
+function _plot_spectral_flux(r::SpectralFluxResult;
     title::String = "Spectral Energy Flux",
     xscale = CairoMakie.log10,
-) where {FT}
+)
     k = r.k_shells
     positive_k = k .> 0
     k_pos = k[positive_k]

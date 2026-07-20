@@ -8,8 +8,9 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, AutoBackend, resolve_execution, local_backend
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
+# Execution backends (SerialBackend/ThreadedBackend/GPUBackend/DistributedBackend/MPIBackend/…) live
+# in the sibling `Backends` module.
 export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
 
 # ---------------------------------------------------------------------------
@@ -97,8 +98,8 @@ and `N̂_ω = i k×N̂`.
   **stretching**, so enstrophy is **not** conserved (`Σ_k T_Ω ≠ 0`: net production). This is a
   valid transfer/budget diagnostic, not a conservative cascade.
 
-Available in 3D via spectral flux and shell-to-shell; the explicit mode-to-mode triad form
-is 2D-only for now.
+Available in 2D and 3D across every diagnostic — spectral flux, shell-to-shell, and the resolved
+mode-to-mode triad form (the invariant weighting rides the generic `transfer_density!`).
 """
 struct Enstrophy <: AbstractInvariant end
 
@@ -555,15 +556,11 @@ anisotropic parallel flux `Π(k_∥)`.
 ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 
 # ---------------------------------------------------------------------------
-# Backends — two orthogonal axes that compose:
-#   • AbstractSpectralBackend  : WHICH transform   (direct / FFT / NUFFT / SHT / NUFSHT)
-#   • AbstractExecutionBackend : HOW it is run      (serial / threaded / distributed / GPU)
-# A computation chooses one of each, e.g. FFT transforms with a threaded mediator loop, or a
-# NUFSHT transform with an MPI reduction. Keeping them separate avoids conflating "what" with
-# "where" (a single transform's parallelism lives in FFTW threads / the GPU array, not here).
+# Transform (spectral) backends — WHICH transform (direct / FFT / NUFFT / SHT / NUFSHT). Orthogonal
+# to the EXECUTION axis (serial / threaded / distributed / MPI / GPU), which lives in the sibling
+# `Backends` module: a computation picks one of each (e.g. FFT transform + threaded mediator loop, or
+# a NUFSHT transform + MPI reduction). Keeping "what" and "where" separate avoids conflating them.
 # ---------------------------------------------------------------------------
-
-# --- Transform (spectral) axis ---------------------------------------------
 
 """
     AbstractSpectralBackend
@@ -609,116 +606,31 @@ Non-uniform spherical-harmonic transform for scattered spherical data, via NUFSH
 """
 struct NUFSHTBackend <: AbstractSpectralBackend end
 
-# --- Execution (parallelism) axis ------------------------------------------
-
-"""
-    AbstractExecutionBackend
-
-Abstract supertype for *execution* backends: how the outer work (shell/mode loops and
-reductions) is parallelised. Orthogonal to [`AbstractSpectralBackend`](@ref).
-"""
-abstract type AbstractExecutionBackend end
-
-"""
-    SerialBackend <: AbstractExecutionBackend
-
-Single-threaded serial execution; no external dependencies.
-"""
-struct SerialBackend <: AbstractExecutionBackend end
-
-"""
-    ThreadedBackend <: AbstractExecutionBackend
-
-Shared-memory multithreading over the outer (shell/mode) loop. Load `OhMyThreads`.
-"""
-struct ThreadedBackend <: AbstractExecutionBackend end
-
-"""
-    DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
-    DistributedBackend(inner = SerialBackend())
-
-Multi-process execution via `Distributed`/`SharedArrays`: parallelises the outer loop over
-mediator shells / receiver modes across workers. Parametric on the per-worker `inner` backend, so
-each worker can itself run serially (`DistributedBackend()`, the default) or threaded
-(`DistributedBackend(ThreadedBackend())`, a hybrid distributed+threaded run — `addprocs(...; exeflags="-t N")`
-and `@everywhere using OhMyThreads`). Retrieve the per-worker backend with [`local_backend`](@ref).
-Requires `using Distributed, SharedArrays`.
-"""
-struct DistributedBackend{Inner<:AbstractExecutionBackend} <: AbstractExecutionBackend
-    inner::Inner
-end
-DistributedBackend() = DistributedBackend(SerialBackend())
-
-"""
-    local_backend(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
-
-The execution backend each worker/process should use locally. For [`DistributedBackend`](@ref) this
-is its `inner` backend; for every other backend it is the backend itself (identity).
-"""
-local_backend(execution::AbstractExecutionBackend) = execution
-local_backend(execution::DistributedBackend) = execution.inner
-
-"""
-    GPUBackend{B} <: AbstractExecutionBackend
-
-GPU execution via `KernelAbstractions`, holding the device backend `backend::B`
-(e.g. `GPUBackend(CUDA.CUDABackend())`). Requires `using KernelAbstractions` + a vendor package.
-"""
-struct GPUBackend{B} <: AbstractExecutionBackend
-    backend::B
-end
-
-"""
-    AutoBackend <: AbstractExecutionBackend
-
-Select the best available execution backend at call time (see [`resolve_execution`](@ref)): resolves
-to [`ThreadedBackend`](@ref) when the OhMyThreads extension is loaded and Julia was started with more
-than one thread, otherwise [`SerialBackend`](@ref). [`GPUBackend`](@ref) (needs a device) and
-[`DistributedBackend`](@ref) (needs a worker pool, and only parallelises reductions) are never chosen
-automatically — pass them explicitly.
-"""
-struct AutoBackend <: AbstractExecutionBackend end
-
-"""
-    resolve_execution(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
-
-Map an execution backend to the concrete backend to actually run on. Concrete backends pass through
-unchanged; [`AutoBackend`](@ref) resolves to [`ThreadedBackend`](@ref) when threading is available
-(the OhMyThreads extension is loaded and `Threads.nthreads() > 1`), else [`SerialBackend`](@ref).
-Called at every diagnostic entry point that accepts `execution`, so `AutoBackend` works uniformly.
-"""
-resolve_execution(execution::AbstractExecutionBackend) = execution
-function resolve_execution(::AutoBackend)
-    if Threads.nthreads() > 1 &&
-       Base.get_extension(parentmodule(@__MODULE__), :FlowInvariantTransferOhMyThreadsExt) !== nothing
-        return ThreadedBackend()
-    end
-    return SerialBackend()
-end
-
 # ---------------------------------------------------------------------------
 # Result containers
 # ---------------------------------------------------------------------------
 
 """
-    SpectralFluxResult{V}
+    SpectralFluxResult{KS, V}
 
 Result of a spectral energy flux computation.
 
 # Fields
-- `k_shells::V`: Representative wavenumber for each shell (midpoint of bin edges).
+- `k_shells::KS`: Representative wavenumber for each shell (midpoint of bin edges).
 - `transfer_spectrum::V`: T(k) — energy transfer rate per shell.
-- `flux::V`: Π(K) — cumulative energy flux (negative integral of T(k)).
+- `flux::V`: Π(K) = +cumsum(T(k)) — cumulative energy flux (Π>0 forward/down-scale cascade,
+  Π<0 inverse; Alexakis–Biferale 2018, THEORY.md §0.5).
 
-Parametric on the vector type `V` — works with any `AbstractVector` element type
-(Float32, Float64, ForwardDiff.Dual, Unitful quantities, etc.).
+Parametric with no element-type bound (works with Float32/Float64/Dual/Unitful, etc.). `k_shells`
+(host-side shell wavenumbers) is parametrised separately from the `transfer_spectrum`/`flux` data so
+a device computation can return device data while `k_shells` stays a host vector.
 """
-struct SpectralFluxResult{V<:AbstractVector}
-    k_shells::V
+struct SpectralFluxResult{KS<:AbstractVector, V<:AbstractVector}
+    k_shells::KS
     transfer_spectrum::V
     flux::V
 end
-SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k)}(k, T, f)
+SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k), typeof(T)}(k, T, f)
 
 """
     SphericalTransferResult{V<:AbstractVector}
@@ -742,29 +654,29 @@ struct SphericalTransferResult{V<:AbstractVector}
 end
 
 """
-    CompressibleFluxResult{V, CH, PD}
+    CompressibleFluxResult{KS, TS, FL, CH, PD}
 
 Result of a compressible kinetic-energy spectral-transfer computation (Singh–Tiwari–Sharma–Verma
 2025; see THEORY.md §0.5). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
 diagnostics it needs the density field and — for the KE↔internal-energy exchange — the pressure.
 
 # Fields
-- `k_shells::V`: representative wavenumber per shell.
-- `transfer_spectrum::V`: `T_u(k)` — net momentum-weighted KE transfer into shell `k` (energy *gain*
+- `k_shells::KS`: representative wavenumber per shell.
+- `transfer_spectrum::TS`: `T_u(k)` — net momentum-weighted KE transfer into shell `k` (energy *gain*
   rate; sign is opposite the incompressible loss convention). Conserves total KE: `Σ_k T_u(k) ≈ 0`.
-- `flux::V`: `Π(K)` — cumulative flux, `Π(K) = Σ_{k>K} T_u(k)`.
+- `flux::FL`: `Π(K)` — cumulative flux, `Π(K) = Σ_{k>K} T_u(k)`.
 - `channels::CH`: rotational/compressive (Helmholtz `u = u_R + u_C`) flux channels as a `NamedTuple`
   `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested.
 - `pressure_dilatation::PD`: KE↔IE conversion `(rotational = Q_{I,R}(k), compressive = Q_{I,C}(k))`
   as a `NamedTuple`, or `nothing` if no pressure field was supplied.
 
-Optional `CH`/`PD` resolve to `Nothing` or the concrete `NamedTuple` type, so the struct is
-type-stable. Parametric on `V` for element-type genericity.
+Each array field carries its own type parameter (element-type/container generic — no shared or
+`<:AbstractVector`-bounded param); optional `CH`/`PD` resolve to `Nothing` or a concrete `NamedTuple`.
 """
-struct CompressibleFluxResult{V<:AbstractVector, CH, PD}
-    k_shells::V
-    transfer_spectrum::V
-    flux::V
+struct CompressibleFluxResult{KS, TS, FL, CH, PD}
+    k_shells::KS
+    transfer_spectrum::TS
+    flux::FL
     channels::CH
     pressure_dilatation::PD
 end

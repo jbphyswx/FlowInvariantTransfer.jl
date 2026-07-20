@@ -13,7 +13,7 @@ rank = MPI.Comm_rank(comm)
 nproc = MPI.Comm_size(comm)
 
 N = 12; L = 2π
-ks = FIT.wavenumber_grid((N, N), (L, L))
+ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
 kx = [ks[1][i] for i in 1:N, j in 1:N]
 ky = [ks[2][j] for i in 1:N, j in 1:N]
 binning = FIT.LinearBinning(2π / L)

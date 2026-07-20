@@ -16,8 +16,8 @@ _to_cgef_kernel(::SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
 # Override CoarseGrainingFlux._cg_flux_cgef
 # ---------------------------------------------------------------------------
 
-# Allocation-free masked mean over the wet points of the flux field.
-function _masked_mean(Π::AbstractMatrix{FT}, wet::AbstractMatrix{Bool}) where {FT}
+# Allocation-free masked mean over the wet points of the flux field (N-D).
+function _masked_mean(Π::AbstractArray{FT}, wet::AbstractArray{Bool}) where {FT}
     acc = zero(FT)
     n = 0
     @inbounds for i in eachindex(Π, wet)
@@ -34,42 +34,61 @@ end
 
 Build the reusable CGEF `StructuredGrid`, its `ΠWorkspace`, the `Π_ℓ(x)` output buffer, and
 (when `return_diagnostics`) the `τ̄`/`S̄` diagnostic buffers, wrapped in a
-`CoarseGrainingFluxWorkspace`. Supports 2D Cartesian grids from tuple inputs.
+`CoarseGrainingFluxWorkspace`. Supports 2D and 3D Cartesian grids from tuple inputs.
 """
 function FIT.CoarseGrainingFlux._cg_flux_workspace(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
-    mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
+    mask::Union{Nothing, AbstractArray{Bool}} = nothing,
 )
     D  = length(velocity_fields)
     nd = length(coords_vecs)
     D == nd || throw(ArgumentError(
         "Number of velocity components ($D) must equal number of spatial dimensions ($nd)"))
-    nd == 2 || throw(ArgumentError(
-        "FlowInvariantTransferCGEFExt currently supports 2D Cartesian grids only (nd=$nd). " *
-        "For 3D or spherical, call CoarseGrainingEnergyFluxes directly."))
+    (nd == 2 || nd == 3) || throw(ArgumentError(
+        "FlowInvariantTransferCGEFExt supports 2D and 3D Cartesian grids (nd=$nd). " *
+        "For spherical geometry, call CoarseGrainingEnergyFluxes directly."))
 
     FT  = eltype(velocity_fields[1])
-    Nlon, Nlat = size(velocity_fields[1])
+    ns  = size(velocity_fields[1])
 
-    x_vec = coords_vecs[1]
-    y_vec = coords_vecs[2]
-    dx = length(x_vec) > 1 ? FT((x_vec[end] - x_vec[begin]) / (length(x_vec) - 1)) : FT(1)
-    dy = length(y_vec) > 1 ? FT((y_vec[end] - y_vec[begin]) / (length(y_vec) - 1)) : FT(1)
+    # Per-dimension grid spacing from the coordinate vectors.
+    dx = ntuple(nd) do i
+        v = coords_vecs[i]
+        length(v) > 1 ? FT((v[end] - v[begin]) / (length(v) - 1)) : FT(1)
+    end
+    geom = CGEF.Geometry.CartesianGeometry(dx...)                 # (dx,dy) 2D / (dx,dy,dz) 3D
+    wet  = mask !== nothing ? mask : trues(ns...)
+    grid = CGEF.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., wet)
 
-    geom = CGEF.Geometry.CartesianGeometry(dx, dy)
-    wet  = mask !== nothing ? mask : trues(Nlon, Nlat)
-    grid = CGEF.Grids.StructuredGrid(geom, FT.(x_vec), FT.(y_vec), wet)
-
-    workspace = CGEF.Diagnostics.ΠWorkspace(grid)
-    Π_out = zeros(FT, Nlon, Nlat)
+    workspace = CGEF.Diagnostics.ΠWorkspace(grid)                # dimensionality inferred from the grid
+    Π_out = zeros(FT, ns...)
     diagnostics = return_diagnostics ?
-        (zeros(FT, Nlon, Nlat, 2, 2), zeros(FT, Nlon, Nlat, 2, 2)) : nothing
+        (zeros(FT, ns..., nd, nd), zeros(FT, ns..., nd, nd)) : nothing
 
     return FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
         grid, workspace, Π_out, diagnostics, Base.RefValue{Any}(nothing))
+end
+
+# Scatter the CGEF workspace's symmetric stress/strain components into the (ns..., nd, nd) buffers.
+function _fill_diagnostics!(τ_arr, S_arr, w, ::Val{2})
+    c = ntuple(_ -> Colon(), 2)
+    for (a, b, τv, Sv) in ((1,1,w.τ_xx,w.S_xx), (2,2,w.τ_yy,w.S_yy), (1,2,w.τ_xy,w.S_xy))
+        τ_arr[c..., a, b] .= τv; τ_arr[c..., b, a] .= τv
+        S_arr[c..., a, b] .= Sv; S_arr[c..., b, a] .= Sv
+    end
+    return nothing
+end
+function _fill_diagnostics!(τ_arr, S_arr, w, ::Val{3})
+    c = ntuple(_ -> Colon(), 3)
+    for (a, b, τv, Sv) in ((1,1,w.τ_xx,w.S_xx), (2,2,w.τ_yy,w.S_yy), (3,3,w.τ_zz,w.S_zz),
+                           (1,2,w.τ_xy,w.S_xy), (1,3,w.τ_xz,w.S_xz), (2,3,w.τ_yz,w.S_yz))
+        τ_arr[c..., a, b] .= τv; τ_arr[c..., b, a] .= τv
+        S_arr[c..., a, b] .= Sv; S_arr[c..., b, a] .= Sv
+    end
+    return nothing
 end
 
 # Return the cached filter plan if it was built for this exact (scale, kernel, mask); otherwise
@@ -107,9 +126,11 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     cgef_kernel = _to_cgef_kernel(filter)
     plan = _cached_filter_plan(ws, cgef_kernel, FT(ℓ), mask_strategy, backend)
 
+    # Vertical component only in 3D; the 2D flux passes `nothing` (single horizontal layer).
+    w_comp = ndims(Π_out) == 3 ? velocity_fields[3] : nothing
     CGEF.Diagnostics.compute_Π!(
         Π_out,
-        velocity_fields[1], velocity_fields[2], nothing,
+        velocity_fields[1], velocity_fields[2], w_comp,
         ws.grid,
         cgef_kernel,
         FT(ℓ);
@@ -125,16 +146,8 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     if ws.diagnostics === nothing
         return CoarseGrainingFluxResult(FT(ℓ), Π_out, FT(mean_Π))
     else
-        w = ws.cgef_workspace
         τ_arr, S_arr = ws.diagnostics
-        τ_arr[:, :, 1, 1] .= w.τ_xx
-        τ_arr[:, :, 1, 2] .= w.τ_xy
-        τ_arr[:, :, 2, 1] .= w.τ_xy
-        τ_arr[:, :, 2, 2] .= w.τ_yy
-        S_arr[:, :, 1, 1] .= w.S_xx
-        S_arr[:, :, 1, 2] .= w.S_xy
-        S_arr[:, :, 2, 1] .= w.S_xy
-        S_arr[:, :, 2, 2] .= w.S_yy
+        _fill_diagnostics!(τ_arr, S_arr, ws.cgef_workspace, Val(ndims(Π_out)))
         return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
     end
 end
@@ -143,7 +156,7 @@ end
     _cg_flux_cgef(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
 
 Allocating coarse-graining flux: build a one-shot [`CoarseGrainingFluxWorkspace`](@ref) and
-delegate to [`calculate_coarse_graining_flux!`](@ref) (`CGEF.compute_Π!`). Supports 2D
+delegate to [`calculate_coarse_graining_flux!`](@ref) (`CGEF.compute_Π!`). Supports 2D and 3D
 Cartesian grids from tuple inputs. For spherical geometry or more control (masks, backends),
 call CGEF directly and wrap the result with `CoarseGrainingFluxResult`.
 """
@@ -153,7 +166,7 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef(
     ℓ::Real,
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
-    mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
+    mask::Union{Nothing, AbstractArray{Bool}} = nothing,
     kwargs...,
 )
     ws = FIT.CoarseGrainingFlux._cg_flux_workspace(

@@ -17,6 +17,27 @@ using LinearAlgebra: LinearAlgebra
 # so serialize planning behind a lock.
 const _PLAN_LOCK = ReentrantLock()
 
+# Build forward/backward FFT plans for `x` with an EXPLICIT FFTW thread count (FFTW bakes the count into
+# the plan at creation, so execution uses exactly this many threads regardless of the process-global
+# `FFTW.set_num_threads(...)` a sibling like FlowFieldSpectra/NUFSHT may have set). Performance model:
+# we own threading and saturate the coarsest parallel axis, never nesting. So `nthreads = 1` is the
+# default — correct and 0-alloc for the loop-heavy methods (shell/mode/band/channel loop threaded, one
+# single-threaded FFT per task) and for the serial path; the single-FFT-dominant methods (spectral flux,
+# compressible) pass `nthreads > 1` when their outer loop is narrower than the core count, so the FFT
+# itself soaks up the remaining cores (its per-transform scratch is negligible/amortized there). The
+# global count is saved/restored under the lock so we don't perturb other packages' transforms.
+function _plan_fft_bfft(x; nthreads::Int = 1)
+    lock(_PLAN_LOCK) do
+        old_nt = FFTW.get_num_threads()
+        FFTW.set_num_threads(nthreads)
+        try
+            return (FFTW.plan_fft(x), FFTW.plan_bfft(x))
+        finally
+            FFTW.set_num_threads(old_nt)
+        end
+    end
+end
+
 """
     FFTPlanBundle
 
@@ -44,35 +65,66 @@ struct FFTPlanBundle{PF, PB, CA, KC, MA, PS}
     p_bfft::PB     # unnormalized backward plan on a single (ns...) component
     ctmp::CA       # complex (ns...) scratch
     ctmp2::CA      # complex (ns...) scratch
-    k_comp::KC     # nd real (ns...) wavenumber-component arrays
-    keepmask::MA   # Bool (ns...): true where the mode is KEPT (not 2/3-dealiased)
+    k_comp::KC     # nd real (ns...) wavenumber-component arrays (on the input's device)
+    keepmask::MA   # Bool (ns...): true where the mode is KEPT (not 2/3-dealiased) (on the device)
     pad::PS        # PaddedScratch when built for PaddedThreeHalves, else `nothing` — concrete either
                    # way, so `bundle.pad` access is type-stable (no dynamic dispatch in the hot path).
 end
+
+# Custom one-line `show`: NEVER recurse into a live FFTW/cuFFT plan — the default field-by-field show
+# calls `show(::IO, ::FFTW.Plan)` → the C `fftw_sprint_plan`, which can SEGFAULT on a fragile/closed
+# plan (see the plan-show hazard). These make displaying any workspace that holds the bundle safe.
+Base.show(io::IO, ::PaddedScratch) = print(io, "PaddedScratch(…)")
+Base.show(io::IO, ::MIME"text/plain", p::PaddedScratch) = show(io, p)
+Base.show(io::IO, b::FFTPlanBundle) = print(io, "FFTPlanBundle(", b.pad === nothing ? "2/3 dealias" : "3/2 padded", ")")
+Base.show(io::IO, ::MIME"text/plain", b::FFTPlanBundle) = show(io, b)
 
 # More specific than the core fallback `_make_fft_plans(::Any, ::Any, ::Any) = nothing`, so this ADDS
 # a method (no overwriting) — dispatched only for complex spectral fields when FFTW is loaded. The
 # `dealiasing` is known at workspace construction, so the (larger) padded scratch is built here ONLY
 # for PaddedThreeHalves and its concrete type flows into `FFTPlanBundle`'s `pad` — keeping every
 # `bundle.pad` access type-stable with no allocation on the common 2/3 path.
-function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing)
+function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing, fft_nthreads::Int)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    ct  = similar(velocity_hat, ns...)   # complex (ns...)
+    FT = real(eltype(velocity_hat))
+    ct  = similar(velocity_hat, ns...)   # complex (ns...) — device-generic
     ct2 = similar(velocity_hat, ns...)
-    # ESTIMATE (default) does not overwrite the array during planning; serialize for thread-safety.
-    p_fft, p_bfft = lock(_PLAN_LOCK) do
-        (FFTW.plan_fft(ct), FFTW.plan_bfft(ct))
+    # `AbstractFFTs.plan_fft` dispatches by array type (FFTW for host `Array`s, cuFFT for `CuArray`s,
+    # …), so this one engine runs on CPU and device. ESTIMATE planning does not overwrite the array;
+    # serialize because FFTW planning is not thread-safe (the threaded backend builds a ws per task).
+    # `_plan_fft_bfft` dispatches BY ARRAY TYPE (FFTW imports+extends `AbstractFFTs.plan_fft`): a host
+    # `Array` → FFTW plan, a `CuArray` (CUDA loaded) → cuFFT plan — one device-generic engine, built
+    # single-threaded. If the array type has no registered FFT provider (e.g. a JLArray test surrogate),
+    # planning throws a `MethodError`: catch it and return `nothing` so workspace construction still
+    # succeeds; the FFT compute path then errors clearly (never silently) if `FFTBackend` is requested.
+    plans = try
+        _plan_fft_bfft(ct; nthreads = fft_nthreads)
+    catch err
+        err isa MethodError || rethrow()
+        nothing
     end
-    k_comp   = [_build_k_component_fft(ks, d, ns) for d in 1:nd]
-    keepmask = [!FIT.NonlinearTerm._is_dealiased(I, ns, nd) for I in CartesianIndices(ns)]
-    pad = dealiasing isa FIT.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks) : nothing
-    return FFTPlanBundle(p_fft, p_bfft, ct, ct2, k_comp, keepmask, pad)
+    plans === nothing && return nothing
+    p_fft, p_bfft = plans
+    # Per-axis wavenumber grids + the 2/3 keep-mask: built on the host once, then copied to the
+    # input's device, so the hot-path broadcasts (`ct .= im .* k_comp[j] .* keep .* v_c`) stay on-device.
+    # A `Vector` (not a tuple): the hot loop does `pb.k_comp[j]` with a runtime `j`, and indexing a
+    # tuple with a runtime index is type-unstable (inferred as the element union) — it would box in the
+    # nonlinear-term broadcast. Vector element-type is concrete, so the indexing stays inferred.
+    k_comp = [begin
+        kc = similar(velocity_hat, FT, ns...)
+        copyto!(kc, FT[FT(ks[d][I[d]]) for I in CartesianIndices(ns)])
+        kc
+    end for d in 1:nd]
+    keep = similar(velocity_hat, Bool, ns...)
+    copyto!(keep, Bool[!FIT.NonlinearTerm._is_dealiased(I, ns, nd) for I in CartesianIndices(ns)])
+    pad = dealiasing isa FIT.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks, fft_nthreads) : nothing
+    return FFTPlanBundle(p_fft, p_bfft, ct, ct2, k_comp, keep, pad)
 end
 
 # Build the padded (≈3N/2) scratch once, for the exact-3/2 nonlinear term. `similar(velocity_hat,…)`
 # propagates the array kind + eltype (fully generic — no hardcoded Float64).
-function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks)
+function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks, fft_nthreads::Int)
     nd  = length(ks)
     ns  = size(velocity_hat)[1:nd]
     M   = size(velocity_hat, nd + 1)
@@ -83,9 +135,7 @@ function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks)
     u_phys = similar(velocity_hat, FT, Ms..., nd)
     g_phys = similar(velocity_hat, FT, Ms..., 1)
     n_phys = similar(velocity_hat, FT, Ms..., M)
-    p_fft, p_bfft = lock(_PLAN_LOCK) do
-        (FFTW.plan_fft(spec), FFTW.plan_bfft(spec))
-    end
+    p_fft, p_bfft = _plan_fft_bfft(spec; nthreads = fft_nthreads)
     # ns→Ms fftfreq permutation: mode index i (dim d) has km = (i-1)≤ns÷2 ? i-1 : i-1-ns, landing at
     # Ms index km≥0 ? km+1 : Ms+km+1 (positive freqs at the front, negative at the back).
     emap = [CartesianIndex(ntuple(d -> (let i = I[d], n = ns[d], m = Ms[d]
@@ -329,19 +379,6 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
 end
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-function _build_k_component_fft(ks, d::Int, ns)
-    FT = eltype(ks[1])
-    kc = zeros(FT, ns...)
-    for I in CartesianIndices(ns)
-        kc[I] = ks[d][I[d]]
-    end
-    return kc
-end
-
-# ---------------------------------------------------------------------------
 # Override TriadicOrthogonalDecomposition._temporal_block_dft_fft!
 # ---------------------------------------------------------------------------
 
@@ -385,72 +422,50 @@ end
 # and every transform in a call (created once under the plan lock). Convention matches the core:
 # synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
 # ---------------------------------------------------------------------------
-function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}) where {nd}
+function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}; fft_nthreads::Int = 1) where {nd}
     FT = real(eltype(velocity_hat))
     CT = complex(FT)
     Np = FT(prod(ns))
-    inbuf  = Array{CT}(undef, ns)
-    outbuf = Array{CT}(undef, ns)
-    p_fft, p_bfft = lock(_PLAN_LOCK) do
-        (FFTW.plan_fft(inbuf), FFTW.plan_bfft(inbuf))
+    # Device-generic: buffers + wavenumber grids are built in `velocity_hat`'s own array type, and every
+    # per-component transfer is a `copyto!`/broadcast over a contiguous last-dim slice (no scalar indexing),
+    # so the compressible transform runs on CPU `Array`s (FFTW) and on device arrays (cuFFT via AbstractFFTs
+    # — `FFTW.plan_fft` IS `AbstractFFTs.plan_fft`) unchanged. `_plan_fft_bfft` pins the FFTW thread count.
+    inbuf  = similar(velocity_hat, CT, ns)
+    outbuf = similar(velocity_hat, CT, ns)
+    p_fft, p_bfft = _plan_fft_bfft(inbuf; nthreads = fft_nthreads)
+    kg = ntuple(nd) do d
+        v = similar(velocity_hat, FT, ns[d]); copyto!(v, collect(FT, ks[d]))
+        reshape(v, ntuple(i -> i == d ? ns[d] : 1, nd))
     end
-    kv = ntuple(d -> collect(FT, ks[d]), nd)
 
-    idft = function (fh)                                    # spectral (ns...,C) → physical (bfft)
-        C = size(fh, nd + 1)
-        out = Array{CT}(undef, ns..., C)
-        @inbounds for c in 1:C
-            for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
-            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
-            for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
-        end
-        return out
-    end
-    dft = function (fp)                                     # physical (ns...,C) → spectral (fft/Nᵈ)
-        C = size(fp, nd + 1)
-        out = Array{CT}(undef, ns..., C)
-        @inbounds for c in 1:C
-            for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
-            LinearAlgebra.mul!(outbuf, p_fft, inbuf)
-            for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
-        end
-        return out
-    end
-    grad = function (fh)                                    # ∂_d f_c = bfft(i k_d f̂_c) → (ns...,C,nd)
-        C = size(fh, nd + 1)
-        g = Array{CT}(undef, ns..., C, nd)
-        @inbounds for d in 1:nd, c in 1:C
-            for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
-            LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
-            for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
-        end
-        return g
-    end
-    # In-place siblings — write into the caller's buffer (for the compressible workspace path).
-    idft! = function (out, fh)
+    idft! = function (out, fh)                             # spectral (ns...,C) → physical (bfft), in place
         @inbounds for c in 1:size(fh, nd + 1)
-            for I in CartesianIndices(ns); inbuf[I] = fh[I, c]; end
+            copyto!(inbuf, selectdim(fh, nd + 1, c))
             LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
-            for I in CartesianIndices(ns); out[I, c] = outbuf[I]; end
+            copyto!(selectdim(out, nd + 1, c), outbuf)
         end
         return out
     end
-    dft! = function (out, fp)
+    dft! = function (out, fp)                              # physical (ns...,C) → spectral (fft/Nᵈ), in place
         @inbounds for c in 1:size(fp, nd + 1)
-            for I in CartesianIndices(ns); inbuf[I] = fp[I, c]; end
+            copyto!(inbuf, selectdim(fp, nd + 1, c))
             LinearAlgebra.mul!(outbuf, p_fft, inbuf)
-            for I in CartesianIndices(ns); out[I, c] = outbuf[I] / Np; end
+            selectdim(out, nd + 1, c) .= outbuf ./ Np
         end
         return out
     end
-    grad! = function (g, fh)
+    grad! = function (g, fh)                               # ∂_d f_c = bfft(i k_d f̂_c) → (ns...,C,nd), in place
         @inbounds for d in 1:nd, c in 1:size(fh, nd + 1)
-            for I in CartesianIndices(ns); inbuf[I] = im * kv[d][I[d]] * fh[I, c]; end
+            inbuf .= (im .* kg[d]) .* selectdim(fh, nd + 1, c)
             LinearAlgebra.mul!(outbuf, p_bfft, inbuf)
-            for I in CartesianIndices(ns); g[I, c, d] = outbuf[I]; end
+            copyto!(selectdim(selectdim(g, nd + 2, d), nd + 1, c), outbuf)
         end
         return g
     end
+    # Out-of-place siblings allocate a device-kind output then delegate to the in-place kernels.
+    idft = fh -> idft!(similar(fh, CT, ns..., size(fh, nd + 1)), fh)
+    dft  = fp -> dft!(similar(fp, CT, ns..., size(fp, nd + 1)), fp)
+    grad = fh -> grad!(similar(fh, CT, ns..., size(fh, nd + 1), nd), fh)
     return FIT.Compressible.TransformContext(idft, dft, grad, idft!, dft!, grad!)
 end
 

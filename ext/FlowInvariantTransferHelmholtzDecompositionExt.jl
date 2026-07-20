@@ -11,30 +11,32 @@ function FIT.Decomposition._decompose_field_physical(
     coords_vecs::Tuple;
     kwargs...
 )
-    u = velocity_fields[1]
-    v = velocity_fields[2]
-    FT = eltype(u)
-    
-    x_vec = coords_vecs[1]
-    y_vec = coords_vecs[2]
-    
-    # Grid spacing
-    dx = length(x_vec) > 1 ? FT((x_vec[end] - x_vec[begin]) / (length(x_vec) - 1)) : FT(1)
-    dy = length(y_vec) > 1 ? FT((y_vec[end] - y_vec[begin]) / (length(y_vec) - 1)) : FT(1)
-    
-    # Build HelmholtzDecomposition structured grid
-    geom = HelmholtzDecomposition.CartesianGeometry(dx, dy)
-    mask = get(kwargs, :mask, nothing)
-    grid = mask !== nothing ? HelmholtzDecomposition.StructuredGrid(geom, FT.(x_vec), FT.(y_vec), mask) :
-                              HelmholtzDecomposition.StructuredGrid(geom, FT.(x_vec), FT.(y_vec))
-                              
-    # Decompose
-    res = HelmholtzDecomposition.helmholtz_decompose(u, v, grid)
+    D  = length(velocity_fields)
+    nd = length(coords_vecs)
+    D == nd || throw(ArgumentError(
+        "number of velocity components ($D) must equal spatial dimensions ($nd)"))
+    (nd == 2 || nd == 3) || throw(ArgumentError(
+        "physical-space Helmholtz decomposition supports 2D and 3D Cartesian grids (nd=$nd)."))
+    FT = eltype(velocity_fields[1])
 
-    # HelmholtzResult stores component-last stacked velocities (ns..., 2); this physical path is
-    # contracted to return an (x, y) component tuple, so split them back out.
-    rot = (res.u_rot[:, :, 1], res.u_rot[:, :, 2])
-    div = (res.u_div[:, :, 1], res.u_div[:, :, 2])
+    # Per-dimension grid spacing → HelmholtzDecomposition structured grid (2D or 3D).
+    dx = ntuple(nd) do i
+        c = coords_vecs[i]
+        length(c) > 1 ? FT((c[end] - c[begin]) / (length(c) - 1)) : FT(1)
+    end
+    geom   = HelmholtzDecomposition.CartesianGeometry(dx...)
+    coords = ntuple(i -> FT.(coords_vecs[i]), nd)
+    mask   = get(kwargs, :mask, nothing)
+    grid = mask !== nothing ? HelmholtzDecomposition.StructuredGrid(geom, coords..., mask) :
+                              HelmholtzDecomposition.StructuredGrid(geom, coords...)
+
+    # `HelmholtzResult` stores component-last stacked fields (ns..., D); split into a component tuple.
+    # NB: bounded physical-space Helmholtz–Hodge also has a harmonic part (`res.u_harm`); the rot/div
+    # tuple returned here omits it (harmonic ≈ 0 on a periodic domain), matching the spectral convention.
+    res    = HelmholtzDecomposition.helmholtz_decompose(velocity_fields..., grid)
+    colons = ntuple(_ -> Colon(), nd)
+    rot = ntuple(c -> res.u_rot[colons..., c], nd)
+    div = ntuple(c -> res.u_div[colons..., c], nd)
     if decomp isa HelmholtzDecompType
         return (; rotational = rot, divergent = div)
     elseif decomp isa RotationalDecomposition
@@ -52,46 +54,13 @@ function FIT.Decomposition._decompose_field_spectral(
     velocity_hat::AbstractArray{<:Complex},
     ks
 )
-    D = size(velocity_hat, 3)
-    D == 2 || throw(ArgumentError("Helmholtz decomposition currently supports 2D fields only."))
-    
-    FT = real(eltype(velocity_hat))
-    
-    # Find minimum non-zero absolute value in ks[1] to get dk_x
-    min_kx = FT(Inf)
-    for k in ks[1]
-        ak = abs(k)
-        if ak > 0
-            min_kx = min(min_kx, ak)
-        end
-    end
-    L_x = isfinite(min_kx) ? FT(2π / min_kx) : FT(1)
-    dx = L_x / length(ks[1])
-    
-    min_ky = FT(Inf)
-    for k in ks[2]
-        ak = abs(k)
-        if ak > 0
-            min_ky = min(min_ky, ak)
-        end
-    end
-    L_y = isfinite(min_ky) ? FT(2π / min_ky) : FT(1)
-    dy = L_y / length(ks[2])
-    
-    # Construct structured grid
-    geom = HelmholtzDecomposition.CartesianGeometry(dx, dy)
-    grid = HelmholtzDecomposition.StructuredGrid(
-        geom,
-        collect(range(zero(FT), L_x; length=length(ks[1])+1)[1:end-1]),
-        collect(range(zero(FT), L_y; length=length(ks[2])+1)[1:end-1])
-    )
-    
-    u_hat = velocity_hat[:, :, 1]
-    v_hat = velocity_hat[:, :, 2]
-    res = HelmholtzDecomposition.helmholtz_project_spectral(u_hat, v_hat, grid)
+    # N-D Leray projection straight from the wavenumber vectors (no grid reconstruction): the sibling's
+    # `helmholtz_project_spectral(velocity_hat, ks)` is a device-generic pure-broadcast projection, so
+    # this works in 2D and 3D and on device arrays. Component-last (ns..., D) convention both ways.
+    res = HelmholtzDecomposition.helmholtz_project_spectral(velocity_hat, ks)
 
-    # SpectralCartesianResult already stores component-last stacked fields (ns..., 2) — exactly the
-    # (ns..., D) convention FIT's spectral decompositions return, so use them directly.
+    # SpectralCartesianResult stores component-last stacked fields (ns..., D) — exactly the FIT
+    # spectral-decomposition convention, so use them directly.
     if decomp isa HelmholtzDecompType
         return (; rotational = res.u_rot, divergent = res.u_div)
     elseif decomp isa RotationalDecomposition

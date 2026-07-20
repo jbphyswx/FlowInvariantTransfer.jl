@@ -3,7 +3,7 @@ module FlowInvariantTransferNUFSHTExt
 using NUFSHT: NUFSHT
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult
-using FlowInvariantTransfer.Spherical: spherical_transfer_reduce, spherical_transfer_reduce!
+using FlowInvariantTransfer.Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer at SCATTERED points on the sphere, via NUFSHT
@@ -49,6 +49,7 @@ function FIT.ScatteredSphericalTransferWorkspace(
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
     T::Type = Float64,
+    execution::AbstractExecutionBackend = SerialBackend(),
 )
     θ, φ = coords
     M = length(θ)
@@ -61,27 +62,36 @@ function FIT.ScatteredSphericalTransferWorkspace(
     FT = float(T)
     CT = Complex{FT}
 
-    # The three NUFSHT spin plans (points preset) — the dominant, reusable cost.
-    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,  0; tol = tol, T = FT)
-    plan1  = NUFSHT.make_spin_plan(θ, φ, lmax,  1; tol = tol, T = FT)
-    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT)
+    # The three NUFSHT spin plans (points preset) — the dominant, reusable cost. `nthreads=1` (Serial,
+    # default) keeps the FINUFFT-backed transforms single-threaded: FINUFFT shares libfftw3 with FFTW.jl,
+    # so a multithreaded plan spawns Julia Tasks per exec (allocating), and single-threaded is 0-alloc +
+    # oversubscription-free when the outer batch axis is parallelised. ThreadedBackend threads a lone call.
+    nthr = execution isa ThreadedBackend ? Threads.nthreads() : 1
+    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,  0; tol = tol, T = FT, nthreads = nthr)
+    plan1  = NUFSHT.make_spin_plan(θ, φ, lmax,  1; tol = tol, T = FT, nthreads = nthr)
+    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT, nthreads = nthr)
 
-    ζ_lm = zeros(CT, lmax + 1, 2lmax + 1)
-    ψ_lm = zeros(CT, lmax + 1, 2lmax + 1)
-    ðψ   = zeros(CT, lmax + 1, 2lmax + 1)
-    ðζ   = zeros(CT, lmax + 1, 2lmax + 1)
-    A_lw = zeros(CT, lwork + 1, 2lwork + 1)
-    Gψ = zeros(CT, M); Gζ = zeros(CT, M); ζdata = zeros(CT, M); Jc = zeros(CT, M)
-    nmode = (lmax + 1)^2
-    degs = Vector{Int}(undef, nmode)
-    ψv = Vector{CT}(undef, nmode); ζv = Vector{CT}(undef, nmode); Av = Vector{CT}(undef, nmode)
+    # Buffers follow the coordinate array type (`similar(θ, …)`): device-array coordinates θ, φ make
+    # NUFSHT build device (cuFINUFFT) plans, and these matching device buffers keep the whole transform
+    # device-resident. Host coordinates → host buffers → CPU FINUFFT, exactly as before.
+    _z(dims...) = fill!(similar(θ, CT, dims...), zero(CT))
+    ζ_lm = _z(lmax + 1, 2lmax + 1)
+    ψ_lm = _z(lmax + 1, 2lmax + 1)
+    ðψ   = _z(lmax + 1, 2lmax + 1)
+    ðζ   = _z(lmax + 1, 2lmax + 1)
+    A_lw = _z(lwork + 1, 2lwork + 1)
+    Gψ = _z(M); Gζ = _z(M); ζdata = _z(M); Jc = _z(M)
+    # Degree per matrix row (ℓ at row ℓ+1), on-device, for the row-broadcast coefficient-space ops.
+    degcol = reshape(similar(θ, FT, lmax + 1), lmax + 1, 1); copyto!(degcol, FT.(0:lmax))
+    Pr   = similar(θ, FT, lmax + 1, 2lmax + 1)   # real product scratch (row-sum reduce)
+    Tcol = similar(θ, FT, lmax + 1, 1)           # real per-degree column-sum scratch
     result = SphericalTransferResult(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
         zeros(FT, lmax + 1), zeros(FT, lmax + 1))
 
     return FIT.Spherical.ScatteredSphericalTransferWorkspace(
         plan0, plan1, plan0w, ζ_lm, ψ_lm, ðψ, ðζ, A_lw, Gψ, Gζ, ζdata, Jc,
-        degs, ψv, ζv, Av, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+        degcol, Pr, Tcol, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
 end
 
 function FIT.calculate_spherical_transfer!(
@@ -100,36 +110,39 @@ function FIT.calculate_spherical_transfer!(
     fill!(ws.ζ_lm, zero(CT))
     NUFSHT.nusht_solve_spin!(ws.ζ_lm, ws.ζdata, ws.plan0; rtol = ws.rtol, maxiter = ws.maxiter)
 
-    # ψ = ∇⁻²ζ and the eth ladder → spin-1 gradient coefficients (reused buffers).
-    fill!(ws.ψ_lm, zero(CT)); fill!(ws.ðψ, zero(CT)); fill!(ws.ðζ, zero(CT))
-    @inbounds for ℓ in 1:lmax, m in -ℓ:ℓ
-        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
-        ws.ψ_lm[i] = -a^2 / (ℓ * (ℓ + 1)) * ws.ζ_lm[i]
-        c = sqrt(FT(ℓ * (ℓ + 1)))
-        ws.ðψ[i] = c * ws.ψ_lm[i]
-        ws.ðζ[i] = c * ws.ζ_lm[i]
-    end
+    # ψ = ∇⁻²ζ and the eth ladder → spin-1 gradient coefficients, as row-broadcasts over the
+    # (degree = row, m = column) coefficient matrices — device-generic, no scalar indexing. ℓ(ℓ+1) is a
+    # per-row scalar from `ws.degcol`; the ℓ=0 row and the |m|>ℓ corners are 0 in ζ_lm, so they stay 0.
+    dd     = ws.degcol
+    ll1    = @. dd * (dd + 1)
+    invll1 = @. ifelse(ll1 > 0, inv(ll1), zero(FT))
+    cfac   = @. sqrt(ll1)
+    @. ws.ψ_lm = -a^2 * invll1 * ws.ζ_lm
+    @. ws.ðψ   = cfac * ws.ψ_lm
+    @. ws.ðζ   = cfac * ws.ζ_lm
 
     # Synthesise ðψ, ðζ at the points; A = J(ψ,ζ) into the complex solve buffer.
     NUFSHT.nusht_type2_spin!(ws.Gψ, ws.ðψ, ws.plan1)
     NUFSHT.nusht_type2_spin!(ws.Gζ, ws.ðζ, ws.plan1)
     @. ws.Jc = imag(conj(ws.Gψ) * ws.Gζ) / a^2
 
-    # Analyse A at degree lwork (dealiased); reduce over l ≤ lmax into the reused result.
+    # Analyse A at degree lwork (dealiased).
     fill!(ws.A_lw, zero(CT))
     NUFSHT.nusht_solve_spin!(ws.A_lw, ws.Jc, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
 
-    k = 0
-    @inbounds for ℓ in 0:lmax, m in -ℓ:ℓ
-        k += 1
-        i = NUFSHT.spin_coeff_index(ℓ, m, lmax)
-        iw = NUFSHT.spin_coeff_index(ℓ, m, lwork)
-        ws.degs[k] = ℓ
-        ws.ψv[k] = ws.ψ_lm[i]
-        ws.ζv[k] = ws.ζ_lm[i]
-        ws.Av[k] = ws.A_lw[iw]
-    end
-    return spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
+    # Per-degree transfer = sum over m (matrix columns). A_lw (degree lwork) aligns to the lmax layout by a
+    # contiguous column slice (m offset lwork−lmax); |m|>ℓ corners are 0 (ζ/ψ/A = 0), so the full row-sum
+    # equals the sum over valid m. T_E(ℓ) = −Σ_m Re{ψ* A}, T_Z(ℓ) = +Σ_m Re{ζ* A}; then Π(L) = −Σ_{l≤L}T(l).
+    A_al = @view ws.A_lw[1:lmax + 1, (lwork - lmax + 1):(lwork + lmax + 1)]
+    @. ws.Pr = real(conj(ws.ψ_lm) * A_al)          # T_E(ℓ) = -Σ_m Re{ψ* A}  (fused, into preallocated Pr)
+    sum!(ws.Tcol, ws.Pr)
+    copyto!(ws.result.energy_transfer, vec(ws.Tcol));  ws.result.energy_transfer .*= -1
+    @. ws.Pr = real(conj(ws.ζ_lm) * A_al)          # T_Z(ℓ) = +Σ_m Re{ζ* A}
+    sum!(ws.Tcol, ws.Pr)
+    copyto!(ws.result.enstrophy_transfer, vec(ws.Tcol))
+    FIT.Spherical._neg_cumsum!(ws.result.energy_flux,    ws.result.energy_transfer)
+    FIT.Spherical._neg_cumsum!(ws.result.enstrophy_flux, ws.result.enstrophy_transfer)
+    return ws.result
 end
 
 function FIT.calculate_energy_transfer(
@@ -141,6 +154,7 @@ function FIT.calculate_energy_transfer(
     tol::Real = 1e-10,
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
+    execution::AbstractExecutionBackend = SerialBackend(),
     kwargs...,
 )
     M = length(vorticity)
@@ -148,7 +162,7 @@ function FIT.calculate_energy_transfer(
         "vorticity and both coordinate vectors must have equal length; got $((M, length(coords[1]), length(coords[2])))."))
     ws = FIT.ScatteredSphericalTransferWorkspace(
         coords, lmax; radius = float(method.radius), dealias = dealias,
-        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)))
+        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)), execution = execution)
     return FIT.calculate_spherical_transfer!(ws, vorticity)
 end
 

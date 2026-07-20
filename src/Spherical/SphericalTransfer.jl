@@ -80,7 +80,7 @@ lets a snapshot time series on the same points reuse them. NUFSHT plans self-fin
 resources, so this struct needs no finalizer. Fields are typed via parameters so the core names no
 NUFSHT type. Requires `using NUFSHT`.
 """
-struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, IV, RES, R}
+struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, RES, R}
     plan0::P0        # spin-0 analysis plan at lmax
     plan1::P1        # spin-1 synthesis plan at lmax
     plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
@@ -93,10 +93,9 @@ struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, IV, RES, R}
     Gζ::CV           # (M,) ðζ at the scattered points
     ζdata::CV        # (M,) vorticity as complex (solve input)
     Jc::CV           # (M,) Jacobian A = J(ψ,ζ) as complex (solve input)
-    degs::IV         # per-mode degree l
-    ψv::CV           # per-mode ψ̂ (reduction input)
-    ζv::CV           # per-mode ζ̂
-    Av::CV           # per-mode Â
+    degcol::DC       # (lmax+1, 1) degrees 0:lmax — row-broadcast for the coefficient-space ops
+    Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
+    Tcol::TC         # (lmax+1, 1) real per-degree column-sum scratch
     result::RES      # reused SphericalTransferResult
     radius::R
     lmax::Int
@@ -173,5 +172,11 @@ function _neg_cumsum!(Π::AbstractVector, T::AbstractVector)
     end
     return Π
 end
+
+# One-line show (these hold FSH / NUFSHT (FINUFFT-backed) plans → default field-dump show can segfault).
+Base.show(io::IO, ::SphericalTransferWorkspace) = print(io, "SphericalTransferWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::SphericalTransferWorkspace) = show(io, w)
+Base.show(io::IO, ::ScatteredSphericalTransferWorkspace) = print(io, "ScatteredSphericalTransferWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = show(io, w)
 
 end # module Spherical

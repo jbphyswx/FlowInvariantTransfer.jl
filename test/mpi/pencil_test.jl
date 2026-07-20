@@ -7,6 +7,7 @@ using PencilFFTs: PencilFFTs, allocate_input
 using PencilArrays: PencilArrays, range_local
 using FFTW: FFTW
 using Random: Random
+using KernelAbstractions: KernelAbstractions as KA
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 MPI.Init()
@@ -14,7 +15,7 @@ comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm)
 
 N = 16; L = 2π; nd = 2
-ks = FIT.wavenumber_grid((N, N), (L, L))
+ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
 kx = [ks[1][i] for i in 1:N, j in 1:N]
 ky = [ks[2][j] for i in 1:N, j in 1:N]
 
@@ -44,16 +45,77 @@ end
 res = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
         dealiasing = FIT.OrszagTwoThirds())
 
+# Composable execution: MPIBackend(GPUBackend(KA.CPU())) unwraps to a per-rank GPUBackend, routing the
+# local shell reduction through the atomic device scatter-add instead of the host scalar loop. Verified
+# on KA.CPU (plain-Array pencils); the identical code path runs on a CuArray-backed pencil (multi-GPU).
+resG = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), execution = FIT.MPIBackend(FIT.GPUBackend(KA.CPU())))
+
+# Enstrophy (2D) — the pencil path now supports every invariant; reuse the same distributed field.
+refZ = FIT.calculate_spectral_flux(û, ks; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
+        spectral = FIT.FFTBackend(), invariant = FIT.Enstrophy())
+resZ = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Enstrophy())
+
+# Helicity (3D) — a divergence-free field u = ∇×A on a 3D grid split across ranks. N=16: at N=8 the
+# 2/3-dealiased retained band is too small to form helicity-transferring triads (T_H ≈ 0, degenerate).
+N3 = 16; ks3 = FIT.Utils.wavenumber_grid((N3, N3, N3), (L, L, L))
+kx3 = [ks3[1][i] for i in 1:N3, j in 1:N3, k in 1:N3]
+ky3 = [ks3[2][j] for i in 1:N3, j in 1:N3, k in 1:N3]
+kz3 = [ks3[3][k] for i in 1:N3, j in 1:N3, k in 1:N3]
+rng3 = Random.MersenneTwister(1)
+Âx = FFTW.fft(randn(rng3, N3, N3, N3)) ./ N3^3
+Ây = FFTW.fft(randn(rng3, N3, N3, N3)) ./ N3^3
+Âz = FFTW.fft(randn(rng3, N3, N3, N3)) ./ N3^3
+û3 = cat(im .* (ky3 .* Âz .- kz3 .* Ây), im .* (kz3 .* Âx .- kx3 .* Âz), im .* (kx3 .* Ây .- ky3 .* Âx); dims = 4)
+U3 = ntuple(3) do c; real.(FFTW.bfft(û3[:, :, :, c])); end
+ref3 = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
+        spectral = FIT.FFTBackend(), invariant = FIT.Helicity())
+plan3 = FIT.build_pencil_plan((N3, N3, N3), comm)
+upen3 = ntuple(3) do c
+    a = allocate_input(plan3); rl = range_local(a)
+    for I in CartesianIndices(a)
+        gI = CartesianIndex(ntuple(d -> rl[d][I[d]], 3))
+        a[I] = U3[c][gI]
+    end
+    a
+end
+res3 = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Helicity())
+
+# Anisotropic geometry (3D): cylindrical k_⊥ = √(kx²+ky²) shells — exercises the geometry generalization.
+refP = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
+        spectral = FIT.FFTBackend(), geometry = FIT.PerpendicularShells())
+resP = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), geometry = FIT.PerpendicularShells())
+
+# Enstrophy 3D (vector vorticity + vortex stretching) through the pencil path — reuse the ∇×A field.
+refZ3 = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
+        spectral = FIT.FFTBackend(), invariant = FIT.Enstrophy())
+resZ3 = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
+        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Enstrophy())
+
+# 0-alloc reuse: a workspace reused across snapshots of the same distributed grid allocates only the
+# small per-shell result vectors (Tglob + flux), not the O(field) Fourier grids/scratch each call.
+wsK = FIT.PencilWorkspace(plan, ks, comm; binning = binning, dealiasing = FIT.OrszagTwoThirds())
+resWS = FIT.pencil_spectral_flux!(wsK, upen)              # warm (all ranks; collective Allreduce)
+a_reuse = @allocated FIT.pencil_spectral_flux!(wsK, upen)
+
 failures = 0
 if rank == 0
-    scaleT = maximum(abs, ref.transfer_spectrum) + eps()
-    scaleF = maximum(abs, ref.flux) + eps()
-    eT = maximum(abs, res.transfer_spectrum .- ref.transfer_spectrum)
-    eF = maximum(abs, res.flux .- ref.flux)
-    println("pencil vs serial: relΔT=", eT / scaleT, " relΔΠ=", eF / scaleF)
-    (scaleT > 1e-8)            || (println("FAIL: reference transfer is ~0 (non-meaningful test)"); global failures += 1)
-    (eT / scaleT < 1e-9)      || (println("FAIL: transfer_spectrum mismatch"); global failures += 1)
-    (eF / scaleF < 1e-9)      || (println("FAIL: flux mismatch"); global failures += 1)
+    println("pencil ! reuse alloc = ", a_reuse, " bytes")
+    (maximum(abs, resWS.transfer_spectrum .- ref.transfer_spectrum) < 1e-9 * (maximum(abs, ref.transfer_spectrum) + eps())) ||
+        (println("FAIL: workspace ! transfer mismatch vs serial"); global failures += 1)
+    (a_reuse < 8192) || (println("FAIL: pencil ! reuse alloc too high ($a_reuse bytes)"); global failures += 1)
+    for (name, r, rf) in (("KE", res, ref), ("KE-gpu(KA.CPU)", resG, ref), ("enstrophy", resZ, refZ), ("enstrophy3D", resZ3, refZ3), ("helicity", res3, ref3), ("KE⊥", resP, refP))
+        sT = maximum(abs, rf.transfer_spectrum) + eps()
+        eT = maximum(abs, r.transfer_spectrum .- rf.transfer_spectrum) / sT
+        eF = maximum(abs, r.flux .- rf.flux) / (maximum(abs, rf.flux) + eps())
+        println("pencil ", name, ": relΔT=", eT, " relΔΠ=", eF)
+        (sT > 1e-8) || (println("FAIL: $name reference transfer ~0"); global failures += 1)
+        (eT < 1e-9)  || (println("FAIL: $name transfer_spectrum mismatch"); global failures += 1)
+        (eF < 1e-9)  || (println("FAIL: $name flux mismatch"); global failures += 1)
+    end
     println(failures == 0 ? "PENCIL_OK" : "PENCIL_FAILED ($failures)")
 end
 MPI.Finalize()
