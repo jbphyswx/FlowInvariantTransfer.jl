@@ -205,7 +205,7 @@ end
 # (cuFFT via the FFT spectral backend on a device array); here the per-mode transfer density is
 # written by a device kernel and scatter-added into the device T_spec in a single pass, then the
 # cumulative flux is formed on-device with `cumsum!`. No host temporaries, no scalar indexing —
-# a device-resident field stays on the GPU end to end (the point of issue #12 for the SMODE path).
+# a device-resident field stays on the GPU end to end.
 function FIT.SpectralFlux._spectral_flux_gpu!(
     result::SpectralFluxResult,
     ws,

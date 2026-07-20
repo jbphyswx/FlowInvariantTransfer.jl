@@ -1282,7 +1282,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     # Spectral flux Π(K): every execution backend (Threaded/Distributed/GPU) must reproduce the
     # serial reduction to machine precision, for each invariant with a device kernel. GPU is the
     # KernelAbstractions CPU backend (same device path used on CUDA/ROC/Metal); Distributed runs
-    # over however many workers are present (≥1). Guards against the issue #12 regression (spectral
+    # over however many workers are present (≥1). Guards against a regression (spectral
     # flux was serial-only) and against the execution axis diverging from serial.
     Test.@testset "Spectral flux execution backends" begin
         L = 2π
@@ -1430,13 +1430,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    # Compressible KE spectral transfer (#1 / Singh–Tiwari–Sharma–Verma 2025). Validated by the
+    # Compressible KE spectral transfer (Singh–Tiwari–Sharma–Verma 2025). Validated by the
     # analytic identities that make it trustworthy: (a) the momentum-weighted nonlinear transfer
     # conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u to
     # −(incompressible transfer_spectrum) (paper Eqs. 48–50); (c) the R/C flux channels reconstruct
     # the total flux and the compressive/cross channels vanish for incompressible flow; (d) uniform
     # pressure ⇒ zero pressure-dilatation.
-    Test.@testset "Compressible energy transfer (#1)" begin
+    Test.@testset "Compressible energy transfer" begin
         L = 2π; N = 16
         ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
         kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
@@ -1471,9 +1471,9 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    # Extension smoke tests (#10): exercise the previously-untested extensions with meaningful
+    # Extension smoke tests: exercise the previously-untested extensions with meaningful
     # numerical assertions, not @test true. CairoMakie (plot dispatch incl. the new TOD figure),
-    # FINUFFT (scattered-Cartesian coarse-graining + the calculate_energy_transfer wiring, #11),
+    # FINUFFT (scattered-Cartesian coarse-graining + the calculate_energy_transfer wiring),
     # and FlowFieldSpectra (physical→spectral front-end). FSH/NUFSHT spherical transfer is tested
     # in its own testset once the genuine spherical implementation lands.
     Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" begin
@@ -1489,7 +1489,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             Test.@test FIT.plot_energy_transfer(sf) isa CairoMakie.Figure
             ss = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, spectral=FIT.FFTBackend())
             Test.@test FIT.plot_energy_transfer(ss) isa CairoMakie.Figure
-            # New TOD Fig-4 bispectrum plot (#3): build a minimal result and render it.
+            # TOD bispectrum plot: build a minimal result and render it.
             nF = 6; nm = 2
             freqs = collect(range(-2.0, 2.0; length=nF))
             λ = abs.(randn(Random.MersenneTwister(3), nF, nF, nm))
@@ -1500,7 +1500,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             Test.@test_throws ArgumentError FIT.plot_energy_transfer(tod; mode=99)
         end
 
-        Test.@testset "FINUFFT scattered coarse-graining (#11)" begin
+        Test.@testset "FINUFFT scattered coarse-graining" begin
             # Sample a smooth periodic velocity field at scattered points; the scattered coarse-graining
             # flux must be finite and its calculate_energy_transfer wiring must match the direct call.
             rng = Random.MersenneTwister(31)
@@ -1562,7 +1562,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    # Spherical spectral transfer (#10 FSH extension; genuine 2D-barotropic implementation).
+    # Spherical spectral transfer (FSH extension, 2D-barotropic).
     # The rigorous anchor is exact conservation Σ_l T = 0 (= ∫ψ J(ψ,ζ) dΩ = 0 by antisymmetry),
     # which holds to machine precision iff the quadratic Jacobian is dealiased (evaluated on the
     # 2·lmax grid). Convention verified directly against FSH's eth definition (see THEORY.md §6.1).
@@ -1620,7 +1620,7 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
-    # Scattered spherical transfer (#10 NUFSHT extension; rewrite off a fabricated API). Same
+    # Scattered spherical transfer (NUFSHT extension). Same
     # 2D-barotropic transfer at scattered points via NUFSHT's FINUFFT-backed spin transforms.
     # Anchor: cross-check against the validated FSH regular-grid path on the SAME field, sampled
     # identically (random real-SH coeffs C → FSH grid via sph_evaluate, scattered via nusht_type2!).
