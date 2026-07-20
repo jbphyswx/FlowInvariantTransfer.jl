@@ -25,9 +25,9 @@ function run_mode_to_mode_example(; N=24)
     S = m2m.transfer
 
     # Reduce S(k|p) over shells → T(K,Q).
-    kmag = FIT.wavenumber_magnitude_grid(ks)
-    edges = FIT.shell_edges(b, maximum(kmag)); sidx = FIT.assign_shells(kmag, edges)
-    K = FIT.shell_centers(b, maximum(kmag)); Nsh = length(K)
+    kmag = FIT.Utils.wavenumber_magnitude_grid(ks)
+    edges = FIT.ShellBinning.shell_edges(b, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
+    K = FIT.ShellBinning.shell_centers(b, maximum(kmag)); Nsh = length(K)
     TKQ = zeros(Nsh, Nsh)
     for kI in CartesianIndices((N, N)), pI in CartesianIndices((N, N))
         n = sidx[kI]; m = sidx[pI]
