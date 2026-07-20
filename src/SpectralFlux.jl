@@ -37,7 +37,7 @@ flux Π(K) from Fourier-space velocity data.
       with per-chunk partial shell sums (race-free), an `O(Nᴰ)` parallel pass.
     - `DistributedBackend()` (requires `using Distributed`) — the scatter is partitioned across worker
       processes and `+`-reduced. Note: this distributes only the reduction, not the (dominant) nonlinear-term
-      FFT; to distribute a grid too large for one node, use [`pencil_spectral_flux`](@ref) (PencilFFTs).
+      FFT; to distribute a grid too large for one node, use [`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux) (PencilFFTs).
     - `GPUBackend(dev)` (requires `using KernelAbstractions`) — the transfer density is written by a device
       kernel and reduced per shell on-device (no host round-trips), so a device-resident field stays on the GPU.
 

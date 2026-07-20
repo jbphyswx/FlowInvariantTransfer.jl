@@ -79,7 +79,8 @@ using .Types:
     ShellToShellResult,
     ModeToModeTriadResult,
     TriadicOrthogonalDecompositionResult,
-    SphericalTransferResult
+    SphericalTransferResult,
+    CompressibleFluxResult
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
@@ -89,10 +90,10 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-using .Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend
-export AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend
+using .Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend, is_distributed, resolve_execution
+export AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend, is_distributed, resolve_execution
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
+export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, CompressibleFluxResult
 
 # Internal building blocks (grids/dealiasing, shell binning, invariant densities, field
 # decompositions, filters, the nonlinear term) are NOT re-exported or flattened onto the top-level
@@ -136,7 +137,7 @@ per-item outputs are combined. With `reduce=:gather` (default) the results are *
 one `Vector` in the original order of `items`, returned on every rank; `reduce=:sum`/`:mean`
 returns the element-wise reduction (the outputs of `f` must support `+`, and `/` for `:mean`); a
 callable `reduce` is applied as a binary combiner. This is the "batch axis" of distribution —
-orthogonal to the pencil axis ([`pencil_spectral_flux`](@ref)), which splits a single grid.
+orthogonal to the pencil axis ([`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux)), which splits a single grid.
 
 Requires `using MPI` to load the extension.
 """
@@ -165,7 +166,7 @@ end
     build_pencil_plan(ns, comm=MPI.COMM_WORLD; T=Float64) -> PencilFFTPlan
 
 Convenience constructor for the distributed complex-to-complex FFT plan used by
-[`pencil_spectral_flux`](@ref), with an auto-balanced MPI process grid. Requires
+[`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux), with an auto-balanced MPI process grid. Requires
 `using MPI, PencilFFTs, PencilArrays`.
 """
 function build_pencil_plan(args...; kwargs...)

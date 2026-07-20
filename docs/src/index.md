@@ -1,3 +1,7 @@
+```@meta
+CurrentModule = FlowInvariantTransfer
+```
+
 # FlowInvariantTransfer.jl
 
 `FlowInvariantTransfer.jl` is a **general, domain-agnostic** toolkit for the cross-scale transfer

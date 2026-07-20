@@ -1,3 +1,7 @@
+```@meta
+CurrentModule = FlowInvariantTransfer
+```
+
 # Backends, Dealiasing & Extensions
 
 Transfer diagnostics are configured along **two orthogonal axes**, plus a dealiasing
@@ -211,7 +215,7 @@ mean_Π = mpi_batch_map(f, snapshots; reduce = :mean) # ensemble average instead
 `reduce` accepts `:gather` (default), `:sum`, `:mean`, or a binary combiner function; the combined
 result is returned on every rank.
 
-### Pencil axis — one grid too big for a node ([`pencil_spectral_flux`](@ref))
+### Pencil axis — one grid too big for a node ([`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux))
 
 When a *single* snapshot's grid doesn't fit on one node, split **that grid** into pencils (one slab
 per rank). The pseudospectral nonlinear term then needs transpose/all-to-all communication, handled

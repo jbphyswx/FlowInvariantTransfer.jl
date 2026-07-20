@@ -1,3 +1,7 @@
+```@meta
+CurrentModule = FlowInvariantTransfer
+```
+
 # Methods & Theory
 
 ## Spectral Flux Π(K)

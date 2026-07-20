@@ -566,7 +566,7 @@ ParallelShells(dims=(3,)) = ShellMagnitude(dims)
     AbstractSpectralBackend
 
 Abstract supertype for *transform* backends: how physical↔spectral coefficients and the
-pseudospectral nonlinear term are computed. Orthogonal to [`AbstractExecutionBackend`](@ref).
+pseudospectral nonlinear term are computed. Orthogonal to [`AbstractExecutionBackend`](@ref FlowInvariantTransfer.Backends.AbstractExecutionBackend).
 """
 abstract type AbstractSpectralBackend end
 

@@ -2,7 +2,14 @@ using Documenter: Documenter
 using FlowInvariantTransfer: FlowInvariantTransfer
 
 Documenter.makedocs(;
-    modules  = [FlowInvariantTransfer],
+    modules  = [FlowInvariantTransfer,
+        FlowInvariantTransfer.Types, FlowInvariantTransfer.Backends, FlowInvariantTransfer.Utils,
+        FlowInvariantTransfer.Invariants, FlowInvariantTransfer.Decomposition, FlowInvariantTransfer.ShellBinning,
+        FlowInvariantTransfer.Filters, FlowInvariantTransfer.Workspaces, FlowInvariantTransfer.NonlinearTerm,
+        FlowInvariantTransfer.SpectralFlux, FlowInvariantTransfer.CoarseGrainingFlux,
+        FlowInvariantTransfer.ShellToShellTransfer, FlowInvariantTransfer.BandTransfer,
+        FlowInvariantTransfer.TriadicOrthogonalDecomposition, FlowInvariantTransfer.ScaleToScaleTransfer,
+        FlowInvariantTransfer.Compressible, FlowInvariantTransfer.Spherical],
     sitename = "FlowInvariantTransfer.jl",
     authors  = "Jordan Benjamin",
     format   = Documenter.HTML(;

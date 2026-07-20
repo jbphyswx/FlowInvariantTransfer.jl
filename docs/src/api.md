@@ -1,3 +1,7 @@
+```@meta
+CurrentModule = FlowInvariantTransfer
+```
+
 # API Reference
 
 ## Unified Entry Point
@@ -33,6 +37,7 @@ calculate_scalar_mode_to_mode_transfer
 
 ```@docs
 calculate_band_to_band_transfer
+calculate_band_to_band_transfer!
 ```
 
 ## Partial Fluxes (decomposition-resolved)
@@ -46,6 +51,7 @@ calculate_helical_partial_fluxes
 
 ```@docs
 calculate_compressible_flux
+calculate_compressible_flux!
 ```
 
 ## Coarse-Graining Flux
@@ -59,7 +65,7 @@ nufft_coarse_graining_flux
 
 ```@docs
 mpi_batch_map
-pencil_spectral_flux
+FlowInvariantTransfer.pencil_spectral_flux
 build_pencil_plan
 ```
 
@@ -153,6 +159,7 @@ TriadicOrthogonalDecompositionResult
 NonlinearTermWorkspace
 SpectralFluxWorkspace
 ShellToShellWorkspace
+CompressibleWorkspace
 ```
 
 ## Wavenumber Utilities
@@ -209,13 +216,15 @@ NUFSHTBackend
 ## Execution (Parallelism) Backends
 
 ```@docs
-AbstractExecutionBackend
+FlowInvariantTransfer.Backends.AbstractExecutionBackend
 SerialBackend
 ThreadedBackend
 DistributedBackend
+MPIBackend
 GPUBackend
 AutoBackend
 local_backend
+is_distributed
 resolve_execution
 ```
 
