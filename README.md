@@ -86,7 +86,7 @@ The core is pure Julia (a dependency-free `DirectSumBackend` reference). Load `F
 using FlowInvariantTransfer, FFTW
 
 N = 64; L = 2π
-ks = wavenumber_grid((N, N), (L, L))
+ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
 û  = randn(ComplexF64, N, N, 2)            # spectral velocity (ns..., D)
 
 result = calculate_spectral_flux(û, ks;
@@ -237,21 +237,25 @@ Two orthogonal axes that compose:
 - **Execution (parallelism):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
   `DistributedBackend` · `GPUBackend{B}` (KernelAbstractions).
 
-Every diagnostic supports both spectral transforms (Direct + FFT). The execution axis
-(Threaded/Distributed/GPU) applies to the diagnostics with an outer loop over shells/triads; the
-rest run serially over one FFT pass. MPI (batch + pencil axes) is a separate distribution layer.
+Every diagnostic supports both spectral transforms (Direct + FFT). Threaded and GPU (KernelAbstractions)
+run every Fourier diagnostic; Distributed (`Distributed` + `SharedArrays`, many-process single-node) is
+wired for spectral flux, shell-to-shell and TOD. For a grid too large for one node, use the MPI **pencil**
+axis (every invariant + geometry, 0-alloc workspace); MPI **batch** distributes independent snapshots.
 
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
-| Spectral flux | ✓ | ✓ | — | — | — |
+| Spectral flux | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode | ✓ | ✓ | — | — | — |
-| Band-to-band | ✓ | ✓ | — | — | — |
-| Partial fluxes | ✓ | ✓ | — | — | — |
-| TOD | ✓ | ✓ | ✓ | — | — |
+| Mode-to-mode | ✓ | ✓ | ✓ | — | ✓ |
+| Band-to-band | ✓ | ✓ | ✓ | — | ✓ |
+| Partial fluxes | ✓ | ✓ | ✓ | — | ✓ |
+| Compressible | ✓ | ✓ | ✓ | — | ✓ |
+| TOD | ✓ | ✓ | ✓ | ✓ | — |
 
-(Diagnostics that delegate to the nonlinear-term engine inherit every backend; `PaddedThreeHalves`
-dealiasing is FFT-only.)
+GPU is verified on `GPUBackend(KA.CPU())` + JLArrays device-generic building blocks (cuFFT rides
+`AbstractFFTs` on a `CuArray` by construction). `PaddedThreeHalves` dealiasing is FFT-only. See the
+[docs](docs/src/backends.md) for the authoritative matrix with `Serial`, per-cell notes, and the
+coarse-graining / spherical layers.
 
 ### Extensions (loaded on demand)
 

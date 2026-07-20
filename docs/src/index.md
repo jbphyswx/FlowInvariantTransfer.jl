@@ -54,12 +54,14 @@ Two orthogonal axes: **spectral** (transform: [`DirectSumBackend`](@ref), [`FFTB
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
 | Spectral flux | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Band-to-band | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Partial fluxes | ✓ | ✓ | ✓ | ✓ | ✓ |
-| TOD | ✓ | ✓ | ✓ | — | — |
+| Mode-to-mode | ✓ | ✓ | ✓ | — | ✓ |
+| Band-to-band | ✓ | ✓ | ✓ | — | ✓ |
+| Partial fluxes | ✓ | ✓ | ✓ | — | ✓ |
+| Compressible | ✓ | ✓ | ✓ | — | ✓ |
+| TOD | ✓ | ✓ | ✓ | ✓ | — |
 
-See [Backends, Dealiasing & Extensions](@ref) for the extension table.
+See [Backends, Dealiasing & Extensions](@ref) for the authoritative matrix (with `Serial`, per-cell
+notes, and the coarse-graining / spherical / MPI-batch+pencil layers).
 
 ---
 
@@ -69,7 +71,7 @@ See [Backends, Dealiasing & Extensions](@ref) for the extension table.
 using FlowInvariantTransfer, FFTW
 
 N = 64; L = 2π
-ks = wavenumber_grid((N, N), (L, L))
+ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
 û  = randn(ComplexF64, N, N, 2)
 
 result = calculate_spectral_flux(û, ks;

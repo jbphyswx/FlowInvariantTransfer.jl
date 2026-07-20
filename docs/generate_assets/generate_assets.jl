@@ -84,7 +84,7 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
     # We compute T(n,m) using FIT on the 3D→packed representation.
     # FIT expects (N,N,N,3) velocity array or we use the 2D interface on slices.
     # For simplicity: use the built-in FIT 3D wavenumber grid + shell-to-shell.
-    ks3 = FIT.wavenumber_grid((N, N, N), (L, L, L))
+    ks3 = FIT.Utils.wavenumber_grid((N, N, N), (L, L, L))
     b   = FIT.LinearBinning(2π/L)   # unit shells
 
     function compute_diagnostics(uh, vh, wh)

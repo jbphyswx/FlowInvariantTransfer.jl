@@ -229,7 +229,10 @@ res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
 ```
 
 The two axes are complementary and compose (a batch of large grids = batch axis over pencil-axis
-groups). The pencil path currently covers kinetic energy on isotropic `|k|` shells.
+groups). The pencil path covers every invariant (KE / helicity / enstrophy) and the `ShellMagnitude`
+geometries (isotropic `|k|`, perpendicular `k_⊥`, parallel `k_∥`), and `execution=MPIBackend(inner)`
+sets the per-rank local backend — so `MPIBackend(GPUBackend(dev))` runs a device-resident pencil
+(multi-GPU; the local shell reduction becomes an on-device scatter-add).
 
 ---
 
@@ -245,25 +248,36 @@ an outer loop over shells/triads expose it (the rest run serially over the singl
 |-----------|:---------:|:---:|:------:|:--------:|:-----------:|:---:|
 | Spectral flux Π(K) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | — | — | — |
-| Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | — | — | — |
-| Partial / decomposed fluxes | ✓ | ✓ | ✓ | — | — | — |
-| TOD | ✓ | ✓ | ✓ | ✓ | — | — |
-| Coarse-graining Π_ℓ(x) | — | — | — | — | — | — |
-| Distributed (MPI) | — | ✓ | — | — | batch + pencil | — |
+| Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| Partial / decomposed fluxes | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| Compressible T_u(k) | ✓ | ✓ | ✓ | ✓* | — | ✓ |
+| TOD | ✓ | ✓ | ✓ | ✓ | ✓ | —† |
 
-Notes: the net per-mode transfer `T(k)` and the magnitude matrix `T(K,Q)` are routed through the
-fast FFT spectral-flux / shell-to-shell paths (exact, `O(Nᴰ log N)`); the fully mode-resolved
-`S(k|p)` tensor is the only query that needs the `O(N^{2D})` brute loop (guarded by a mode-count
-limit, `force=true` to override). The single-machine `execution = Threaded/Distributed/GPU` axis
-applies to shell-to-shell and TOD (outer shell/triad loop) and to **spectral flux** (the mode→shell
-reduction: threaded/distributed scatter, or a device kernel + on-device `cumsum!` that keeps a
-GPU-resident field on the GPU — for spectral flux Distributed only parallelises the reduction, not
-the FFT, so use the pencil axis to distribute a too-large grid). Mode-to-mode / band-to-band still
-run serially over one FFT pass. `execution = AutoBackend()` resolves to threaded when available, else
-serial (see [`resolve_execution`](@ref)). MPI (batch + pencil axes) is a separate distribution layer
-documented above. Coarse-graining flux is provided entirely by the CoarseGrainingEnergyFluxes
-extension and has its own parallelism model.
+`✓` verified (serial parity to machine precision); `—` not implemented for that axis. Coarse-graining,
+spherical, and the MPI batch/pencil layer are documented separately below (they are not `spectral ×
+execution` diagnostics).
+
+Notes:
+- **Threaded / GPU** are wired for every Fourier diagnostic. The loop methods (shell-to-shell,
+  mode-to-mode, band-to-band, partial) thread the outer shell/mode/band/pair loop and run their
+  per-mode transfer density through a KernelAbstractions device kernel; spectral flux threads/GPU-kernels
+  the mode→shell reduction (device `cumsum!` keeps the field GPU-resident). `✓*` compressible is a single
+  FFT pipeline, so its `Threaded` path threads the FFTs (not an outer loop); its GPU path is a
+  device-generic broadcast pipeline + `GPUArraysCore` reductions. GPU verified on `GPUBackend(KA.CPU())`
+  and on JLArrays device-generic building blocks (cuFFT rides `AbstractFFTs` on a `CuArray` by construction).
+- **Distributed** (`Distributed` + `SharedArrays`, many-process single-node) is implemented for
+  spectral flux, shell-to-shell (the mode→shell scatter across workers) and TOD (the triad loop). For a
+  grid too large for one node, use the **MPI pencil axis** instead (below). `—†` TOD's GPU path is not
+  wired (per-triad SVD is a LAPACK, not KA-kernel, workload).
+- The fully mode-resolved `S(k|p)` tensor is the only query needing the `O(N^{2D})` brute loop (guarded
+  by a mode-count limit; `force=true` to override); `T(k)`/`T(K,Q)`/`Π(K)` use the fast FFT paths.
+- `execution = AutoBackend()` resolves to threaded when available, else serial (see [`resolve_execution`](@ref)).
+- **MPI** (batch + pencil axes) is a separate distribution layer (above). The pencil path supports every
+  invariant (KE/helicity/enstrophy) and every `ShellMagnitude` geometry, with a 0-alloc `PencilWorkspace`
+  for snapshot sweeps. **Coarse-graining** flux is provided by the CoarseGrainingEnergyFluxes extension
+  (its own parallelism model); scattered coarse-graining/spherical use FINUFFT/NUFSHT (FSH for regular
+  spherical grids).
 
 ---
 

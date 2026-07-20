@@ -67,30 +67,30 @@ build_pencil_plan
 
 ```@docs
 triadic_orthogonal_decomposition
-hamming_window
-hann_window
-tukey_window
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.hamming_window
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.hann_window
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.tukey_window
 ```
 
 ## Nonlinear Term
 
 ```@docs
-compute_nonlinear_term
-compute_nonlinear_term!
+FlowInvariantTransfer.NonlinearTerm.compute_nonlinear_term
+FlowInvariantTransfer.NonlinearTerm.compute_nonlinear_term!
 ```
 
 ## Invariant Transfer Density
 
 ```@docs
-transfer_density
-transfer_density!
+FlowInvariantTransfer.Invariants.transfer_density
+FlowInvariantTransfer.Invariants.transfer_density!
 ```
 
 ## Field Decomposition
 
 ```@docs
-decompose_field
-helmholtz_project_spectral!
+FlowInvariantTransfer.Decomposition.decompose_field
+FlowInvariantTransfer.Decomposition.helmholtz_project_spectral!
 ```
 
 ## Method Types
@@ -158,20 +158,20 @@ ShellToShellWorkspace
 ## Wavenumber Utilities
 
 ```@docs
-wavenumber_grid
-wavenumber_magnitude_grid
-dealiasing_mask
-dealiasing_mask!
+FlowInvariantTransfer.Utils.wavenumber_grid
+FlowInvariantTransfer.Utils.wavenumber_magnitude_grid
+FlowInvariantTransfer.Utils.dealiasing_mask
+FlowInvariantTransfer.Utils.dealiasing_mask!
 ```
 
 ## Shell Binning & Geometry
 
 ```@docs
-assign_shells
-shell_edges
-shell_centers
-n_shells
-shell_coordinate
+FlowInvariantTransfer.ShellBinning.assign_shells
+FlowInvariantTransfer.ShellBinning.shell_edges
+FlowInvariantTransfer.ShellBinning.shell_centers
+FlowInvariantTransfer.ShellBinning.n_shells
+FlowInvariantTransfer.ShellBinning.shell_coordinate
 ```
 
 ## Binning Types
@@ -226,7 +226,7 @@ AbstractFilter
 SharpSpectralFilter
 GaussianFilter
 TopHatFilter
-filter_response
-apply_filter_spectral
-apply_filter_spectral!
+FlowInvariantTransfer.Filters.filter_response
+FlowInvariantTransfer.Filters.apply_filter_spectral
+FlowInvariantTransfer.Filters.apply_filter_spectral!
 ```
