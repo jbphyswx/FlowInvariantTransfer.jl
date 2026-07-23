@@ -258,6 +258,22 @@ both **conserving** (`Σ_l T_E = Σ_l T_Z = 0`, since `∫ψ J(ψ,ζ) dΩ = 0` b
 
 **Implementation:** `calculate_energy_transfer(SphericalTransferMethod(; radius), ζ)` → `SphericalTransferResult`. Regular colatitude–longitude grids (an `AbstractMatrix` vorticity field) route to **`FastSphericalHarmonics.jl`** (its real/SVector `spinsph_eth` gives the exact gradient); scattered points route to **`NUFSHT.jl`**. Convention verified directly against FastSphericalHarmonics' eth definition and its `test_spin.jl` grad testset.
 
+### 6.2 Divergent spherical spectral transfer (full horizontal flow) — [Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013]
+
+The barotropic transfer of §6.1 assumes non-divergent flow (`∇·u = 0`). For the full horizontal velocity `u = k̂×∇ψ + ∇χ` (rotational streamfunction `ψ`, divergent velocity potential `χ`; vorticity `ζ = ∇²ψ`, divergence `δ = ∇²χ`) the kinetic-energy transfer follows from the advection written in **Lamb (rotational) form**,
+
+$$(\mathbf u\cdot\nabla)\mathbf u = \nabla\!\big(\tfrac12|\mathbf u|^2\big) + \zeta\,(\hat{\mathbf k}\times\mathbf u),$$
+
+with the **skew-symmetric, energy-conserving** advection `A = (u·∇)u + ½ u(∇·u) = ∇K + ζ(k̂×u) + ½ δ u`, `K = ½|u|²`. Representing the horizontal velocity as the single complex spin-1 field `U₊ = u_θ + i u_φ` (so `k̂×u ↔ i U₊`), and projecting onto the vector spherical harmonics,
+
+$$T(l) = \frac1a\sum_m \mathrm{Re}\{\hat U_{+,lm}^*\,\hat A_{lm}\} = T_{\mathrm{rot}}(l) + T_{\mathrm{div}}(l),$$
+
+split by the toroidal (rotational, `ψ`) and spheroidal (divergent, `χ`) parts of `Û₊`. The skew-symmetric `½ δ u` term makes the transfer conserve total KE, `Σ_l T = 0`, for divergent flow too (the naive `(u·∇)u` does not, since `∫u·∇K = -∫K δ ≠ 0`); the two channels are **not** individually conserved (they exchange energy). In the non-divergent limit (`δ = 0`) `T` reduces exactly to the barotropic `T_E` of §6.1 — the machine-precision validation anchor, alongside `Σ_l T ≈ 0`.
+
+**Numerics:** `Û₊` comes from the spin-1 analysis (carrying the full horizontal KE, `Σ|Û₊|² = ∫|u|² dΩ`); vorticity/divergence from the eth ladder `ζ_lm = -i√{l(l+1)}\,\mathrm{sym}_{lm}`, `δ_lm = +√{l(l+1)}\,\mathrm{anti}_{lm}`; `∇K = -ðK`; the advection `A = ∇K + (iζ + ½δ)U₊` is dealiased at degree `2·lmax`. The Lamb form needs only spin-0/spin-1 transforms (no spin-2).
+
+**Implementation:** `calculate_energy_transfer(DivergentSphericalTransferMethod(; radius), (u_θ, u_φ)[, coords])` → `DivergentSphericalTransferResult` (`energy_transfer`, `rotational_transfer`, `divergent_transfer` and their fluxes). Regular colatitude–longitude grids (velocity-component `AbstractMatrix`es) route to **`FastSphericalHarmonics.jl`**; scattered points (velocity-component vectors + `(θ, φ)`) to **`NUFSHT.jl`**. The two backends agree on a shared field, and each reduces to §6.1 on non-divergent flow (radius-independent), to machine precision. (Genuine 3-D vertical-structure budgets require a multi-shell data model this package does not carry; the diagnostic is the full **horizontal** KE transfer on a spherical shell.)
+
 ---
 
 ## 7. Triadic Orthogonal Decomposition (TOD)
@@ -281,6 +297,7 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 | Smooth band-to-band `T(K,Q)` | done (`BandTransfer.calculate_band_to_band_transfer`) |
 | Anisotropic shells `(k_⊥,k_∥)` | partial (directional shell geometries `PerpendicularShells`/`ParallelShells`) |
 | Spherical spectral transfer `T_E(l)`, `T_Z(l)` (2D barotropic) | done (`SphericalTransferMethod`; FSH regular grid + NUFSHT scattered; §6.1) |
+| Divergent spherical KE transfer `T(l)=T_rot+T_div` (full horizontal flow) | done (`DivergentSphericalTransferMethod`; FSH regular grid + NUFSHT scattered; §6.2) |
 | Compressible energy budget (momentum-weighted transfer, R/C Helmholtz channels, KE↔IE pressure-dilatation) | done (`calculate_compressible_flux`; Singh–Tiwari–Sharma–Verma 2025, §0.5) |
 | Compressible **coarse-graining** budget (Favre filter, deformation-work + baropycnal + pressure-dilatation) | belongs in CoarseGrainingEnergyFluxes.jl (Aluie 2011/2013); tracked there |
 

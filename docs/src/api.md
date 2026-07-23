@@ -61,6 +61,15 @@ calculate_coarse_graining_flux
 nufft_coarse_graining_flux
 ```
 
+## Spherical Spectral Transfer
+
+```@docs
+calculate_spherical_transfer
+calculate_spherical_transfer!
+calculate_divergent_spherical_transfer
+calculate_divergent_spherical_transfer!
+```
+
 ## Distributed (MPI)
 
 ```@docs
@@ -108,6 +117,8 @@ ShellToShellTransferMethod
 ModeToModeTransferMethod
 CoarseGrainingFluxMethod
 TriadicOrthogonalDecompositionMethod
+SphericalTransferMethod
+DivergentSphericalTransferMethod
 ```
 
 ## Invariant Types
@@ -151,6 +162,8 @@ ModeToModeTriadResult
 CoarseGrainingFluxResult
 CoarseGrainingFluxResultWithDiagnostics
 TriadicOrthogonalDecompositionResult
+SphericalTransferResult
+DivergentSphericalTransferResult
 ```
 
 ## Workspace Types
@@ -160,6 +173,10 @@ NonlinearTermWorkspace
 SpectralFluxWorkspace
 ShellToShellWorkspace
 CompressibleWorkspace
+SphericalTransferWorkspace
+ScatteredSphericalTransferWorkspace
+DivergentSphericalTransferWorkspace
+ScatteredDivergentSphericalTransferWorkspace
 ```
 
 ## Wavenumber Utilities
