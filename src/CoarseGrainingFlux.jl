@@ -112,8 +112,8 @@ result = calculate_coarse_graining_flux((u, v), (x, y), ℓ, GaussianFilter())
 # Keyword Arguments
 - `decomposition::AbstractFieldDecomposition`: `NoDecomposition()` (default), `HelmholtzDecomposition()`, `RotationalDecomposition()`, or `DivergentDecomposition()`.
 - `return_diagnostics::Bool=false`: Also return τ̄ᵢⱼ and S̄ᵢⱼ fields.
-- `mask::Union{Nothing,AbstractMatrix{Bool}}=nothing`: Wet/dry mask (`true` = wet).
-  If `nothing`, all points treated as wet.
+- `mask::Union{Nothing,AbstractMatrix{Bool}}=nothing`: boolean point mask (`true` = point included in
+  the computation, `false` = excluded). If `nothing`, all points are included.
 - Any additional kwargs are forwarded to `CoarseGrainingEnergyFluxes.compute_Π!`.
 
 # Returns

@@ -2,8 +2,8 @@ module Compressible
 
 using ..Types: CompressibleFluxResult, AbstractShellBinning, LinearBinning, AbstractShellGeometry,
                IsotropicShells, AbstractDealiasing, OrszagTwoThirds, NoDealiasing,
-               AbstractSpectralBackend, DirectSumBackend, FFTBackend
-using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
+               AbstractSpectralBackend, DirectSumBackend, FFTBackend, require_coefficient_spectral
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution, is_gpu_array
 using ..ShellBinning: shell_edges, shell_centers, assign_shells, shell_coordinate
 using ..Utils: wavenumber_magnitude_grid
 using ..NonlinearTerm: _is_dealiased
@@ -228,8 +228,11 @@ _fft_tf(velocity_hat, ks, ns; fft_nthreads::Int = 1) = throw(ArgumentError(
     "calculate_compressible_flux with an FFT backend requires `using FFTW`; " *
     "or pass `spectral = DirectSumBackend()` for the dependency-free (slow, small-grid) path."))
 
+# Explicit per-backend transform contexts — NO `::AbstractSpectralBackend` catch-all: a catch-all
+# silently routed the scattered/spherical backends through the FFT context (wrong answers, no error).
+# The public entry validates the backend (`require_coefficient_spectral`), so only DirectSum/FFT reach here.
 _resolve_tf(::DirectSumBackend, velocity_hat, ks, ns; fft_nthreads::Int = 1) = _directsum_tf(ks, ns)
-_resolve_tf(::AbstractSpectralBackend, velocity_hat, ks, ns; fft_nthreads::Int = 1) =
+_resolve_tf(::FFTBackend, velocity_hat, ks, ns; fft_nthreads::Int = 1) =
     _fft_tf(velocity_hat, ks, ns; fft_nthreads = fft_nthreads)
 
 # ---------------------------------------------------------------------------
@@ -262,6 +265,7 @@ function CompressibleWorkspace(velocity_hat, ks;
                                binning::AbstractShellBinning = _default_binning(ks),
                                geometry::AbstractShellGeometry = IsotropicShells(),
                                execution::AbstractExecutionBackend = SerialBackend())
+    require_coefficient_spectral(spectral)
     nd = length(ks); ns = size(velocity_hat)[1:nd]; FT = real(eltype(velocity_hat)); CT = complex(FT)
     # Compressible is a single ~O(nd) FFT pipeline (not an outer loop), so ThreadedBackend threads the
     # FFTs themselves — plans baked at nthreads (no per-call scratch alloc, no oversubscription).
@@ -318,9 +322,34 @@ function calculate_compressible_flux(
     nd = length(ks)
     size(velocity_hat, nd + 1) == nd ||
         throw(ArgumentError("compressible transfer needs D = nd velocity components (got $(size(velocity_hat, nd+1)) for nd=$nd)."))
-    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=execution)
+    exec = resolve_execution(execution)
+    if exec isa DistributedBackend
+        # Compressible is a single FFT pipeline (no outer loop): its independent work units are the
+        # decomposition-channel set and the pressure-dilatation, computed on separate workers (each
+        # rebuilding its own workspace from the raw inputs) and assembled on the master. Overridden by
+        # the Distributed extension; the core stub errors clearly if that ext isn't loaded.
+        return _compressible_distributed(velocity_hat, density_hat, ks, exec;
+            spectral=spectral, binning=binning, geometry=geometry, kwargs...)
+    elseif exec isa GPUBackend
+        # The compressible pipeline is device-generic (broadcasts + cuFFT via AbstractFFTs) with no KA
+        # kernel, so the device path is selected by the INPUT ARRAY TYPE, not this knob. A host `Array`
+        # under GPUBackend cannot be honoured (no data movement, no separate device kernel) → clear error
+        # rather than a silent serial run; a device-array input runs on device by construction.
+        is_gpu_array(velocity_hat) || throw(ArgumentError(
+            "compressible transfer runs on-device automatically for device-array inputs (the pipeline is " *
+            "device-generic broadcasts + cuFFT via AbstractFFTs); execution=GPUBackend() does not move a host " *
+            "array to the device. Pass device-array inputs (e.g. CuArray), or use SerialBackend()/ThreadedBackend()."))
+        ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=SerialBackend())
+        return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
+    end
+    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=exec)
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
 end
+
+# Overridden by the Distributed extension (requires `using Distributed, SharedArrays`).
+_compressible_distributed(args...; kwargs...) = throw(ArgumentError(
+    "Distributed compressible transfer requires Distributed + SharedArrays. " *
+    "Run `using Distributed, SharedArrays` to load the extension."))
 
 """
     calculate_compressible_flux!(ws::CompressibleWorkspace, velocity_hat, density_hat, ks; kwargs...)

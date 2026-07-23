@@ -4,6 +4,7 @@ using LinearAlgebra: LinearAlgebra as LA
 using ..Types: AbstractSpectralBackend, DirectSumBackend, FFTBackend,
                AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 using ..Workspaces: NonlinearTermWorkspace
+using ..Backends: is_gpu_array
 
 export compute_nonlinear_term, compute_nonlinear_term!
 export _nonlinear_term_fft!, _nonlinear_term_padded_fft!   # stubs overridden by FFTW extension
@@ -90,6 +91,16 @@ function compute_nonlinear_term!(
     spectral::AbstractSpectralBackend = DirectSumBackend(),
     advecting_hat = velocity_hat,
 )
+    # DirectSum builds the nonlinear term with scalar-indexed direct sums (a host O(N²ᴰ) reference); it
+    # cannot run on a device array (scalar indexing errors under `allowscalar(false)`). Raise a clear
+    # error directing to the device path rather than a cryptic scalar-indexing crash. `is_gpu_array`
+    # (the `AbstractGPUArray` trait) — NOT `!(x isa Array)`, which would misflag host non-`Array` types
+    # (FixedSizeArray/StaticArray/SubArray/…); `GPUBackend(KA.CPU())`'s host-`Array` proxy stays on the path.
+    if spectral isa DirectSumBackend && is_gpu_array(velocity_hat)
+        throw(ArgumentError(
+            "DirectSumBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot run on " *
+            "device arrays; use `spectral = FFTBackend()` (cuFFT via AbstractFFTs) for the device path."))
+    end
     _compute_nonlinear_term!(ws, velocity_hat, ks, spectral, dealiasing; advecting_hat=advecting_hat)
     return ws.N̂
 end

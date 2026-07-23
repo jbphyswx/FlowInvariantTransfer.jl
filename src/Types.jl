@@ -1,6 +1,6 @@
 module Types
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod, DivergentSphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
@@ -11,7 +11,7 @@ export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
 # Execution backends (SerialBackend/ThreadedBackend/GPUBackend/DistributedBackend/MPIBackend/…) live
 # in the sibling `Backends` module.
-export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult
+export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -332,7 +332,7 @@ transfers are
 
 both conserving (Σ_l T = 0). See THEORY.md §"Spherical spectral transfer".
 
-Dispatched through [`calculate_energy_transfer`](@ref): a regular colatitude–longitude grid (an
+Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (an
 `AbstractMatrix` vorticity field) routes to the FastSphericalHarmonics extension; scattered points
 (a vorticity vector + `(θ, φ)` coordinates) route to the NUFSHT extension.
 
@@ -343,6 +343,39 @@ struct SphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
     radius::T
 end
 SphericalTransferMethod(; radius=1.0) = SphericalTransferMethod(radius)
+
+"""
+    DivergentSphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+
+Spectral kinetic-energy transfer for the full **horizontal** flow on the sphere — rotational *and*
+divergent — in the spherical-harmonic degree spectrum `l`. Generalises
+[`SphericalTransferMethod`](@ref) (which assumes non-divergent/barotropic flow, `∇·u = 0`) to a
+velocity field carrying divergence, and reduces to it exactly in the non-divergent limit.
+
+The input is the horizontal velocity `u = (u_θ, u_φ)` (colatitude, longitude components), Helmholtz-
+decomposed as `u = k̂×∇ψ + ∇χ` (rotational streamfunction `ψ`, divergent velocity potential `χ`).
+Writing the advection in Lamb (rotational) form `(u·∇)u = ∇(½|u|²) + ζ (k̂×u)` with vorticity
+`ζ = k̂·(∇×u)`, the nonlinear KE transfer into degree `l` is the vector-harmonic projection
+
+    T(l) = Σ_m Re{ û*_lm · Â_lm},   Â = [(u·∇)u]^  (spin-1 vector-harmonic coefficients),
+
+split by the toroidal (rotational) / spheroidal (divergent) parts of `û` into `T = T_rot + T_div`.
+Total KE is advectively conserved: `Σ_l T(l) ≈ 0` (the rotational and divergent channels are not
+individually conserved — they exchange energy). The Lamb form needs only spin-0/spin-1 transforms
+(no spin-2). See THEORY.md §"Divergent spherical spectral transfer" (Augier–Lindborg 2013;
+Burgess–Erler–Shepherd 2013).
+
+Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (two
+`AbstractMatrix` velocity components) routes to the FastSphericalHarmonics extension; scattered
+points (velocity-component vectors + `(θ, φ)` coordinates) route to the NUFSHT extension.
+
+# Fields
+- `radius::T`: sphere radius `a` (default `1.0`).
+"""
+struct DivergentSphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+    radius::T
+end
+DivergentSphericalTransferMethod(; radius=1.0) = DivergentSphericalTransferMethod(radius)
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +640,45 @@ Non-uniform spherical-harmonic transform for scattered spherical data, via NUFSH
 struct NUFSHTBackend <: AbstractSpectralBackend end
 
 # ---------------------------------------------------------------------------
+# Transform-backend geometry classification + validation
+# ---------------------------------------------------------------------------
+# Each transform backend targets one (geometry, sampling). The Fourier-coefficient Cartesian
+# diagnostics accept only the uniform-Cartesian transforms — the DirectSum reference and FFT — because
+# their input already *is* a uniform-Cartesian Fourier field. Passing a scattered (NUFFT) or spherical
+# (SHT/NUFSHT) backend to them is a geometry mismatch and must raise a clear error, never a bare
+# `MethodError` and never a silent misroute to FFT.
+
+"""
+    spectral_geometry(backend) -> Symbol
+
+The (geometry, sampling) a transform backend targets: `:any` (the DirectSum reference works on any
+geometry), `:cartesian_uniform`, `:cartesian_scattered`, `:spherical_uniform`, `:spherical_scattered`.
+"""
+spectral_geometry(::DirectSumBackend) = :any
+spectral_geometry(::FFTBackend)       = :cartesian_uniform
+spectral_geometry(::NUFFTBackend)     = :cartesian_scattered
+spectral_geometry(::SHTBackend)       = :spherical_uniform
+spectral_geometry(::NUFSHTBackend)    = :spherical_scattered
+
+"""
+    require_coefficient_spectral(spectral) -> spectral
+
+Assert that `spectral` is a valid transform for a Fourier-coefficient Cartesian diagnostic (input is a
+uniform-Cartesian Fourier field). Returns `spectral` for [`DirectSumBackend`](@ref)/[`FFTBackend`](@ref);
+raises a clear geometry-mismatch error for the scattered/spherical backends directing the caller to the
+right entry point.
+"""
+require_coefficient_spectral(spectral::Union{DirectSumBackend, FFTBackend}) = spectral
+require_coefficient_spectral(::NUFFTBackend) = throw(ArgumentError(
+    "NUFFTBackend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
+    "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
+    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=NUFFTBackend())`."))
+require_coefficient_spectral(::Union{SHTBackend, NUFSHTBackend}) = throw(ArgumentError(
+    "SHTBackend and NUFSHTBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
+    "on the sphere (regular grid → SHTBackend, scattered points → NUFSHTBackend). The Cartesian flux " *
+    "diagnostics take FFTBackend (uniform grid) or NUFFTBackend (scattered, via the physical-space entry)."))
+
+# ---------------------------------------------------------------------------
 # Result containers
 # ---------------------------------------------------------------------------
 
@@ -651,6 +723,36 @@ struct SphericalTransferResult{V<:AbstractVector}
     enstrophy_transfer::V
     energy_flux::V
     enstrophy_flux::V
+end
+
+"""
+    DivergentSphericalTransferResult{V<:AbstractVector}
+
+Result of the divergent horizontal kinetic-energy spectral transfer
+([`DivergentSphericalTransferMethod`](@ref)), indexed by spherical-harmonic degree `l = 0…lmax`.
+
+# Fields
+- `degrees::V`: the degrees `l`.
+- `energy_transfer::V`: total horizontal-KE transfer `T(l) = T_rot(l) + T_div(l)` into degree `l`;
+  the skew-symmetric (energy-conserving) advection makes `Σ_l T ≈ 0`.
+- `energy_flux::V`: `Π(L) = -Σ_{l≤L} T(l)` — cumulative up-degree KE flux.
+- `rotational_transfer::V`: rotational-channel transfer `T_rot(l)` — projection of the advection onto
+  the toroidal (streamfunction `ψ`) part of the velocity.
+- `divergent_transfer::V`: divergent-channel transfer `T_div(l)` — projection onto the spheroidal
+  (velocity-potential `χ`) part.
+- `rotational_flux::V`, `divergent_flux::V`: cumulative fluxes `-Σ_{l≤L} T_rot`, `-Σ_{l≤L} T_div`.
+
+Only the total is conserved (`Σ_l T ≈ 0`); the two channels exchange energy, so `Σ_l T_rot` and
+`Σ_l T_div` are individually nonzero (equal and opposite up to the total).
+"""
+struct DivergentSphericalTransferResult{V<:AbstractVector}
+    degrees::V
+    energy_transfer::V
+    energy_flux::V
+    rotational_transfer::V
+    divergent_transfer::V
+    rotational_flux::V
+    divergent_flux::V
 end
 
 """

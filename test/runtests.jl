@@ -721,6 +721,30 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
     end
 
     # -----------------------------------------------------------------------
+    Test.@testset "CoarseGrainingFlux — spherical (lon–lat) Π_ℓ == CGEF directly" begin
+        FT = Float64; R = 6.371e6
+        Nlon, Nlat = 24, 20
+        lon = collect(range(0, 2π; length = Nlon + 1)[1:Nlon])   # radians, periodic
+        lat = collect(range(-1.2, 1.2; length = Nlat))           # radians, away from the poles
+        Random.seed!(37)
+        u = randn(Nlon, Nlat); v = randn(Nlon, Nlat); ℓ = 5.0e5
+        # radius=… selects the spherical grid; the sibling implements the spherical filter stencils.
+        r = FIT.calculate_coarse_graining_flux((u, v), (lon, lat), ℓ, FIT.GaussianFilter(); radius = R)
+        Test.@test r isa FIT.CoarseGrainingFluxResult
+        Test.@test all(isfinite, r.flux_field)
+        # Exact match to the sibling's spherical compute_Π! on the same grid (wiring correctness).
+        geom = CoarseGrainingEnergyFluxes.Geometry.SphericalGeometry(R)
+        grid = CoarseGrainingEnergyFluxes.Grids.StructuredGrid(geom, lon, lat, trues(Nlon, Nlat))
+        Πref = zeros(FT, Nlon, Nlat)
+        CoarseGrainingEnergyFluxes.Diagnostics.compute_Π!(Πref, u, v, nothing, grid,
+            CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), FT(ℓ))
+        Test.@test maximum(abs, r.flux_field .- Πref) == 0.0
+        # Spherical is a 2D lon–lat surface: a 3D request errors clearly.
+        Test.@test_throws ArgumentError FIT.calculate_coarse_graining_flux(
+            (u, v, u), (lon, lat, lat), ℓ, FIT.GaussianFilter(); radius = R)
+    end
+
+    # -----------------------------------------------------------------------
     Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + plan cache" begin
         Random.seed!(7)
         N = 32; L = 2π
@@ -778,6 +802,42 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             FIT.CoarseGrainingFluxMethod(FIT.GaussianFilter(), Float64(π/2)),
             (u, v), (x, y))
         Test.@test r3 isa FIT.CoarseGrainingFluxResult
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" begin
+        N = 16; L = 2π
+        x = range(0.0, L; length = N + 1)[1:N]
+        y = range(0.0, L; length = N + 1)[1:N]
+        Random.seed!(11)
+        u = randn(N, N); v = randn(N, N)
+
+        # FFT path reproduces the canonical û = fft(u)/Nᵈ + wavenumber_grid exactly.
+        û_ts, ks_ts = FIT.to_spectral((u, v), (x, y); spectral = FIT.FFTBackend())
+        û_man = cat(FFTW.fft(u), FFTW.fft(v); dims = 3) ./ N^2
+        ks_man = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        Test.@test isapprox(û_ts, û_man; atol = 1e-12)
+        Test.@test all(isapprox.(ks_ts, ks_man; atol = 1e-12))
+
+        # DirectSum reference agrees with FFT.
+        û_ds, _ = FIT.to_spectral((u, v), (x, y); spectral = FIT.DirectSumBackend())
+        Test.@test isapprox(û_ds, û_man; atol = 1e-10)
+
+        # A diagnostic computed from to_spectral output matches the hand-built coefficient path.
+        Π_ts  = FIT.calculate_spectral_flux(û_ts, ks_ts; spectral = FIT.FFTBackend())
+        Π_man = FIT.calculate_spectral_flux(û_man, ks_man; spectral = FIT.FFTBackend())
+        Test.@test isapprox(Π_ts.flux, Π_man.flux; atol = 1e-12)
+
+        # Scalar 1-tuple (density/pressure/passive-scalar style).
+        ρ = randn(N, N)
+        ρ̂, _ = FIT.to_spectral((ρ,), (x, y); spectral = FIT.FFTBackend())
+        Test.@test size(ρ̂) == (N, N, 1)
+        Test.@test isapprox(ρ̂[:, :, 1], FFTW.fft(ρ) ./ N^2; atol = 1e-12)
+
+        # Scattered / spherical transforms are a geometry mismatch here → clear error, not a silent misroute.
+        Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.NUFFTBackend())
+        Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.SHTBackend())
+        Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.NUFSHTBackend())
     end
 
     # -----------------------------------------------------------------------
@@ -1142,6 +1202,43 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             Test.@test tod_serial.expansion_coefficients[k].recipient == tod_dist.expansion_coefficients[k].recipient
             Test.@test tod_serial.auxiliary_modes[k].donor == tod_dist.auxiliary_modes[k].donor
         end
+
+        # 3. Distributed parity for the loop diagnostics + compressible (all vs serial). DirectSum so
+        # workers need only FlowInvariantTransfer (decomposition / density / pressure are master-side or
+        # shipped as plain arrays). Pins that DistributedBackend genuinely matches serial for
+        # mode-to-mode / band-to-band / partial fluxes / compressible, including the hybrid
+        # DistributedBackend(ThreadedBackend()).
+        spD = FIT.DirectSumBackend()
+        m_ser = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=FIT.SerialBackend(), force=true)
+        m_dst = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=FIT.DistributedBackend(), force=true)
+        m_hyb = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=FIT.DistributedBackend(FIT.ThreadedBackend()), force=true)
+        Test.@test isapprox(m_ser.transfer, m_dst.transfer; atol=1e-12)
+        Test.@test isapprox(m_ser.net_transfer, m_dst.net_transfer; atol=1e-12)
+        Test.@test isapprox(m_ser.transfer, m_hyb.transfer; atol=1e-12)
+
+        bands = FIT.SmoothBands([2.0, 4.0, 6.0])
+        bb_ser = FIT.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=FIT.SerialBackend())
+        bb_dst = FIT.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=FIT.DistributedBackend())
+        bb_hyb = FIT.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=FIT.DistributedBackend(FIT.ThreadedBackend()))
+        Test.@test isapprox(bb_ser.transfer_matrix, bb_dst.transfer_matrix; atol=1e-12)
+        Test.@test isapprox(bb_ser.transfer_matrix, bb_hyb.transfer_matrix; atol=1e-12)
+
+        pf_ser = FIT.calculate_partial_fluxes(û, ks; decomposition=FIT.HelmholtzDecomposition(), spectral=spD, execution=FIT.SerialBackend())
+        pf_dst = FIT.calculate_partial_fluxes(û, ks; decomposition=FIT.HelmholtzDecomposition(), spectral=spD, execution=FIT.DistributedBackend())
+        Test.@test Set(keys(pf_ser.channels)) == Set(keys(pf_dst.channels))
+        Test.@test isapprox(pf_ser.total.transfer_spectrum, pf_dst.total.transfer_spectrum; atol=1e-12)
+
+        ρ̂c = randn(Random.MersenneTwister(7), ComplexF64, N, N)
+        p̂c = randn(Random.MersenneTwister(8), ComplexF64, N, N)
+        c_ser = FIT.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=FIT.SerialBackend(), pressure_hat=p̂c, decompose=true)
+        c_dst = FIT.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=FIT.DistributedBackend(), pressure_hat=p̂c, decompose=true)
+        c_hyb = FIT.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=FIT.DistributedBackend(FIT.ThreadedBackend()), pressure_hat=p̂c, decompose=true)
+        Test.@test isapprox(c_ser.transfer_spectrum, c_dst.transfer_spectrum; atol=1e-12)
+        Test.@test isapprox(c_ser.flux, c_dst.flux; atol=1e-12)
+        Test.@test isapprox(c_ser.channels.rotational, c_dst.channels.rotational; atol=1e-12)
+        Test.@test isapprox(c_ser.channels.compressive, c_dst.channels.compressive; atol=1e-12)
+        Test.@test isapprox(c_ser.pressure_dilatation.compressive, c_dst.pressure_dilatation.compressive; atol=1e-12)
+        Test.@test isapprox(c_ser.transfer_spectrum, c_hyb.transfer_spectrum; atol=1e-12)
     end
 
     # -----------------------------------------------------------------------
@@ -1364,6 +1461,59 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         end
     end
 
+    Test.@testset "passive-scalar GPU (KA.CPU) parity — scalar flux / shell-to-shell / mode-to-mode" begin
+        # PassiveScalar shares the KE device transfer-density kernel (M=1 dot contraction). Pins that the
+        # scalar GPU variants (scalar flux / shell-to-shell / mode-to-mode) run and match serial.
+        L = 2π; N = 16
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        rng = Random.MersenneTwister(23)
+        û = randn(rng, ComplexF64, N, N, 2)
+        θ̂ = randn(rng, ComplexF64, N, N)
+        b = FIT.LinearBinning(2π / L)
+        for sp in (FIT.DirectSumBackend(), FIT.FFTBackend())
+            fs = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, spectral=sp, execution=FIT.SerialBackend())
+            fg = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, spectral=sp, execution=FIT.GPUBackend(KA.CPU()))
+            Test.@test isapprox(fg.flux, fs.flux; atol=1e-12 * (maximum(abs, fs.flux)+eps()))
+
+            ss = FIT.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, spectral=sp, execution=FIT.SerialBackend(), verify_antisymmetry=false)
+            sg = FIT.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, spectral=sp, execution=FIT.GPUBackend(KA.CPU()), verify_antisymmetry=false)
+            Test.@test isapprox(sg.transfer_matrix, ss.transfer_matrix; atol=1e-12 * (maximum(abs, ss.transfer_matrix)+eps()))
+
+            ms = FIT.calculate_scalar_mode_to_mode_transfer(û, θ̂, ks; spectral=sp, execution=FIT.SerialBackend(), force=true)
+            mg = FIT.calculate_scalar_mode_to_mode_transfer(û, θ̂, ks; spectral=sp, execution=FIT.GPUBackend(KA.CPU()), force=true)
+            Test.@test isapprox(mg.net_transfer, ms.net_transfer; atol=1e-12 * (maximum(abs, ms.net_transfer)+eps()))
+        end
+    end
+
+    # -----------------------------------------------------------------------
+    Test.@testset "GPU backend routing — clear errors, device detection, dispatch" begin
+        N = 8; L = 2π
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        rng = Random.MersenneTwister(41)
+        û = randn(rng, ComplexF64, N, N, 2); ρ̂ = randn(rng, ComplexF64, N, N)
+        gpu = FIT.GPUBackend(KA.CPU())
+
+        # is_gpu_array trait: host arrays (incl. non-`Array` host types) are NOT device; JLArray is.
+        Test.@test FIT.Backends.is_gpu_array(û) == false
+        Test.@test FIT.Backends.is_gpu_array(view(û, :, :, 1)) == false   # host SubArray ≠ device
+        Test.@test FIT.Backends.is_gpu_array(JLArrays.JLArray(û)) == true
+
+        # DirectSum can't run on a device array (scalar reference) → clear error (via the trait), not a crash.
+        Test.@test_throws ArgumentError FIT.calculate_spectral_flux(JLArrays.JLArray(û), ks; spectral = FIT.DirectSumBackend())
+        # …but a host Array with DirectSum is fine.
+        Test.@test FIT.calculate_spectral_flux(û, ks; spectral = FIT.DirectSumBackend()) isa FIT.SpectralFluxResult
+
+        # compressible: device path is array-driven; GPUBackend on a host array can't be honoured → clear error.
+        Test.@test_throws ArgumentError FIT.calculate_compressible_flux(û, ρ̂, ks; spectral = FIT.FFTBackend(), execution = gpu)
+
+        # TOD: GPUBackend dispatches through the (device-generic) loop; on a host input it runs the host
+        # kernels == serial (no MethodError, no dismissive error).
+        X = randn(Random.MersenneTwister(42), 64, 4)
+        tser = FIT.triadic_orthogonal_decomposition(X; dt = 0.05)
+        tgpu = FIT.triadic_orthogonal_decomposition(X; dt = 0.05, execution = gpu)
+        Test.@test isequal(tser.mode_bispectrum, tgpu.mode_bispectrum)
+    end
+
     # -----------------------------------------------------------------------
     # Device-genericity on JLArrays (allowscalar(false) — real device semantics, unlike GPUBackend(KA.CPU)
     # which runs on plain Arrays). Broadcast/kernel building blocks must run device-resident with no scalar
@@ -1536,6 +1686,41 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
             # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         end
 
+        Test.@testset "NUFFT scattered → to_spectral (uniform reconstruction feeds the flux family)" begin
+            Nn = 8; Ln = 2π
+            xs1 = [(i - 1) * Ln / Nn for i in 1:Nn]
+            Xg = [xs1[i] for i in 1:Nn, j in 1:Nn]; Yg = [xs1[j] for i in 1:Nn, j in 1:Nn]
+            Random.seed!(31)
+            ug = randn(Nn, Nn); vg = randn(Nn, Nn)
+
+            # Samples on a uniform grid → û == fft(u)/Nᵈ exactly (drop-in for the uniform diagnostics).
+            û_sc, ks_sc = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
+                                          spectral = FIT.NUFFTBackend(), Ls = (Ln, Ln))
+            û_man  = cat(FFTW.fft(ug), FFTW.fft(vg); dims = 3) ./ Nn^2
+            ks_man = FIT.Utils.wavenumber_grid((Nn, Nn), (Ln, Ln))
+            Test.@test isapprox(û_sc, û_man; atol = 1e-8)
+            Test.@test all(isapprox.(ks_sc, ks_man; atol = 1e-10))
+
+            # The reconstructed coefficients feed the ordinary uniform spectral flux, matching the manual path.
+            Π_sc  = FIT.calculate_spectral_flux(û_sc, ks_sc; spectral = FIT.FFTBackend())
+            Π_man = FIT.calculate_spectral_flux(û_man, ks_man; spectral = FIT.FFTBackend())
+            Test.@test isapprox(Π_sc.flux, Π_man.flux; atol = 1e-10)
+
+            # Genuinely scattered points: a single-mode field recovers its exact wavenumber.
+            Np = 4000
+            rng2 = Random.MersenneTwister(99)
+            xr = rand(rng2, Np) .* Ln; yr = rand(rng2, Np) .* Ln
+            kx0 = 2π / Ln * 2; ky0 = 2π / Ln * 3
+            us = cos.(kx0 .* xr .+ ky0 .* yr)
+            ûs, kss = FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = FIT.NUFFTBackend(), Ls = (Ln, Ln))
+            peak = argmax(abs.(ûs[:, :, 1]))
+            Test.@test abs(abs(kss[1][peak[1]]) - kx0) < 1e-8
+            Test.@test abs(abs(kss[2][peak[2]]) - ky0) < 1e-8
+
+            # 3-arg scattered form requires NUFFTBackend (a clear error, not a silent wrong path).
+            Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = FIT.FFTBackend())
+        end
+
         Test.@testset "FlowFieldSpectra front-end" begin
             # Physical-space uniform periodic field → spectral coeffs via FlowFieldSpectra, then the
             # spectral-flux transfer. Band-limit (|k| ≤ 3) so the 2/3 dealiasing is a no-op and the
@@ -1604,6 +1789,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         # Grid-shape guard.
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), randn(N, N))
 
+        # Backend selectors + execution axis: SHTBackend is the regular-grid selector (== default); a
+        # scattered/spherical-mismatched backend and a non-serial execution both raise a clear error.
+        res_sel = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζ; spectral = FIT.SHTBackend())
+        Test.@test res_sel.energy_transfer == res.energy_transfer
+        Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζ; spectral = FIT.NUFSHTBackend())
+        Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζ; execution = FIT.DistributedBackend())
+
         # In-place workspace form: matches the allocating path exactly (same math), and a repeat call
         # reuses the embed/gradient/Jacobian/reduction buffers — the FastSphericalHarmonics transforms
         # (no in-place API) are the irreducible floor, so this saves the FIT-side portion, not all of it.
@@ -1661,6 +1853,13 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test_throws ArgumentError FIT.calculate_energy_transfer(
             FIT.SphericalTransferMethod(), ζscat[1:10], (θs[1:10], φs[1:10]); lmax = lmax)
 
+        # Backend selectors + execution axis: NUFSHTBackend is the scattered selector (== default); the
+        # regular-grid mismatch and non-serial execution error clearly (device path is coord-driven).
+        res_sel = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs); lmax = lmax, tol = 1e-12, rtol = 1e-13, spectral = FIT.NUFSHTBackend())
+        Test.@test res_sel.energy_transfer == res.energy_transfer
+        Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs); lmax = lmax, spectral = FIT.SHTBackend())
+        Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(radius = a), ζscat, (θs, φs); lmax = lmax, execution = FIT.DistributedBackend())
+
         # In-place workspace form: reuses the three NUFSHT plans (the dominant cost) + all buffers, so
         # a snapshot sweep on the same points re-plans nothing. Matches the allocating path to the CG
         # tolerance; a repeat call allocates far less (only the NUFSHT-internal CG scratch remains).
@@ -1672,6 +1871,129 @@ Test.@testset "FlowInvariantTransfer.jl Test Suite" begin
         Test.@test abs(sum(ip.energy_transfer)) < 1e-8 * scaleE
         # (workspace-reuse allocation ratio asserted in test_allocs.jl)
         Test.@test_throws DimensionMismatch FIT.calculate_spherical_transfer!(ws, ζscat[1:end-1])
+    end
+
+    # -----------------------------------------------------------------------
+    # Divergent horizontal-KE spectral transfer for the full (rotational + divergent) flow, on both the
+    # regular grid (FastSphericalHarmonics) and scattered points (NUFSHT). Anchored by: total-KE
+    # conservation Σ_l T ≈ 0 (skew-symmetric advection); exact reduction to the barotropic
+    # SphericalTransferMethod energy transfer for non-divergent flow (radius 1 and 2); the channel split
+    # T = T_rot + T_div (with T_div ≈ 0 for a rotational field); and FSH↔NUFSHT parity on one field.
+    Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
+        lmax = 10; N = lmax + 1
+        rng = Random.MersenneTwister(11)
+        _nabla(freal) = (ð = FSH.spinsph_eth(FSH.spinsph_transform(Matrix{Float64}(freal), 0), 0);
+            G = FSH.spinsph_evaluate(ð, 1); -[complex(G[i, j][1], G[i, j][2]) for i in axes(G, 1), j in axes(G, 2)])
+        _randc() = (C = zeros(Float64, N, 2N - 1); for l in 1:4, m in -l:l
+                C[FSH.spinsph_mode(0, l, m)] = randn(rng) / (l + 1); end; C)
+        _lapf(f) = FSH.spinsph_evaluate((C = FSH.spinsph_transform(Matrix{Float64}(f), 0); D = copy(C);
+            for l in 0:lmax, m in -l:l; i = FSH.spinsph_mode(0, l, m); D[i] = -l * (l + 1) * C[i]; end; D), 0)
+        ψf = FSH.spinsph_evaluate(_randc(), 0); χf = FSH.spinsph_evaluate(_randc(), 0)
+        U = im .* _nabla(ψf) .+ _nabla(χf); uθ = real.(U); uφ = imag.(U)
+        Ur = im .* _nabla(ψf); uθr = real.(Ur); uφr = imag.(Ur)
+        ζr = _lapf(ψf)
+
+        Test.@testset "FSH regular-grid" begin
+            r = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθ, uφ))
+            Test.@test r isa FIT.DivergentSphericalTransferResult
+            Test.@test maximum(abs, r.energy_transfer .- (r.rotational_transfer .+ r.divergent_transfer)) < 1e-10
+            Test.@test abs(sum(r.energy_transfer)) / maximum(abs, r.energy_transfer) < 1e-8
+            Test.@test maximum(abs, r.divergent_transfer) > 1e-3
+            rr = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθr, uφr))
+            TE = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζr).energy_transfer
+            Test.@test maximum(abs, rr.energy_transfer .- TE) / maximum(abs, TE) < 1e-8
+            Test.@test maximum(abs, rr.divergent_transfer) < 1e-9
+            a = 2.0
+            ra = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(; radius = a), (uθr ./ a, uφr ./ a))
+            TEa = FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(; radius = a), ζr ./ a^2).energy_transfer
+            Test.@test maximum(abs, ra.energy_transfer .- TEa) / maximum(abs, TEa) < 1e-8
+            ws = FIT.DivergentSphericalTransferWorkspace(lmax)
+            Test.@test sprint(show, ws) == "DivergentSphericalTransferWorkspace(…)"
+            Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθ, uφ); spectral = FIT.NUFSHTBackend())
+        end
+
+        Test.@testset "NUFSHT scattered + FSH↔NUFSHT parity" begin
+            Θ, Φ = FSH.sph_points(N); M = N * (2N - 1)
+            θv = Vector{Float64}(undef, M); φv = Vector{Float64}(undef, M)
+            for j in 1:2N-1, i in 1:N
+                k = i + (j - 1) * N; θv[k] = Θ[i]; φv[k] = Φ[j]
+            end
+            rn = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
+                                               (θv, φv); lmax = lmax, dealias = false)
+            Test.@test rn isa FIT.DivergentSphericalTransferResult
+            Test.@test abs(sum(rn.energy_transfer)) / maximum(abs, rn.energy_transfer) < 1e-6
+            rf = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθ, uφ); dealias = false)
+            Test.@test maximum(abs, rf.energy_transfer .- rn.energy_transfer) / maximum(abs, rf.energy_transfer) < 1e-6
+            wss = FIT.ScatteredDivergentSphericalTransferWorkspace((θv, φv), lmax; dealias = false)
+            Test.@test sprint(show, wss) == "ScatteredDivergentSphericalTransferWorkspace(…)"
+            Test.@test_throws ArgumentError FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(),
+                (vec(uθ), vec(uφ)), (θv, φv); lmax = lmax, spectral = FIT.SHTBackend())
+        end
+    end
+
+    # -----------------------------------------------------------------------
+    # Executable transform-axis backend matrix (anti-facade capstone). One data structure lists, per
+    # diagnostic, the SUPPORTED spectral backends (must return a valid result) and the REJECTED ones
+    # (must raise a clear `ArgumentError` — never a `MethodError`, never a silent result or misroute).
+    # A facade backend (dispatches nowhere / silently reroutes) fails both ways, so it cannot ship green.
+    Test.@testset "Backend matrix — transform axis (facade-proof)" begin
+        Random.seed!(0)
+        N = 8; L = 2π
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        û = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)          # divergence-free 2D velocity coeffs
+        ρ̂ = FFTW.fft(1.0 .+ 0.1 .* randn(N, N)) ./ N^2
+        b = FIT.LinearBinning(2π / L); bands = FIT.SmoothBands([2.0, 4.0])
+        DS = FIT.DirectSumBackend(); FTB = FIT.FFTBackend()
+        NU = FIT.NUFFTBackend(); SH = FIT.SHTBackend(); NS = FIT.NUFSHTBackend()
+
+        # Cartesian Fourier-coefficient diagnostics: SUPPORTED = {DirectSum, FFT}; REJECTED = scattered/spherical.
+        cart = (
+            ("spectral_flux",  sp -> FIT.calculate_spectral_flux(û, ks; binning = b, spectral = sp)),
+            ("shell_to_shell", sp -> FIT.calculate_shell_to_shell_transfer(û, ks; binning = b, spectral = sp)),
+            ("mode_to_mode",   sp -> FIT.calculate_mode_to_mode_transfer(û, ks; spectral = sp, force = true)),
+            ("band_to_band",   sp -> FIT.calculate_band_to_band_transfer(û, ks; bands = bands, spectral = sp)),
+            ("compressible",   sp -> FIT.calculate_compressible_flux(û, ρ̂, ks; spectral = sp)),
+            ("partial_fluxes", sp -> FIT.calculate_partial_fluxes(û, ks; decomposition = FIT.HelmholtzDecomposition(), spectral = sp)),
+        )
+        Test.@testset "Cartesian coefficient diagnostics" begin
+            for (name, invoke) in cart
+                for sp in (DS, FTB)
+                    Test.@test invoke(sp) !== nothing
+                end
+                for sp in (NU, SH, NS)
+                    Test.@test_throws ArgumentError invoke(sp)
+                end
+            end
+        end
+
+        # Spherical diagnostics: SUPPORTED = {nothing, the geometry's own backend}; REJECTED = the others.
+        lm = 4; Ng = lm + 1
+        ζmat = randn(Ng, 2Ng - 1); uθm = randn(Ng, 2Ng - 1); uφm = randn(Ng, 2Ng - 1)
+        Mp = 120; θs = Vector{Float64}(undef, Mp); φs = Vector{Float64}(undef, Mp); ga = π * (3 - sqrt(5))
+        for i in 0:Mp-1
+            θs[i+1] = acos(clamp(1 - 2 * (i + 0.5) / Mp, -1, 1)); φs[i+1] = mod(ga * i, 2π)
+        end
+        ζv = randn(Mp); uθv = randn(Mp); uφv = randn(Mp)
+        sph = (
+            ("spherical(regular)",   :SH, sp -> FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζmat; spectral = sp)),
+            ("divergent(regular)",   :SH, sp -> FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθm, uφm); spectral = sp)),
+            ("spherical(scattered)", :NS, sp -> FIT.calculate_energy_transfer(FIT.SphericalTransferMethod(), ζv, (θs, φs); lmax = lm, dealias = false, spectral = sp)),
+            ("divergent(scattered)", :NS, sp -> FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (uθv, uφv), (θs, φs); lmax = lm, dealias = false, spectral = sp)),
+        )
+        Test.@testset "Spherical diagnostics" begin
+            for (name, geom, invoke) in sph
+                ok_backends  = geom === :SH ? (nothing, SH) : (nothing, NS)
+                bad_backends = geom === :SH ? (FTB, NU, NS) : (FTB, NU, SH)
+                for sp in ok_backends
+                    Test.@test invoke(sp) !== nothing
+                end
+                for sp in bad_backends
+                    Test.@test_throws ArgumentError invoke(sp)
+                end
+            end
+        end
     end
 
     # -----------------------------------------------------------------------

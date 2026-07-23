@@ -257,4 +257,72 @@ function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
     return kc
 end
 
+# ---------------------------------------------------------------------------
+# Scattered-Cartesian physical → uniform Fourier coefficients (the NUFFTBackend `to_spectral` path).
+# Reconstruct û on a uniform ms-grid from samples at scattered points via a FINUFFT type-1 transform
+# (density-normalized adjoint û = type1(u)/N, exact for samples on the uniform grid). The uniform
+# wavenumber grid ks is inferred from the coordinate spans (fftfreq convention, matching
+# Utils.wavenumber_grid), so the result feeds the ordinary uniform flux diagnostics unchanged.
+# ---------------------------------------------------------------------------
+function FIT._to_spectral_nufft(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple, tol::Real,
+                                Ls::Union{Nothing, Tuple})
+    nd = length(scatter_coords)
+    nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
+    1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
+    Ls === nothing || length(Ls) == nd || throw(ArgumentError("Ls ($(length(Ls))D) must match scatter_coords ($(nd)D)"))
+    D = length(velocity_fields)
+    N = length(scatter_coords[1])
+    for d in 2:nd
+        length(scatter_coords[d]) == N || throw(DimensionMismatch("all scatter_coords must have equal length"))
+    end
+    for f in velocity_fields
+        length(f) == N || throw(DimensionMismatch("velocity field length $(length(f)) ≠ scatter point count $N"))
+    end
+    FT = float(real(eltype(velocity_fields[1])))
+    CT = Complex{FT}
+
+    # Periodic domain size per dimension: use the provided `Ls` if given, else infer from the sample span.
+    Lused = ntuple(nd) do d
+        if Ls === nothing
+            cv = scatter_coords[d]; rng = FT(maximum(cv) - minimum(cv)); rng > 0 ? rng : one(FT)
+        else
+            FT(Ls[d])
+        end
+    end
+    # Uniform wavenumber grid (fftfreq convention, matching Utils.wavenumber_grid).
+    ks = ntuple(nd) do d
+        m = ms[d]; dk = 2 * FT(π) / Lused[d]
+        [FT(k <= m ÷ 2 ? k : k - m) * dk for k in 0:m-1]
+    end
+    # Samples mapped to [0, 2π) about each dimension's minimum: for samples on a uniform grid this lands
+    # exactly on the DFT node locations, so `û = type1(u)/N` (iflag=−1) equals `fft(u)/Nᵈ` (the package
+    # coefficient convention) — making the reconstruction an exact drop-in for the uniform diagnostics.
+    scaled = ntuple(nd) do d
+        cmin = FT(minimum(scatter_coords[d]))
+        (FT.(scatter_coords[d]) .- cmin) ./ Lused[d] .* (2 * FT(π))
+    end
+
+    û    = Array{CT}(undef, ms..., D)
+    invN = one(FT) / FT(N)
+    scat = Vector{CT}(undef, N)
+    spec = Array{CT}(undef, ms...)
+    # iflag=−1 → e^{-ik·x} analysis (Julia `fft` convention); modeord=1 → FFT mode ordering
+    # (0,1,…,m/2,−m/2+1,…,−1), matching Utils.wavenumber_grid + FFTW. Together these make û a drop-in
+    # for the uniform Cartesian diagnostics (which assume the fft convention + ordering).
+    p1 = FINUFFT.finufft_makeplan(1, Int64[ms...], -1, 1, FT(tol); dtype = FT, modeord = 1)
+    try
+        FINUFFT.finufft_setpts!(p1, scaled...)
+        colons = ntuple(_ -> Colon(), nd)
+        for c in 1:D
+            scat .= velocity_fields[c]
+            FINUFFT.finufft_exec!(p1, scat, spec)
+            ûc = view(û, colons..., c)
+            @. ûc = spec * invN
+        end
+    finally
+        FINUFFT.finufft_destroy!(p1)
+    end
+    return (û, ks)
+end
+
 end # module FlowInvariantTransferFINUFFTExt

@@ -3,7 +3,7 @@ module FlowInvariantTransferKernelAbstractionsExt
 using KernelAbstractions: KernelAbstractions as KA, @kernel, @index
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowInvariantTransfer.Backends: GPUBackend
-using FlowInvariantTransfer.Types: ShellToShellResult, SpectralFluxResult, AbstractInvariant, KineticEnergy, Helicity, Enstrophy
+using FlowInvariantTransfer.Types: ShellToShellResult, SpectralFluxResult, AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 
 # Copy a host array to a fresh device array on `dev` (a plain Array on GPUBackend(KA.CPU())). Used to
 # move the integer shell-index grid onto the device: `assign_shells` always builds a host Array{Int},
@@ -98,7 +98,9 @@ end
 
 # Run the per-mode transfer-density kernel for the requested invariant.
 function _launch_transfer_density!(dev, td, velocity_hat, N̂, ks, invariant, D, ns, ks_dev)
-    if invariant isa KineticEnergy
+    if invariant isa Union{KineticEnergy, PassiveScalar}
+        # PassiveScalar is the M=1 case of the same Σ_c Re{conj(field_c)·N̂_c} contraction (the scalar
+        # field is passed as the 1-component `velocity_hat`), identical to the CPU `_transfer_density_dot!`.
         transfer_density_ke_kernel!(dev)(td, velocity_hat, N̂, D; ndrange = ns)
     elseif invariant isa Helicity
         length(ks) == 3 || throw(ArgumentError("Helicity transfer is 3D only (got nd=$(length(ks)))."))

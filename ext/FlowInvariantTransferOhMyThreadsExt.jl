@@ -170,8 +170,8 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
     # `sqrt_w`/`inv_sqrt_w` are constant across triads → shared read-only; sc/permbuf are written → per-chunk.
     nchunks = max(1, min(Threads.nthreads(), nTriads))
     rngs = collect(OhMyThreads.index_chunks(1:nTriads; n = nchunks))
-    pool = [(sc = FIT.TriadicOrthogonalDecomposition._TriadSVDScratch(CT, nStateNx, nBlks),
-             permbuf = similar(_permbuf), permbuf_kl = similar(_permbuf_kl)) for _ in 1:length(rngs)]
+    pool = [(sc = FIT.TriadicOrthogonalDecomposition._TriadSVDScratch(Q_hat, CT, nStateNx, nBlks),
+             permbuf = similar(_permbuf), permbuf_kl = similar(_permbuf_kl)) for _ in eachindex(rngs)]
 
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         p = pool[ci]

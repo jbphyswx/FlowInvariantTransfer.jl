@@ -101,6 +101,13 @@ function _reuse_spherical!(ws, ζ, fresh)
     a_fresh = @allocated fresh(ζ)
     return (a_reuse, a_fresh)
 end
+function _reuse_divergent!(ws, uθ, uφ, fresh)
+    fresh(uθ, uφ)
+    FIT.calculate_divergent_spherical_transfer!(ws, uθ, uφ)
+    a_reuse = @allocated FIT.calculate_divergent_spherical_transfer!(ws, uθ, uφ)
+    a_fresh = @allocated fresh(uθ, uφ)
+    return (a_reuse, a_fresh)
+end
 function _reuse_tod!(ws, X, dt_sig)
     FIT.triadic_orthogonal_decomposition(X; dt=dt_sig, spectral=FIT.FFTBackend())
     FIT.triadic_orthogonal_decomposition!(ws, X)
@@ -286,6 +293,31 @@ Test.@testset "Allocations" begin
                 FIT.SphericalTransferMethod(radius = 1.0), z, (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13)
             a_reuse, a_fresh = _reuse_spherical!(ws, ζ, fresh)
             Test.@test a_reuse < a_fresh ÷ 3
+        end
+
+        # Divergent transfer !(): the workspace preserves the FSH work path / the five NUFSHT spin plans,
+        # so a repeat call allocates less than a fresh call (only the FSH-internal transforms / NUFSHT CG
+        # scratch remain — the irreducible library floor).
+        Test.@testset "divergent spherical (FSH, equiangular grid)" begin
+            lmax = 20; Ng = lmax + 1
+            uθ = randn(Ng, 2Ng - 1); uφ = randn(Ng, 2Ng - 1)
+            ws = FIT.DivergentSphericalTransferWorkspace(lmax; radius = 1.0, dealias = true)
+            fresh(a, c) = FIT.calculate_energy_transfer(FIT.DivergentSphericalTransferMethod(), (a, c))
+            a_reuse, a_fresh = _reuse_divergent!(ws, uθ, uφ, fresh)
+            Test.@test a_reuse < a_fresh
+        end
+
+        Test.@testset "divergent spherical (NUFSHT, scattered)" begin
+            lmax = 8; M = (2lmax + 1)^2 + 20
+            ga = π * (3 - sqrt(5.0))
+            θ = [acos(clamp(1 - 2 * (i + 0.5) / M, -1, 1)) for i in 0:M-1]
+            φ = [mod(i * ga, 2π) for i in 0:M-1]
+            uθ = [cos(θ[i]) for i in 1:M]; uφ = [sin(φ[i]) for i in 1:M]
+            ws = FIT.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12, rtol = 1e-13)
+            fresh(a, c) = FIT.calculate_energy_transfer(
+                FIT.DivergentSphericalTransferMethod(radius = 1.0), (a, c), (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+            a_reuse, a_fresh = _reuse_divergent!(ws, uθ, uφ, fresh)
+            Test.@test a_reuse < a_fresh ÷ 2
         end
 
         Test.@testset "triadic orthogonal decomposition (reuse < fresh)" begin

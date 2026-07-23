@@ -2,7 +2,8 @@ module FlowInvariantTransferNUFSHTExt
 
 using NUFSHT: NUFSHT
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult
+using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult,
+                                   DivergentSphericalTransferMethod, DivergentSphericalTransferResult
 using FlowInvariantTransfer.Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
 
 # ---------------------------------------------------------------------------
@@ -154,9 +155,11 @@ function FIT.calculate_energy_transfer(
     tol::Real = 1e-10,
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
+    spectral = nothing,
     execution::AbstractExecutionBackend = SerialBackend(),
     kwargs...,
 )
+    FIT.Spherical._validate_spherical_backends(spectral, execution, :scattered)
     M = length(vorticity)
     (length(coords[1]) == M && length(coords[2]) == M) || throw(ArgumentError(
         "vorticity and both coordinate vectors must have equal length; got $((M, length(coords[1]), length(coords[2])))."))
@@ -164,6 +167,154 @@ function FIT.calculate_energy_transfer(
         coords, lmax; radius = float(method.radius), dealias = dealias,
         tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)), execution = execution)
     return FIT.calculate_spherical_transfer!(ws, vorticity)
+end
+
+# ---------------------------------------------------------------------------
+# DIVERGENT horizontal-KE spectral transfer at scattered points (full rotational + divergent flow).
+# Formulation & verified conventions: FlowInvariantTransfer.Spherical (α=-i vorticity ladder, δ=+ladder
+# divergence, ∇=-ð, k̂×u ↔ iU₊, skew-symmetric ½δu conservation term, single 1/a radius factor). Input is
+# the horizontal velocity (u_θ, u_φ) at the scattered points; the transfer conserves total KE
+# (Σ_l T ≈ 0) and reduces to the barotropic `SphericalTransferMethod` energy transfer when δ = 0.
+# ---------------------------------------------------------------------------
+
+"""
+    ScatteredDivergentSphericalTransferWorkspace(coords, lmax; radius=1.0, dealias=true,
+                                                 tol=1e-10, rtol=1e-10, maxiter=4000, T=Float64,
+                                                 execution=SerialBackend())
+
+Reusable buffers + the five NUFSHT spin plans (points preset) for the scattered divergent KE transfer.
+`coords = (θ, φ)` are the `M` colatitudes/longitudes. Needs `M ≥ (2·lmax+1)²` **equidistributed**
+points (e.g. spherical-Fibonacci) for well-conditioned coefficient recovery. Requires `using NUFSHT`.
+"""
+function FIT.ScatteredDivergentSphericalTransferWorkspace(
+    coords::Tuple{<:AbstractVector, <:AbstractVector},
+    lmax::Integer;
+    radius::Real = 1.0,
+    dealias::Bool = true,
+    tol::Real = 1e-10,
+    rtol::Real = 1e-10,
+    maxiter::Integer = 4000,
+    T::Type = Float64,
+    execution::AbstractExecutionBackend = SerialBackend(),
+)
+    θ, φ = coords
+    M = length(θ)
+    length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
+    lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
+    lwork = dealias ? 2 * lmax : lmax
+    M ≥ (lwork + 1)^2 || throw(ArgumentError(
+        "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
+        "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    FT = float(T)
+    CT = Complex{FT}
+
+    # Single-threaded FINUFFT plans by default (see the barotropic workspace above for the rationale);
+    # ThreadedBackend threads a lone call. Five plans: spin ±1 & spin-0 at lmax, spin-0 & spin+1 at lwork.
+    nthr = execution isa ThreadedBackend ? Threads.nthreads() : 1
+    planp  = NUFSHT.make_spin_plan(θ, φ, lmax,   1; tol = tol, T = FT, nthreads = nthr)
+    planm  = NUFSHT.make_spin_plan(θ, φ, lmax,  -1; tol = tol, T = FT, nthreads = nthr)
+    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,   0; tol = tol, T = FT, nthreads = nthr)
+    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork,  0; tol = tol, T = FT, nthreads = nthr)
+    planpw = NUFSHT.make_spin_plan(θ, φ, lwork,  1; tol = tol, T = FT, nthreads = nthr)
+
+    # Buffers follow the coordinate array type (device-array coords → device buffers → cuFINUFFT).
+    _z(dims...) = fill!(similar(θ, CT, dims...), zero(CT))
+    ap = _z(lmax + 1, 2lmax + 1); am = _z(lmax + 1, 2lmax + 1)
+    sym = _z(lmax + 1, 2lmax + 1); anti = _z(lmax + 1, 2lmax + 1)
+    ζc = _z(lmax + 1, 2lmax + 1); δc = _z(lmax + 1, 2lmax + 1)
+    Khat = _z(lwork + 1, 2lwork + 1); Adv_lm = _z(lwork + 1, 2lwork + 1)
+    Up = _z(M); Um = _z(M); ζv = _z(M); δv = _z(M); Kv = _z(M); gradK = _z(M); Advv = _z(M)
+    # Per-row ladders √(ℓ(ℓ+1)) (on-device, for the row-broadcast coefficient-space ops).
+    ladl = reshape(similar(θ, FT, lmax + 1), lmax + 1, 1)
+    copyto!(ladl, FT[sqrt(ℓ * (ℓ + 1)) for ℓ in 0:lmax])
+    ladw = reshape(similar(θ, FT, lwork + 1), lwork + 1, 1)
+    copyto!(ladw, FT[sqrt(ℓ * (ℓ + 1)) for ℓ in 0:lwork])
+    Pr = similar(θ, FT, lmax + 1, 2lmax + 1)
+    Tcol = similar(θ, FT, lmax + 1, 1)
+    result = DivergentSphericalTransferResult(
+        collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1))
+
+    return FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
+        planp, planm, plan0, plan0w, planpw, ap, am, sym, anti, ζc, δc, Khat, Adv_lm,
+        Up, Um, ζv, δv, Kv, gradK, Advv, ladl, ladw, Pr, Tcol, result,
+        FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+end
+
+function FIT.calculate_divergent_spherical_transfer!(
+    ws::FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace,
+    u_θ::AbstractVector{<:Real},
+    u_φ::AbstractVector{<:Real},
+)
+    M = length(ws.Up)
+    (length(u_θ) == M && length(u_φ) == M) || throw(DimensionMismatch(
+        "velocity component lengths $((length(u_θ), length(u_φ))) ≠ workspace points $M."))
+    lmax = ws.lmax; lwork = ws.lwork; a = ws.radius
+    CT = eltype(ws.ap)
+
+    # Spin ±1 coefficients of U₊ = u_θ + i u_φ and U₋ = u_θ − i u_φ; rotational/divergent split.
+    @. ws.Up = u_θ + im * u_φ
+    @. ws.Um = u_θ - im * u_φ
+    fill!(ws.ap, zero(CT)); NUFSHT.nusht_solve_spin!(ws.ap, ws.Up, ws.planp; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.am, zero(CT)); NUFSHT.nusht_solve_spin!(ws.am, ws.Um, ws.planm; rtol = ws.rtol, maxiter = ws.maxiter)
+    @. ws.sym  = (ws.ap + ws.am) / 2
+    @. ws.anti = (ws.ap - ws.am) / 2
+
+    # Unit-sphere vorticity/divergence coefficients via the eth ladder (row-broadcast, device-generic):
+    # ζ_lm = -i√(ℓ(ℓ+1)) sym,  δ_lm = +√(ℓ(ℓ+1)) anti; synthesise both at the points (spin-0).
+    @. ws.ζc = -im * ws.ladl * ws.sym
+    @. ws.δc =       ws.ladl * ws.anti
+    NUFSHT.nusht_type2_spin!(ws.ζv, ws.ζc, ws.plan0)
+    NUFSHT.nusht_type2_spin!(ws.δv, ws.δc, ws.plan0)
+
+    # K = ½|u|² (real, held complex); analyse at the dealiased degree lwork.
+    @. ws.Kv = 0.5 * (u_θ^2 + u_φ^2)
+    fill!(ws.Khat, zero(CT)); NUFSHT.nusht_solve_spin!(ws.Khat, ws.Kv, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
+
+    # ∇K = -synth_spin+1(√(ℓ(ℓ+1)) K̂)   (β = -1; reuse Khat to hold the ladder-scaled coefficients).
+    @. ws.Khat = ws.ladw * ws.Khat
+    NUFSHT.nusht_type2_spin!(ws.gradK, ws.Khat, ws.planpw)
+    @. ws.gradK = -ws.gradK
+
+    # Skew-symmetric energy-conserving advection A = ∇K + (iζ + ½δ) U₊; analyse (spin+1) at lwork.
+    @. ws.Advv = ws.gradK + (im * ws.ζv + 0.5 * ws.δv) * ws.Up
+    fill!(ws.Adv_lm, zero(CT)); NUFSHT.nusht_solve_spin!(ws.Adv_lm, ws.Advv, ws.planpw; rtol = ws.rtol, maxiter = ws.maxiter)
+
+    # Per-degree channel reduction T_rot = Σ_m Re{sym* Â}, T_div = Σ_m Re{anti* Â} (single 1/a factor).
+    # A_lm (degree lwork) aligns to the lmax layout by a centred column slice; |m|>ℓ corners are 0.
+    Adv_al = @view ws.Adv_lm[1:lmax + 1, (lwork - lmax + 1):(lwork + lmax + 1)]
+    @. ws.Pr = real(conj(ws.sym) * Adv_al)
+    sum!(ws.Tcol, ws.Pr)
+    copyto!(ws.result.rotational_transfer, vec(ws.Tcol)); ws.result.rotational_transfer ./= a
+    @. ws.Pr = real(conj(ws.anti) * Adv_al)
+    sum!(ws.Tcol, ws.Pr)
+    copyto!(ws.result.divergent_transfer, vec(ws.Tcol)); ws.result.divergent_transfer ./= a
+    return FIT.Spherical.divergent_transfer_finalize!(ws.result)
+end
+
+function FIT.calculate_energy_transfer(
+    method::DivergentSphericalTransferMethod,
+    velocity::Tuple{<:AbstractVector, <:AbstractVector},
+    coords::Tuple{<:AbstractVector, <:AbstractVector};
+    lmax::Integer,
+    dealias::Bool = true,
+    tol::Real = 1e-10,
+    rtol::Real = 1e-10,
+    maxiter::Integer = 4000,
+    spectral = nothing,
+    execution::AbstractExecutionBackend = SerialBackend(),
+    kwargs...,
+)
+    FIT.Spherical._validate_spherical_backends(spectral, execution, :scattered)
+    u_θ, u_φ = velocity
+    M = length(u_θ)
+    (length(u_φ) == M && length(coords[1]) == M && length(coords[2]) == M) || throw(ArgumentError(
+        "velocity components and both coordinate vectors must have equal length; got " *
+        "$((M, length(u_φ), length(coords[1]), length(coords[2])))."))
+    ws = FIT.ScatteredDivergentSphericalTransferWorkspace(
+        coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
+        maxiter = maxiter, T = float(eltype(u_θ)), execution = execution)
+    return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
 end
 
 end # module FlowInvariantTransferNUFSHTExt

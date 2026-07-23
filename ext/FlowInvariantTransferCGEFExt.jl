@@ -16,12 +16,12 @@ _to_cgef_kernel(::SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
 # Override CoarseGrainingFlux._cg_flux_cgef
 # ---------------------------------------------------------------------------
 
-# Allocation-free masked mean over the wet points of the flux field (N-D).
-function _masked_mean(Π::AbstractArray{FT}, wet::AbstractArray{Bool}) where {FT}
+# Allocation-free masked mean over the included points of the flux field (N-D).
+function _masked_mean(Π::AbstractArray{FT}, active::AbstractArray{Bool}) where {FT}
     acc = zero(FT)
     n = 0
-    @inbounds for i in eachindex(Π, wet)
-        if wet[i]
+    @inbounds for i in eachindex(Π, active)
+        if active[i]
             acc += Π[i]
             n += 1
         end
@@ -42,26 +42,39 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
+    radius::Union{Nothing, Real} = nothing,
 )
     D  = length(velocity_fields)
     nd = length(coords_vecs)
     D == nd || throw(ArgumentError(
         "Number of velocity components ($D) must equal number of spatial dimensions ($nd)"))
-    (nd == 2 || nd == 3) || throw(ArgumentError(
-        "FlowInvariantTransferCGEFExt supports 2D and 3D Cartesian grids (nd=$nd). " *
-        "For spherical geometry, call CoarseGrainingEnergyFluxes directly."))
 
     FT  = eltype(velocity_fields[1])
     ns  = size(velocity_fields[1])
+    active = mask !== nothing ? mask : trues(ns...)   # boolean point mask (true = included)
 
-    # Per-dimension grid spacing from the coordinate vectors.
-    dx = ntuple(nd) do i
-        v = coords_vecs[i]
-        length(v) > 1 ? FT((v[end] - v[begin]) / (length(v) - 1)) : FT(1)
+    # Geometry: Cartesian (default) or, when `radius` is given, a lon–lat sphere. `_cg_flux_cgef!`
+    # (`CGEF.compute_Π!`) is geometry-agnostic — it operates on whatever `grid` the workspace holds —
+    # so spherical support is entirely a matter of building a spherical grid here (the sibling
+    # `CoarseGrainingEnergyFluxes.jl` implements the spherical filter/gradient stencils).
+    grid = if radius === nothing
+        (nd == 2 || nd == 3) || throw(ArgumentError(
+            "Cartesian coarse-graining supports 2D or 3D grids (nd=$nd); pass `radius=…` for a spherical " *
+            "(lon, lat) surface."))
+        # Per-dimension grid spacing from the coordinate vectors.
+        dx = ntuple(nd) do i
+            v = coords_vecs[i]
+            length(v) > 1 ? FT((v[end] - v[begin]) / (length(v) - 1)) : FT(1)
+        end
+        geom = CGEF.Geometry.CartesianGeometry(dx...)             # (dx,dy) 2D / (dx,dy,dz) 3D
+        CGEF.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., active)
+    else
+        nd == 2 || throw(ArgumentError(
+            "Spherical coarse-graining is on a 2D lon–lat surface: pass coords_vecs = (lon, lat) and two " *
+            "horizontal velocity components (got nd=$nd)."))
+        geom = CGEF.Geometry.SphericalGeometry(FT(radius))
+        CGEF.Grids.StructuredGrid(geom, FT.(coords_vecs[1]), FT.(coords_vecs[2]), active)
     end
-    geom = CGEF.Geometry.CartesianGeometry(dx...)                 # (dx,dy) 2D / (dx,dy,dz) 3D
-    wet  = mask !== nothing ? mask : trues(ns...)
-    grid = CGEF.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., wet)
 
     workspace = CGEF.Diagnostics.ΠWorkspace(grid)                # dimensionality inferred from the grid
     Π_out = zeros(FT, ns...)
@@ -167,10 +180,11 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef(
     filter::AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
+    radius::Union{Nothing, Real} = nothing,
     kwargs...,
 )
     ws = FIT.CoarseGrainingFlux._cg_flux_workspace(
-        velocity_fields, coords_vecs, filter; return_diagnostics = return_diagnostics, mask = mask)
+        velocity_fields, coords_vecs, filter; return_diagnostics = return_diagnostics, mask = mask, radius = radius)
     return FIT.CoarseGrainingFlux._cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
 end
 

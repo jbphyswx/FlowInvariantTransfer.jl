@@ -2,6 +2,12 @@ module FlowInvariantTransferGPUArraysCoreExt
 
 using GPUArraysCore: AbstractGPUArray
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using LinearAlgebra: LinearAlgebra as LA
+
+# Device-array detection trait: any `AbstractGPUArray` (CuArray / JLArray / ROCArray / …) is a device
+# array; host arrays keep the core default `false`. Used to route device inputs correctly (reject the
+# host-only DirectSum reference and the host-array-under-GPUBackend case).
+FIT.Backends.is_gpu_array(::AbstractGPUArray) = true
 
 # ---------------------------------------------------------------------------
 # Device-generic versions of the three compressible-pipeline reductions/masks that the scalar `src`
@@ -71,6 +77,104 @@ function FIT.Compressible._bin(td::AbstractGPUArray, sidx, N_sh, ::Type{FT}, ns:
         T[n] = sum(td .* m)
     end
     return T
+end
+
+# ---------------------------------------------------------------------------
+# Device-generic Triadic Orthogonal Decomposition kernels (dispatched on AbstractGPUArray). The host
+# `Array` methods (0-alloc, scalar-optimized) are untouched; these run the same math with broadcasts /
+# array-dispatched LinearAlgebra so a device-array input `X` executes device-resident. The big
+# `O(nDFT²·nx)` / `O(nStateNx·nBlks)` products go through cuBLAS/cuSOLVER (`*`, `mul!`, `qr!`); the tiny
+# `r×r` Hermitian eig hops to the host (small dense eig is CPU-optimal + universally supported — JLArrays
+# lacks a native one). Verified device-generic on JLArrays under allowscalar(false).
+# ---------------------------------------------------------------------------
+
+# Whole-block temporal DFT for a device-array segment: one matmul with the DFT matrix + fftshift (the host
+# method is a per-column loop). `spectral=FFTBackend` on a device array would need a batched cuFFT (not
+# wired) — error clearly and direct to DirectSum. `_` args match the host signature (per-column scratch,
+# unused here). Runs on any AbstractGPUArray (device-resident) and on JLArrays under allowscalar(false).
+function FIT.TriadicOrthogonalDecomposition._tod_dft_block!(
+    Q_blk, segment::AbstractGPUArray, seg_before_mean, window, win_weight, nDFT, shift, blk_mean,
+    backend, _plan, _dft_col, _windowed, _shifted)
+    backend isa FIT.Types.FFTBackend && throw(ArgumentError(
+        "device-array triadic_orthogonal_decomposition uses the DirectSum whole-block temporal DFT " *
+        "(matmul); spectral=FFTBackend() on a device array needs a batched cuFFT (not wired) — pass " *
+        "spectral=DirectSumBackend()."))
+    CT = eltype(Q_blk); RT = real(CT)
+    win = window isa AbstractGPUArray ? window : copyto!(similar(segment, RT, length(window)), window)
+    wnd = segment .* win .* (win_weight / nDFT)                            # (nDFT × nx)
+    idx = copyto!(similar(segment, RT, nDFT), RT.(0:nDFT-1))
+    W = exp.((-2 * RT(π) * im / RT(nDFT)) .* (idx * transpose(idx)))       # DFT matrix W[k,t]=e^{-2πi(k-1)(t-1)/N}
+    Qd = W * wnd                                                           # (nDFT × nx)
+    if blk_mean
+        # DC (k=1, pre-shift) from the un-centered segment: Σ_t seg_before_mean[t,ix]·window[t]·(w/N).
+        view(Qd, 1:1, :) .= reshape(sum(seg_before_mean .* win; dims = 1) .* (win_weight / nDFT), 1, :)
+    end
+    Q_blk .= circshift(Qd, (shift, 0))                                     # fftshift along dim 1
+    return Q_blk
+end
+
+# Put `A` on `proto`'s device (type-stable dispatch; host method returns `A` unchanged).
+FIT.TriadicOrthogonalDecomposition._dev_like(proto::AbstractGPUArray, A) =
+    copyto!(similar(proto, eltype(A), size(A)), A)
+
+# Modal energy budget on device: T_j = s_j · Re Σ_k conj(v[k,j])·W[k]·u[k,j] via a broadcast column
+# reduction (u/v are device views, wdev a genuine device vector). Result brought to host for the scalar
+# T_budget writes (T_budget is the host result array).
+function FIT.TriadicOrthogonalDecomposition._tod_modal_budget!(T_budget, fi_l, fi_n, u, v, s, nm, wdev::AbstractGPUArray)
+    tb = Array(real.(vec(sum(conj.(v) .* wdev .* u; dims = 1))))
+    @inbounds for j in 1:nm
+        T_budget[fi_l, fi_n, j] = s[j] * tb[j]
+    end
+    return T_budget
+end
+
+# Default quadratic nonlinearity out[ix,iv,b] = q1[iv,ix,b]·q2[iv,ix,b] — the fused product+permute as a
+# device broadcast + permutedims! (the host method is a scalar loop). `out` is a genuine device buffer.
+function FIT.TriadicOrthogonalDecomposition._apply_nonlinear!(
+    out::AbstractGPUArray, ::typeof(FIT.TriadicOrthogonalDecomposition._default_nonlinear), q1, q2)
+    permutedims!(out, q1 .* q2, (2, 1, 3))
+    return out
+end
+
+# Per-triad method-of-snapshots SVD — device-generic broadcasts + array-dispatched qr!/mul!, tiny eig
+# on the host. Same math + same return contract (views into sc.Ubuf/sc.Vbuf) as the host method.
+# Dispatched on the SCRATCH element type: `sc`'s buffers are genuine device arrays (`similar(X,…)`),
+# whereas `Q_hat_n`/`Q_hat_kl` arrive as `reshape`d views (wrappers, not `<:AbstractGPUArray`), so
+# dispatching on them would miss. Their broadcasts still run device-resident (reshape is a lazy device view).
+function FIT.TriadicOrthogonalDecomposition._triadic_svd_serial!(
+    sc::FIT.TriadicOrthogonalDecomposition._TriadSVDScratch{<:AbstractGPUArray}, sqrt_w, inv_sqrt_w,
+    Q_hat_n, Q_hat_kl, nBlks)
+    nStateNx = size(Q_hat_n, 1); RT = real(eltype(Q_hat_n)); CT = eltype(Q_hat_n)
+    # √w / 1/√w are host metadata vectors (shared struct type param) — move to the device once for the
+    # broadcasts (constant across triads; small).
+    sw  = sqrt_w     isa AbstractGPUArray ? sqrt_w     : copyto!(similar(Q_hat_n, RT, length(sqrt_w)), sqrt_w)
+    isw = inv_sqrt_w isa AbstractGPUArray ? inv_sqrt_w : copyto!(similar(Q_hat_n, RT, length(inv_sqrt_w)), inv_sqrt_w)
+    Xw, Q3 = sc.Xw, sc.Q3
+    Q3 .= Q_hat_kl .* sw                                         # [i,b] = Q̂_kl[i,b]·√w[i]
+    Xw .= LA.adjoint(Q_hat_n) .* transpose(sw) ./ nBlks          # [b,i] = conj(Q̂_n[i,b])·√w[i]/nBlks
+    r = min(nStateNx, nBlks)
+    F = LA.qr!(Q3)
+    Qmat = sc.Qmat
+    Ithin = copyto!(fill!(similar(Q_hat_n, CT, nStateNx, r), zero(CT)), Matrix{CT}(LA.I, nStateNx, r))
+    Qmat .= F.Q * Ithin                                         # thin Q (nStateNx × r), device
+    Y = sc.Y; LA.mul!(Y, F.R, Xw)
+    M = sc.Mmat; LA.mul!(M, Y, Y')
+    eigh = LA.eigen!(LA.Hermitian(Matrix(M)))                   # tiny r×r Hermitian eig on the host
+    λh = real.(eigh.values); permh = sortperm(λh; rev = true)
+    λ = max.(λh[permh], zero(RT)); sqrt_λ = sqrt.(λ)
+    nz = count(>(eps(RT) * 100), sqrt_λ)
+    if nz == 0
+        return view(sc.Ubuf, :, 1:0), sqrt_λ[1:0], view(sc.Vbuf, :, 1:0)
+    end
+    copyto!(sc.Uperm, eigh.vectors[:, permh])                   # descending-λ eigenvectors → device
+    U_trunc = view(sc.Uperm, :, 1:nz)
+    s = sqrt_λ[1:nz]
+    Vv = view(sc.Vbuf, :, 1:nz); LA.mul!(Vv, Y', U_trunc)       # V = Yᴴ·U
+    Uv = view(sc.Ubuf, :, 1:nz); LA.mul!(Uv, Qmat, U_trunc)     # U = Q·U
+    invs = copyto!(similar(Q_hat_n, CT, 1, nz), reshape(CT.(inv.(s)), 1, nz))
+    Vv .*= invs .* isw                                         # [i,j] *= (1/√λ_j)·(1/√w_i)
+    Uv .*= isw
+    return Uv, s, Vv
 end
 
 end # module

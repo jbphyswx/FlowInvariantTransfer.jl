@@ -1,7 +1,7 @@
 module ScaleToScaleTransfer
 
 using ..Types: ModeToModeTransferMethod, ModeToModeTriadResult, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds,
-               PassiveScalar, AbstractSpectralBackend, DirectSumBackend, FFTBackend
+               PassiveScalar, AbstractSpectralBackend, DirectSumBackend, FFTBackend, require_coefficient_spectral
 using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -59,6 +59,7 @@ function calculate_mode_to_mode_transfer(
     force::Bool = false,
     advecting_hat = velocity_hat,
 )
+    require_coefficient_spectral(spectral)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))
@@ -99,6 +100,7 @@ function calculate_mode_to_mode_transfer!(
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
+    require_coefficient_spectral(spectral)
     _mode_to_mode_loop!(resolve_execution(execution), result, ws, û_p, velocity_hat, ks;
         invariant=invariant, dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
     return result

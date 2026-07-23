@@ -207,4 +207,225 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_distributed!(
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Distributed mode-to-mode S(k|p)  (overrides the core `_mode_to_mode_distributed!` stub)
+# ---------------------------------------------------------------------------
+# Each giver mode `p` writes a DISJOINT column S[·,p], so the giver loop is embarrassingly parallel.
+# Givers are partitioned across workers (strided); each worker fills a local S (zero except its own
+# columns) and the columns are `+`-reduced into the full tensor. `net[k]=Σ_p S[k,p]` is derived on the
+# master. The inner backend (`local_backend`, for the hybrid `DistributedBackend(ThreadedBackend())`)
+# threads each worker's giver loop with its own threads + per-thread workspace; the columns written are
+# disjoint, so writing into the shared local S is race-free. Only plain arrays are captured by the
+# closure (never `ws`, whose FFT-plan bundle workers may not be able to deserialize).
+function FIT.ScaleToScaleTransfer._mode_to_mode_distributed!(
+    result, ws, û_p, velocity_hat, ks, execution::DistributedBackend;
+    invariant = KineticEnergy(),
+    dealiasing = FIT.Types.OrszagTwoThirds(),
+    spectral = FIT.Types.DirectSumBackend(),
+    advecting_hat = velocity_hat,
+)
+    nd = length(ks); ns = size(velocity_hat)[1:nd]; M = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat)); Nmodes = prod(ns)
+    cis = CartesianIndices(ns); colons = ntuple(_ -> Colon(), nd)
+    inner = local_backend(execution)
+    nw = max(1, Distributed.nworkers())
+
+    S = Distributed.@distributed (+) for w in 1:nw
+        _mode_to_mode_worker_S(collect(w:nw:Nmodes), velocity_hat, ks, ns, M, FT,
+            invariant, dealiasing, spectral, advecting_hat, cis, colons, inner)
+    end
+    copyto!(result.transfer, S)
+
+    net = result.net_transfer
+    fill!(net, zero(eltype(net)))
+    @inbounds for p in cis
+        net .+= view(result.transfer, colons..., p)
+    end
+    return result
+end
+
+function _mode_to_mode_worker_S(idxs, velocity_hat, ks, ns, M, FT, invariant, dealiasing, spectral,
+                                advecting_hat, cis, colons, inner)
+    local_S = zeros(FT, ns..., ns...)
+    fill_range!(rng) = begin
+        lws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
+        lup = similar(velocity_hat)
+        @inbounds for i in rng
+            p = cis[i]
+            fill!(lup, zero(eltype(lup)))
+            for c in 1:M; lup[p, c] = velocity_hat[p, c]; end
+            FIT.NonlinearTerm.compute_nonlinear_term!(lws, lup, ks;
+                dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
+            Sp = view(local_S, colons..., p)                    # disjoint per p → thread-safe
+            FIT.Invariants.transfer_density!(Sp, invariant, velocity_hat, lws.N̂, ks)
+        end
+    end
+    if inner isa ThreadedBackend
+        nchunks = max(1, min(Threads.nthreads(), length(idxs)))
+        chunks = [idxs[c:nchunks:end] for c in 1:nchunks]
+        Threads.@threads for ci in eachindex(chunks)
+            fill_range!(chunks[ci])
+        end
+    else
+        fill_range!(idxs)
+    end
+    return local_S
+end
+
+# ---------------------------------------------------------------------------
+# Distributed smooth band-to-band T(n,m)  (overrides `_band_to_band_distributed!`)
+# ---------------------------------------------------------------------------
+# Each band `m` writes a DISJOINT column T[·,m]; bands are partitioned across workers (strided), each
+# worker fills a local T (zero except its columns), `+`-reduced into the full matrix. Inner backend
+# threads the worker's band loop (disjoint columns → shared write is race-free). Only the band masks
+# `bws.W` (plain arrays) are captured, not the plan-holding workspace.
+function FIT.BandTransfer._band_to_band_distributed!(
+    T, bws, velocity_hat, ks, execution::DistributedBackend;
+    dealiasing = FIT.Types.OrszagTwoThirds(),
+    invariant = KineticEnergy(),
+    spectral = FIT.Types.DirectSumBackend(),
+    advecting_hat = velocity_hat,
+)
+    nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat)); nb = length(bws.centers); W = bws.W
+    inner = local_backend(execution)
+    nw = max(1, Distributed.nworkers())
+
+    Tred = Distributed.@distributed (+) for w in 1:nw
+        _band_to_band_worker_T(collect(w:nw:nb), W, velocity_hat, ks, ns, D, FT, nb,
+            invariant, dealiasing, spectral, advecting_hat, inner)
+    end
+    copyto!(T, Tred)
+    return T
+end
+
+function _band_to_band_worker_T(ms, W, velocity_hat, ks, ns, D, FT, nb, invariant, dealiasing, spectral,
+                                advecting_hat, inner)
+    local_T = zeros(FT, nb, nb)
+    fill_bands!(mrng) = begin
+        lws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
+        fm = similar(velocity_hat); d = similar(velocity_hat, FT, ns...)
+        @inbounds for m in mrng
+            for c in 1:D, I in CartesianIndices(ns)
+                fm[I, c] = W[m][I] * velocity_hat[I, c]
+            end
+            FIT.NonlinearTerm.compute_nonlinear_term!(lws, fm, ks;
+                dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
+            FIT.Invariants.transfer_density!(d, invariant, velocity_hat, lws.N̂, ks)
+            for n in 1:nb
+                s = zero(FT)
+                for I in CartesianIndices(ns); s += W[n][I] * d[I]; end
+                local_T[n, m] = s                                # disjoint per m → thread-safe
+            end
+        end
+    end
+    if inner isa ThreadedBackend
+        nchunks = max(1, min(Threads.nthreads(), length(ms)))
+        chunks = [ms[c:nchunks:end] for c in 1:nchunks]
+        Threads.@threads for ci in eachindex(chunks)
+            fill_bands!(chunks[ci])
+        end
+    else
+        fill_bands!(ms)
+    end
+    return local_T
+end
+
+# ---------------------------------------------------------------------------
+# Distributed partial (decomposition-channel) fluxes  (overrides `_partial_fluxes_distributed!`)
+# ---------------------------------------------------------------------------
+# Each (sp,sq) pair is an independent nonlinear-term build writing DISJOINT channel keys; pairs are
+# partitioned across workers (strided), each worker builds a partial channel Dict, `merge`-reduced.
+# Inner backend threads the worker's pair loop; each task keeps its own workspace + a private Dict,
+# merged within the worker (no shared-Dict race). Captures only `comps`/`sidx`/`centers` (plain arrays).
+function FIT.SpectralFlux._partial_fluxes_distributed!(
+    channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh, execution::DistributedBackend;
+    dealiasing = FIT.Types.OrszagTwoThirds(),
+    spectral = FIT.Types.DirectSumBackend(),
+)
+    FT = real(eltype(velocity_hat)); nd = length(ks); ns = size(velocity_hat)[1:nd]
+    prs = [(sp, sq) for sp in names for sq in names]; np = length(prs)
+    inner = local_backend(execution)
+    nw = max(1, Distributed.nworkers())
+
+    merged = Distributed.@distributed (merge) for w in 1:nw
+        _partial_fluxes_worker(collect(w:nw:np), prs, comps, names, velocity_hat, ks, ns, FT,
+            sidx, centers, Nsh, dealiasing, spectral, inner)
+    end
+    merge!(channels, merged)
+    return channels
+end
+
+function _partial_fluxes_worker(pis, prs, comps, names, velocity_hat, ks, ns, FT, sidx, centers, Nsh,
+                                dealiasing, spectral, inner)
+    build(pirng) = begin
+        lws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
+        d = similar(velocity_hat, FT, ns...)
+        ch = Dict{NTuple{3,Symbol}, FIT.Types.SpectralFluxResult}()
+        @inbounds for pi in pirng
+            sp, sq = prs[pi]
+            FIT.NonlinearTerm.compute_nonlinear_term!(lws, comps[sq], ks;
+                advecting_hat = comps[sp], dealiasing = dealiasing, spectral = spectral)
+            for sk in names
+                FIT.Invariants.transfer_density!(d, FIT.Types.KineticEnergy(), comps[sk], lws.N̂, ks)
+                ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(d, sidx, centers, Nsh)
+            end
+        end
+        return ch
+    end
+    if inner isa ThreadedBackend
+        nchunks = max(1, min(Threads.nthreads(), length(pis)))
+        chunks = [pis[c:nchunks:end] for c in 1:nchunks]
+        parts = Vector{Dict{NTuple{3,Symbol}, FIT.Types.SpectralFluxResult}}(undef, length(chunks))
+        Threads.@threads for ci in eachindex(chunks)
+            parts[ci] = build(chunks[ci])
+        end
+        out = Dict{NTuple{3,Symbol}, FIT.Types.SpectralFluxResult}()
+        for p in parts; merge!(out, p); end
+        return out
+    else
+        return build(pis)
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Distributed compressible transfer  (overrides the core `_compressible_distributed` stub)
+# ---------------------------------------------------------------------------
+# Compressible is a single FFT pipeline with no outer loop, so its independent coarse-grained work
+# units are the momentum-weighted transfer + Helmholtz channel set (group A) and the KE↔IE
+# pressure-dilatation (group B). Each group runs on its own worker, rebuilding its own
+# `CompressibleWorkspace` from the raw (plain-array) inputs — no shared mutable state to serialize —
+# and the master assembles the full result. The inner backend (`local_backend`) is used per worker, so
+# `DistributedBackend(ThreadedBackend())` threads each worker's FFTs. When no pressure field is given
+# there is a single work unit, offloaded to one worker. Bit-identical to the serial pipeline.
+function FIT.Compressible._compressible_distributed(
+    velocity_hat, density_hat, ks, execution::DistributedBackend;
+    spectral, binning, geometry,
+    pressure_hat = nothing,
+    dealiasing = FIT.Types.OrszagTwoThirds(),
+    decompose = true,
+)
+    inner = local_backend(execution)
+    runA = () -> begin
+        ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+        FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
+            dealiasing = dealiasing, decompose = decompose, pressure_hat = nothing)
+    end
+    if pressure_hat === nothing
+        return fetch(Distributed.@spawnat :any runA())
+    end
+    runB = () -> begin
+        ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+        FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
+            dealiasing = dealiasing, decompose = false, pressure_hat = pressure_hat)
+    end
+    fA = Distributed.@spawnat :any runA()
+    fB = Distributed.@spawnat :any runB()
+    rA = fetch(fA); rB = fetch(fB)
+    return FIT.Types.CompressibleFluxResult(rA.k_shells, rA.transfer_spectrum, rA.flux,
+                                            rA.channels, rB.pressure_dilatation)
+end
+
 end # module

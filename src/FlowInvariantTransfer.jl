@@ -36,6 +36,7 @@ using .Types:
     ModeToModeTransferMethod,
     TriadicOrthogonalDecompositionMethod,
     SphericalTransferMethod,
+    DivergentSphericalTransferMethod,
     AbstractInvariant,
     KineticEnergy,
     Helicity,
@@ -80,9 +81,10 @@ using .Types:
     ModeToModeTriadResult,
     TriadicOrthogonalDecompositionResult,
     SphericalTransferResult,
+    DivergentSphericalTransferResult,
     CompressibleFluxResult
 
-export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod
+export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod, DivergentSphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
@@ -93,7 +95,7 @@ export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 using .Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend, is_distributed, resolve_execution
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend, MPIBackend, AutoBackend, local_backend, is_distributed, resolve_execution
 export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, CompressibleFluxResult
+export SpectralFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult, CompressibleFluxResult
 
 # Internal building blocks (grids/dealiasing, shell binning, invariant densities, field
 # decompositions, filters, the nonlinear term) are NOT re-exported or flattened onto the top-level
@@ -105,7 +107,9 @@ export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 using .SpectralFlux: calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 using .Compressible: calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
 using .Spherical: calculate_spherical_transfer, calculate_spherical_transfer!,
-                  SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace
+                  SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace,
+                  calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!,
+                  DivergentSphericalTransferWorkspace, ScatteredDivergentSphericalTransferWorkspace
 using .CoarseGrainingFlux: calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGrainingFluxWorkspace
 using .ShellToShellTransfer: calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 using .BandTransfer: calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
@@ -116,13 +120,16 @@ using .TriadicOrthogonalDecomposition: triadic_orthogonal_decomposition, triadic
 export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 export calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
 export calculate_spherical_transfer, calculate_spherical_transfer!,
-       SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace
+       SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace,
+       calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!,
+       DivergentSphericalTransferWorkspace, ScatteredDivergentSphericalTransferWorkspace
 export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGrainingFluxWorkspace
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
 export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace
 export calculate_energy_transfer
+export to_spectral
 
 # ---------------------------------------------------------------------------
 # Extension stubs for MPI / PencilFFTs (distributed)
@@ -366,6 +373,104 @@ function calculate_energy_transfer(
     return triadic_orthogonal_decomposition(X;
         window=method.nfft, noverlap=method.noverlap, nmode=method.nmode, kwargs...)
 end
+
+# ---------------------------------------------------------------------------
+# Physical-space front door for uniform-grid Cartesian data: (u, v[, w]) → (velocity_hat, ks)
+# ---------------------------------------------------------------------------
+
+"""
+    to_spectral(velocity_fields::Tuple, coords_vecs::Tuple; spectral=FFTBackend()) -> (velocity_hat, ks)
+
+Forward-transform physical-space velocity components sampled on a **uniform, periodic, tensor-product
+Cartesian grid** into the Fourier-coefficient input `(velocity_hat, ks)` consumed by every Cartesian
+flux diagnostic ([`calculate_spectral_flux`](@ref), [`calculate_shell_to_shell_transfer`](@ref),
+[`calculate_mode_to_mode_transfer`](@ref), [`calculate_band_to_band_transfer`](@ref),
+[`calculate_partial_fluxes`](@ref), [`calculate_compressible_flux`](@ref)). This is the physical-space
+entry point for gridded data: the diagnostics operate on coefficients, so a real field is transformed
+here once with the package's `û = fft(u)/Nᵈ` normalization (so `E(k) = ½|û|²`) and the FFTW `fftfreq`
+wavenumber convention — you do not build `û`/`ks` by hand.
+
+`coords_vecs` are the **1D coordinate vectors** `(x, y[, z])` of the grid (one vector per axis, of
+length `nₐ`), *not* per-sample coordinates. Scattered (non-uniform) Cartesian data is handled by the
+NUFFT path (`spectral = NUFFTBackend()`), and spherical data by
+[`calculate_spherical_transfer`](@ref) — see [`spectral_geometry`](@ref).
+
+# Keyword Arguments
+- `spectral::AbstractSpectralBackend = FFTBackend()`: the analysis transform. `FFTBackend()` needs
+  `using FFTW` (cuFFT is used automatically for device-array inputs); `DirectSumBackend()` is the
+  dependency-free `O(N²ᴰ)` reference (tiny grids only).
+
+# Returns
+`(velocity_hat, ks)` — `velocity_hat` is `(nₐ..., D)` complex in the input array's backend (a device
+field yields a device coefficient array); `ks` a tuple of `D` wavenumber vectors.
+
+# Example
+```julia
+using FlowInvariantTransfer, FFTW
+û, ks = to_spectral((u, v), (x, y))
+Π = calculate_spectral_flux(û, ks; spectral = FFTBackend())
+```
+
+Pass a scalar (density / pressure / passive scalar) as a 1-tuple: `ρ̂, _ = to_spectral((ρ,), coords)`.
+"""
+function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
+                     spectral::AbstractSpectralBackend = FFTBackend())
+    D = length(velocity_fields)
+    D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
+    spectral isa Union{DirectSumBackend, FFTBackend} || throw(ArgumentError(
+        "to_spectral transforms uniform-grid Cartesian data (spectral = FFTBackend() or the DirectSumBackend " *
+        "reference). For scattered Cartesian data use the NUFFTBackend physical entry; for spherical data use " *
+        "calculate_spherical_transfer."))
+    ns = Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
+    Utils.validate_uniform_grid(coords_vecs)
+    Ls = Utils.domain_size_from_coords(coords_vecs)
+    ks = Utils.wavenumber_grid(ns, Ls)
+    CT = complex(float(real(eltype(velocity_fields[1]))))
+    field_phys = similar(velocity_fields[1], CT, ns..., D)
+    colons = ntuple(_ -> Colon(), length(ns))
+    for c in 1:D
+        view(field_phys, colons..., c) .= complex.(velocity_fields[c])
+    end
+    # Reuse the shared analysis transform context (û = fft(u)/Nᵈ): DirectSum in core, FFT in the FFTW
+    # ext, cuFFT for device arrays. Errors clearly (no silent downgrade) if FFTBackend is requested
+    # without FFTW loaded.
+    tf = Compressible._resolve_tf(spectral, field_phys, ks, ns)
+    return (tf.dft(field_phys), ks)
+end
+
+"""
+    to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
+                spectral=NUFFTBackend(), tol=1e-9) -> (velocity_hat, ks)
+
+Scattered-Cartesian physical-space entry: reconstruct the Fourier coefficients `velocity_hat` on a
+uniform `ms = (m₁,…,m_D)` grid from velocity components sampled at **scattered** (non-uniform) points,
+via a FINUFFT type-1 transform, and return them with the matching uniform wavenumber grid `ks`. The
+result feeds the ordinary Cartesian flux diagnostics unchanged — the scattered→uniform step lives
+entirely here, so the whole flux family works on scattered data through the uniform path.
+
+`scatter_coords = (x, y[, z])` are per-sample coordinate vectors (each length `N`, the number of
+samples), *not* grid axes; `ms` is the target uniform mode count per dimension. Requires
+`using FINUFFT`. For uniform-grid data use the 2-argument form with `FFTBackend()`.
+
+The reconstruction is the density-normalized adjoint (`û = type1(u)/N`, exact for samples on the
+uniform grid; the package's established scattered-Cartesian convention). `tol` sets the FINUFFT
+tolerance. `Ls` gives the periodic domain size per dimension; pass it for correct wavenumbers on a
+periodic domain (the samples live in `[xₘᵢₙ, xₘᵢₙ+Lₐ)`). If omitted it is inferred from the sample
+span `maxₐ − minₐ`, which for scattered samples that do not cover the full period is only approximate.
+"""
+function to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
+                     spectral::AbstractSpectralBackend = NUFFTBackend(), tol::Real = 1e-9,
+                     Ls::Union{Nothing, Tuple} = nothing)
+    spectral isa NUFFTBackend || throw(ArgumentError(
+        "the 3-argument to_spectral(fields, scatter_coords, ms; …) is the scattered-Cartesian NUFFT " *
+        "entry — use spectral = NUFFTBackend(). For uniform-grid data use to_spectral(fields, coords_vecs; " *
+        "spectral = FFTBackend())."))
+    return _to_spectral_nufft(velocity_fields, scatter_coords, ms, tol, Ls)
+end
+
+# Overridden by the FINUFFT extension (requires `using FINUFFT`).
+_to_spectral_nufft(args...; kwargs...) = throw(ArgumentError(
+    "Scattered-Cartesian to_spectral (NUFFTBackend) requires FINUFFT. Run `using FINUFFT` to load the extension."))
 
 # ---------------------------------------------------------------------------
 # Precompilation workload (small grid to reduce TTFX)

@@ -1,7 +1,7 @@
 module BandTransfer
 
 using ..Types: SmoothBands, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds, AbstractSpectralBackend,
-               DirectSumBackend, AbstractShellGeometry, IsotropicShells
+               DirectSumBackend, AbstractShellGeometry, IsotropicShells, require_coefficient_spectral
 using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..NonlinearTerm: compute_nonlinear_term!
@@ -88,6 +88,7 @@ function calculate_band_to_band_transfer!(
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
+    require_coefficient_spectral(spectral)
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
     # Fill the transfer matrix (one nonlinear term per band m → column T[·,m]), dispatched on execution.
@@ -169,6 +170,7 @@ function calculate_band_to_band_transfer(
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
+    require_coefficient_spectral(spectral)
     FT = real(eltype(velocity_hat))
     nb = length(bands.centers)
     bws = BandTransferWorkspace(velocity_hat, ks, bands; geometry=geometry)

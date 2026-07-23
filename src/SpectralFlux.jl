@@ -1,6 +1,6 @@
 module SpectralFlux
 
-using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
+using ..Types: SpectralFluxMethod, SpectralFluxResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds, require_coefficient_spectral
 using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..Decomposition: decompose_field
@@ -69,6 +69,7 @@ function calculate_spectral_flux(
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
+    require_coefficient_spectral(spectral)
     decomposed = decompose_field(decomposition, velocity_hat, ks)
     return _calculate_spectral_flux_decomposed(
         decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral, resolve_execution(execution), advecting_hat, geometry
@@ -331,6 +332,7 @@ function calculate_partial_fluxes!(
     execution::AbstractExecutionBackend = SerialBackend(),
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
+    require_coefficient_spectral(spectral)
     comps = decompose_field(decomposition, velocity_hat, ks)
     comps isa NamedTuple || throw(ArgumentError(
         "calculate_partial_fluxes needs a decomposition that splits u into ≥2 named components " *

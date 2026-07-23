@@ -22,7 +22,7 @@ using LinearAlgebra: LinearAlgebra
 using ..Types: TriadicOrthogonalDecompositionMethod,
                TriadicOrthogonalDecompositionResult,
                AbstractSpectralBackend, DirectSumBackend, FFTBackend
-using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, resolve_execution
+using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution, is_gpu_array
 
 export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace,
        hamming_window, hann_window, tukey_window
@@ -391,6 +391,44 @@ function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::
     _temporal_block_dft_fft!(Q_hat_blk, segment, window, win_weight, nDFT)
 end
 
+# Whole-block temporal DFT of `segment` (nDFT × nx) into `Q_blk` (nDFT × nx), windowed + fftshifted,
+# with the `blk_mean` DC (k=0) correction taken from the un-centered `seg_before_mean`. This is the
+# per-block transform the analysis loop calls once per (block, variable). The host method here is the
+# exact original per-column computation (FFT via the plan, or the dependency-free direct sum); the
+# GPUArraysCore extension adds an `AbstractGPUArray` method that runs the whole block as one matmul so a
+# device-array input executes device-resident. Dispatch selects — host path is byte-identical.
+function _tod_dft_block!(Q_blk, segment, seg_before_mean, window, win_weight, nDFT, shift, blk_mean,
+                         backend, plan, dft_col, windowed, shifted)
+    CT = eltype(Q_blk); nx = size(segment, 2)
+    for ix in 1:nx
+        if backend isa FFTBackend
+            _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window, win_weight, nDFT, plan)
+        else
+            @inbounds for t in 1:nDFT
+                windowed[t] = segment[t, ix] * window[t]
+            end
+            @inbounds for freq_k in 1:nDFT
+                val = zero(CT)
+                for t in 1:nDFT
+                    phase = -2π * (freq_k - 1) * (t - 1) / nDFT
+                    val += windowed[t] * exp(im * phase)
+                end
+                dft_col[freq_k] = val * (win_weight / nDFT)
+            end
+        end
+        if blk_mean
+            dc = zero(CT)
+            @inbounds for t in 1:nDFT
+                dc += seg_before_mean[t, ix] * window[t]
+            end
+            dft_col[1] = dc * (win_weight / nDFT)
+        end
+        circshift!(shifted, dft_col, shift)
+        @inbounds @views Q_blk[:, ix] .= shifted
+    end
+    return Q_blk
+end
+
 # ---------------------------------------------------------------------------
 # Default quadratic nonlinearity
 # ---------------------------------------------------------------------------
@@ -444,12 +482,17 @@ struct _TriadSVDScratch{M<:AbstractMatrix}
     Ubuf::M   # nStateNx × r          — convective modes (view [:,1:nz] returned)
     Vbuf::M   # nStateNx × r          — recipient modes  (view [:,1:nz] returned)
 end
-function _TriadSVDScratch(::Type{CT}, nStateNx::Int, nBlks::Int) where {CT}
+# `proto` is a prototype array (the temporal-DFT `Q_hat`) whose type the scratch buffers follow, so a
+# device-array input yields device-resident buffers and the per-triad `eigen!`/`qr!`/`mul!` dispatch
+# to the device solver (CUSOLVER/cuBLAS). For a host `Array` this is identical to the old `zeros`
+# buffers (the `mul!`/factorizations overwrite them, so the uninitialized `similar` is fine).
+function _TriadSVDScratch(proto::AbstractArray, ::Type{CT}, nStateNx::Int, nBlks::Int) where {CT}
     r = min(nStateNx, nBlks)
+    z(dims...) = fill!(similar(proto, CT, dims...), zero(CT))
     return _TriadSVDScratch(
-        zeros(CT, nBlks, nStateNx), zeros(CT, nStateNx, nBlks), zeros(CT, nStateNx, r),
-        zeros(CT, r, nStateNx), zeros(CT, r, r), zeros(CT, r, r),
-        zeros(CT, nStateNx, r), zeros(CT, nStateNx, r),
+        z(nBlks, nStateNx), z(nStateNx, nBlks), z(nStateNx, r),
+        z(r, nStateNx), z(r, r), z(r, r),
+        z(nStateNx, r), z(nStateNx, r),
     )
 end
 
@@ -517,6 +560,25 @@ function _triadic_svd_serial!(sc::_TriadSVDScratch, sqrt_w, inv_sqrt_w, Q_hat_n,
     return Uv, s, Vv
 end
 
+# Return `A` on the same device as `proto` (host no-op). Dispatched (type-stable per `proto`): the
+# GPUArraysCore extension adds the `proto::AbstractGPUArray` method that copies `A` to the device. Used to
+# put the weights / 1-over-√s on the modes' device for the device-generic reductions in the triad loop.
+_dev_like(proto, A) = A
+
+# Modal energy budget T_j = s_j · Re⟨v_j, W u_j⟩. Host method: the original 0-alloc scalar accumulator.
+# The GPUArraysCore extension adds a `wdev::AbstractGPUArray` method (device-generic column reduction), so
+# the hot host path stays allocation-free while a device path exists — selected by dispatch on `wdev`.
+function _tod_modal_budget!(T_budget, fi_l, fi_n, u, v, s, nm, wdev)
+    @inbounds for j in 1:nm
+        acc = zero(eltype(u))
+        for k in axes(u, 1)
+            acc += conj(v[k, j]) * wdev[k] * u[k, j]
+        end
+        T_budget[fi_l, fi_n, j] = s[j] * real(acc)
+    end
+    return T_budget
+end
+
 """
     _triadic_loop_serial!(L, P, T_budget, A_out, Xi_out,
                           Q_hat, f_idx, fk_idx, fl_idx, fn_idx,
@@ -537,6 +599,7 @@ function _triadic_loop_serial!(
 )
     nTriads = length(fk_idx)
     nStateNx = nState * nx
+    wdev = _dev_like(Q_hat, weights)   # weights on the modes' device (host no-op); selected by dispatch
 
     for i in 1:nTriads
         fi_k = fk_idx[i]
@@ -570,21 +633,14 @@ function _triadic_loop_serial!(
         # Modes: convective (u) and recipient (v)
         P[(fi_l, fi_n)] = (convective=u, recipient=v)
 
-        # Modal energy budget T = s · Re⟨v, W u⟩ per mode (allocation-free weighted inner product).
-        @inbounds for j in 1:nm
-            acc = zero(eltype(u))
-            for k in axes(u, 1)
-                acc += conj(v[k, j]) * weights[k] * u[k, j]
-            end
-            T_budget[fi_l, fi_n, j] = s[j] * real(acc)
-        end
+        # Modal energy budget T_j = s_j · Re⟨v_j, W u_j⟩ — dispatched on `wdev`: host 0-alloc scalar
+        # accumulator, or the device-generic column reduction from the GPUArraysCore extension.
+        _tod_modal_budget!(T_budget, fi_l, fi_n, u, v, s, nm, wdev)
 
         # Expansion coefficients
         if return_coefficients
-            # A_conv = Uᴴ · (Q_hat_kl .* weights)
-            # A_recip = Vᴴ · (Q_hat_n .* weights)
-            A_conv = u' * (Q_hat_kl .* weights)
-            A_recip = v' * (Q_hat_n .* weights)
+            A_conv = u' * (Q_hat_kl .* wdev)          # A_conv  = Uᴴ · (Q̂_kl .* W)
+            A_recip = v' * (Q_hat_n .* wdev)          # A_recip = Vᴴ · (Q̂_n  .* W)
             A_out[(fi_l, fi_n)] = (convective=A_conv, recipient=A_recip)
 
             # Donor and catalyst modes
@@ -592,11 +648,12 @@ function _triadic_loop_serial!(
                 Q_hat_l = reshape(permutedims(LHS(Q_l_raw), (2, 1, 3)), nStateNx, nBlks)
                 Q_hat_k = reshape(permutedims(LHS(Q_k_raw), (2, 1, 3)), nStateNx, nBlks)
 
-                # donor = Q̂_l · Aᴴ_recip · diag(1/s) / nBlks
-                # catalyst = Q̂_k · Aᴴ_recip · diag(1/s) / nBlks
-                inv_s = 1 ./ s[1:nm]
-                donor_mode = Q_hat_l * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
-                catalyst_mode = Q_hat_k * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
+                # donor/catalyst = Q̂_{l,k} · Aᴴ_recip · diag(1/s) / nBlks. The diag(1/s) column-scale is a
+                # broadcast (device-generic; `_dev_like` puts 1/s on the modes' device — avoids the
+                # `Diagonal(host) × device` mix). Identical to the Diagonal form on the host.
+                inv_s_row = _dev_like(Q_hat, reshape(1 ./ s[1:nm], 1, nm))
+                donor_mode = (Q_hat_l * A_recip') .* inv_s_row ./ nBlks
+                catalyst_mode = (Q_hat_k * A_recip') .* inv_s_row ./ nBlks
 
                 Xi_out[(fi_l, fi_n)] = (donor=donor_mode[:, 1:nm], catalyst=catalyst_mode[:, 1:nm])
             end
@@ -622,7 +679,7 @@ function _triad_result(i, Q_hat, fk_idx, fl_idx, fn_idx, weights, sqrt_w, inv_sq
     Q_hat_n = reshape(permbuf, nStateNx, nBlks)
     _apply_nonlinear!(permbuf_kl, Q_nonlinear, Q_k_raw, Q_l_raw)
     Q_hat_kl = reshape(permbuf_kl, nStateNx, nBlks)
-    sc = _TriadSVDScratch(CT, nStateNx, nBlks)
+    sc = _TriadSVDScratch(Q_hat, CT, nStateNx, nBlks)   # follow Q_hat's array type (device-generic)
     U, s, V = _triadic_svd_serial!(sc, sqrt_w, inv_sqrt_w, Q_hat_n, Q_hat_kl, nBlks)
     nm = min(nmode, length(s))
     u = U[:, 1:nm]; v = V[:, 1:nm]
@@ -665,6 +722,17 @@ _dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
 # The DistributedBackend passes itself through so the ext can read its inner (per-worker) backend.
 _dispatch_triadic_loop_impl!(exec::DistributedBackend, args...; kwargs...) =
     _triadic_loop_distributed!(args..., exec; kwargs...)
+
+# GPU path: the triad loop is device-generic — it just runs the loop, and every per-triad primitive
+# (temporal DFT, weighting, `qr!`/`mul!`, the Hermitian eig, the reshape scratch) dispatches on the
+# array type. Host `Array`s use the 0-alloc scalar-optimized methods here; device arrays
+# (`AbstractGPUArray`) use the broadcast/matmul methods added by the GPUArraysCore extension, so the
+# heavy `O(nStateNx·nBlks)` products run device-resident (cuBLAS/cuSOLVER) and the tiny `r×r` Hermitian
+# eig hops to the host (small dense eig is CPU-optimal + universally supported). No separate code path,
+# no host↔device movement forced by this knob: a device-array `X` flows to a device-resident `Q_hat`
+# and device factorizations purely by dispatch. Verified device-generic on JLArrays.
+_dispatch_triadic_loop_impl!(::GPUBackend, args...; kwargs...) =
+    _triadic_loop_serial!(args...; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Reusable workspace
@@ -728,6 +796,11 @@ function TODWorkspace(
     Q = _default_nonlinear, LHS = identity, nmode = nothing, nfreq = nothing,
     isreal_data = nothing, mean_type = :zero, spectral::AbstractSpectralBackend = DirectSumBackend(),
 )
+    # TOD's `spectral` selects the *temporal* DFT (over the leading time axis); only the uniform-1D
+    # transforms apply. The scattered/spherical backends are a category error here.
+    spectral isa Union{DirectSumBackend, FFTBackend} || throw(ArgumentError(
+        "triadic_orthogonal_decomposition uses a temporal DFT; `spectral` must be DirectSumBackend() " *
+        "or FFTBackend() (got $(typeof(spectral)))."))
     dims = size(X)
     ndims(X) >= 2 || throw(ArgumentError("X must have at least 2 dimensions (time × variables)"))
     nt = dims[1]
@@ -743,9 +816,9 @@ function TODWorkspace(
     win_weight = RT(1) / (sum(window_vec) / length(window_vec))
 
     X_mean = if mean_type === :zero || mean_type === :blockwise
-        zeros(CT, nVar, nx)
+        fill!(similar(X, CT, nVar, nx), zero(CT))                       # device-resident for device X
     elseif mean_type isa AbstractArray
-        convert(Matrix{CT}, reshape(mean_type[1:nVar, :], nVar, nx))
+        copyto!(similar(X, CT, nVar, nx), reshape(mean_type[1:nVar, :], nVar, nx))
     else
         throw(ArgumentError("mean_type must be :zero, :blockwise, or an array"))
     end
@@ -756,21 +829,26 @@ function TODWorkspace(
 
     nState = size(LHS(zeros(CT, nVar, nx, 1)), 1)
 
-    Q_hat = zeros(CT, nFreq, nVar, nx, nBlks)
+    # All compute buffers follow the input array type (`similar(X, …)`) so a device-array `X` gives a
+    # device-resident workspace and the whole pipeline (temporal DFT, weighting, per-triad SVD) runs
+    # on-device by dispatch. For a host `Array` this is byte-identical to the old `Array{CT}(undef)`/
+    # `zeros` buffers (the fills/products overwrite them). Result arrays (`L`/`T_budget`) stay host —
+    # they are the small degree×degree×mode outputs handed back to the caller.
+    Q_hat = fill!(similar(X, CT, nFreq, nVar, nx, nBlks), zero(CT))
     shift = iseven(nDFT) ? nDFT ÷ 2 : (nDFT - 1) ÷ 2
     dft_plan = _temporal_dft_plan(nDFT, spectral, CT)
-    segment  = Array{CT}(undef, nDFT, nx)
-    windowed = Array{CT}(undef, nDFT)
-    dft_col  = Array{CT}(undef, nDFT)
-    shifted  = Array{CT}(undef, nDFT)
-    seg_before_mean = blk_mean ? Array{CT}(undef, nDFT, nx) : segment
+    segment  = similar(X, CT, nDFT, nx)
+    windowed = similar(X, CT, nDFT)
+    dft_col  = similar(X, CT, nDFT)
+    shifted  = similar(X, CT, nDFT)
+    seg_before_mean = blk_mean ? similar(X, CT, nDFT, nx) : segment
 
     weights = repeat(weight_vec, nState)
-    sqrt_w = sqrt.(weights)
+    sqrt_w = sqrt.(weights)          # host (shares the metadata type param); device SVD kernel moves it on-device
     inv_sqrt_w = inv.(sqrt_w)
-    sc = _TriadSVDScratch(CT, nState * nx, nBlks)
-    permbuf = Array{CT}(undef, nx, nState, nBlks)      # recipient (n) reshape scratch
-    permbuf_kl = Array{CT}(undef, nx, nState, nBlks)   # giver (k,l) nonlinear reshape scratch
+    sc = _TriadSVDScratch(X, CT, nState * nx, nBlks)   # scratch follows the input array type
+    permbuf = similar(X, CT, nx, nState, nBlks)        # recipient (n) reshape scratch
+    permbuf_kl = similar(X, CT, nx, nState, nBlks)     # giver (k,l) nonlinear reshape scratch
     L = fill(RT(NaN), nFreq, nFreq, nmode_val)
     T_budget = fill(RT(NaN), nFreq, nFreq, nmode_val)
 
@@ -819,40 +897,18 @@ function triadic_orthogonal_decomposition!(
     for iBlk in 1:nBlks
         offset = min((iBlk - 1) * (nDFT - ws.noverlap_val) + nDFT, ws.nt) - nDFT
         for iVar in 1:nVar
-            @inbounds for ix in 1:nx, t in 1:nDFT
-                segment[t, ix] = X_flat[offset + t, iVar, ix] - X_mean[iVar, ix]
-            end
+            # Extract this block's segment (device-generic broadcast; lazy views → ~0 alloc on host):
+            #   segment[t,ix] = X_flat[offset+t, iVar, ix] − X_mean[iVar, ix].
+            segment .= view(X_flat, offset+1:offset+nDFT, iVar, :) .- transpose(view(X_mean, iVar, :))
             if blk_mean
                 copyto!(seg_before_mean, segment)
-                @inbounds for ix in 1:nx
-                    blk_avg = zero(CT)
-                    for t in 1:nDFT; blk_avg += segment[t, ix]; end
-                    blk_avg /= nDFT
-                    for t in 1:nDFT; segment[t, ix] -= blk_avg; end
-                end
+                segment .-= sum(segment; dims = 1) ./ nDFT          # subtract each column's block mean
             end
-            for ix in 1:nx
-                if dft_backend isa FFTBackend
-                    _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window_vec, win_weight, nDFT, ws.dft_plan)
-                else
-                    @inbounds for t in 1:nDFT; windowed[t] = segment[t, ix] * window_vec[t]; end
-                    @inbounds for freq_k in 1:nDFT
-                        val = zero(CT)
-                        for t in 1:nDFT
-                            phase = -2π * (freq_k - 1) * (t - 1) / nDFT
-                            val += windowed[t] * exp(im * phase)
-                        end
-                        dft_col[freq_k] = val * (win_weight / nDFT)
-                    end
-                end
-                if blk_mean
-                    dc = zero(CT)
-                    @inbounds for t in 1:nDFT; dc += seg_before_mean[t, ix] * window_vec[t]; end
-                    dft_col[1] = dc * (win_weight / nDFT)
-                end
-                circshift!(shifted, dft_col, ws.shift)
-                @inbounds @views Q_hat[:, iVar, ix, iBlk] .= shifted
-            end
+            # Windowed temporal DFT + fftshift for the whole block (per-column on host via the plan/direct
+            # sum; one matmul on device — see the AbstractGPUArray method in the GPUArraysCore extension).
+            _tod_dft_block!(view(Q_hat, :, iVar, :, iBlk), segment, seg_before_mean, window_vec,
+                            win_weight, nDFT, ws.shift, blk_mean, dft_backend, ws.dft_plan,
+                            dft_col, windowed, shifted)
         end
     end
 

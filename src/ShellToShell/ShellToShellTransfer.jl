@@ -1,6 +1,6 @@
 module ShellToShellTransfer
 
-using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+using ..Types: ShellToShellTransferMethod, ShellToShellResult, AbstractShellBinning, LinearBinning, AbstractSpectralBackend, DirectSumBackend, FFTBackend, AbstractInvariant, KineticEnergy, PassiveScalar, AbstractShellGeometry, IsotropicShells, AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves, require_coefficient_spectral
 using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
 using ..Invariants: transfer_density!
 using ..ShellBinning: shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
@@ -88,6 +88,7 @@ function calculate_shell_to_shell_transfer(
     advecting_hat = velocity_hat,
     geometry::AbstractShellGeometry = IsotropicShells(),
 )
+    require_coefficient_spectral(spectral)
     ws      = ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = shell_coordinate(geometry, ks)
     edges   = shell_edges(binning, maximum(k_mag))
@@ -122,6 +123,7 @@ function calculate_shell_to_shell_transfer!(
     execution::AbstractExecutionBackend = SerialBackend(),
     advecting_hat = velocity_hat,
 )
+    require_coefficient_spectral(spectral)
     _calculate_shell_to_shell!(result, ws, velocity_hat, ks, resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)

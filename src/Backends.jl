@@ -22,7 +22,7 @@ module Backends
 
 export AbstractExecutionBackend, SerialBackend, ThreadedBackend, GPUBackend, AutoBackend
 export DistributedBackend, MPIBackend
-export local_backend, is_distributed, resolve_execution
+export local_backend, is_distributed, resolve_execution, is_gpu_array
 
 """
     AbstractExecutionBackend
@@ -123,6 +123,18 @@ local_backend(execution::MPIBackend) = execution.inner
 is_distributed(::AbstractExecutionBackend) = false
 is_distributed(::DistributedBackend) = true
 is_distributed(::MPIBackend) = true
+
+"""
+    is_gpu_array(x) -> Bool
+
+`true` if `x` is a GPU/device array (a `GPUArraysCore.AbstractGPUArray` — `CuArray`, `JLArray`,
+`ROCArray`, …). Defaults to `false` for every host array (`Array`, and host wrappers like
+`SubArray`/`StaticArray`/`FixedSizeArray`/`OffsetArray` that are NOT `Base.Array`); the
+GPUArraysCore extension adds the `AbstractGPUArray` method. Used to route device inputs correctly
+(e.g. reject the host-only DirectSum reference / the host-array-under-GPUBackend case) without the
+fragile `!(x isa Array)` test, which would misclassify host non-`Array` types as device arrays.
+"""
+is_gpu_array(::Any) = false
 
 """
     resolve_execution(execution::AbstractExecutionBackend) -> AbstractExecutionBackend
