@@ -61,19 +61,14 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
         (nd == 2 || nd == 3) || throw(ArgumentError(
             "Cartesian coarse-graining supports 2D or 3D grids (nd=$nd); pass `radius=…` for a spherical " *
             "(lon, lat) surface."))
-        # Per-dimension grid spacing from the coordinate vectors.
-        dx = ntuple(nd) do i
-            v = coords_vecs[i]
-            length(v) > 1 ? FT((v[end] - v[begin]) / (length(v) - 1)) : FT(1)
-        end
-        geom = CGEF.Geometry.CartesianGeometry(dx...)             # (dx,dy) 2D / (dx,dy,dz) 3D
-        CGEF.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., active)
+        geom = CGEF.FlowGeometries.Geometry.CartesianGeometry{FT}()   # spacing lives in the grid axes
+        CGEF.FlowGeometries.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., active)
     else
         nd == 2 || throw(ArgumentError(
             "Spherical coarse-graining is on a 2D lon–lat surface: pass coords_vecs = (lon, lat) and two " *
             "horizontal velocity components (got nd=$nd)."))
-        geom = CGEF.Geometry.SphericalGeometry(FT(radius))
-        CGEF.Grids.StructuredGrid(geom, FT.(coords_vecs[1]), FT.(coords_vecs[2]), active)
+        geom = CGEF.FlowGeometries.Geometry.SphericalGeometry(FT(radius))
+        CGEF.FlowGeometries.Grids.StructuredGrid(geom, FT.(coords_vecs[1]), FT.(coords_vecs[2]), active)
     end
 
     workspace = CGEF.Diagnostics.ΠWorkspace(grid)                # dimensionality inferred from the grid
@@ -127,7 +122,7 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     velocity_fields::Tuple,
     ℓ::Real,
     filter::AbstractFilter;
-    backend::CGEF.Backends.AbstractExecutionBackend = CGEF.Backends.AutoBackend(),
+    backend::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
     mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.Deformable(),
     kwargs...,
 )

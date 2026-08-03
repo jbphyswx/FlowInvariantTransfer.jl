@@ -71,7 +71,7 @@ Requires `CoarseGrainingEnergyFluxes` to be loaded. The grid/workspace fields ar
 via parameters so the struct carries no hardcoded CGEF types into the core package.
 """
 struct CoarseGrainingFluxWorkspace{G, W, P, D}
-    grid::G                       # CGEF.Grids.StructuredGrid
+    grid::G                       # FlowGeometries.Grids.StructuredGrid (via the CGEF extension)
     cgef_workspace::W             # CGEF.Diagnostics.ΠWorkspace
     Π_out::P                      # reused Π_ℓ(x) output buffer (N-D: Matrix in 2D, Array{,3} in 3D)
     diagnostics::D                # nothing, or (τ_arr, S_arr) reused diagnostic buffers
