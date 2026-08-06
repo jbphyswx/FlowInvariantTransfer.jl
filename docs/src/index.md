@@ -45,14 +45,14 @@ using Pkg
 Pkg.add("FlowInvariantTransfer")
 ```
 
-The core is dependency-free ([`DirectSumBackend`](@ref)); load `FFTW` for the `O(N log N)`
-[`FFTBackend`](@ref) and other packages for optional features.
+The core is dependency-free ([`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend)); load `FFTW` for the `O(N log N)`
+[`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend) and other packages for optional features.
 
 ## Backends
 
-Two orthogonal axes: **spectral** (transform: [`DirectSumBackend`](@ref), [`FFTBackend`](@ref), …)
-× **execution** (parallelism: [`SerialBackend`](@ref), [`ThreadedBackend`](@ref),
-[`DistributedBackend`](@ref), [`GPUBackend`](@ref)).
+Two orthogonal axes: **spectral** (transform: [`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend), [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend), …)
+× **execution** (parallelism: [`SerialBackend`](@ref ComputationalBackends.SerialBackend), [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend),
+[`DistributedBackend`](@ref ComputationalBackends.DistributedBackend), [`GPUBackend`](@ref ComputationalBackends.GPUBackend)).
 
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
@@ -80,7 +80,7 @@ ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
 
 result = calculate_spectral_flux(û, ks;
     binning  = LinearBinning(2π / L),
-    spectral = FFTBackend())
+    spectral = FFTSpectralBackend())
 
 result.k_shells           # shell-centre wavenumbers
 result.transfer_spectrum  # T(k)
@@ -91,15 +91,15 @@ result.flux               # Π(K) — >0 forward, <0 inverse
 
 ```julia
 r = calculate_shell_to_shell_transfer(û, ks;
-    binning = LinearBinning(2π / L), spectral = FFTBackend())
+    binning = LinearBinning(2π / L), spectral = FFTSpectralBackend())
 r.transfer_matrix          # T(n,m)
 r.max_antisymmetry_error   # ≈ 0 for incompressible fields
 ```
 
-## Quickstart: mode-to-mode (resolved triads)
+## Quickstart: scale-to-scale (resolved triads)
 
 ```julia
-m = calculate_mode_to_mode_transfer(û, ks; spectral = FFTBackend())  # O(N^{2D}); small grids
+m = calculate_mode_to_mode_transfer(û, ks; spectral = FFTSpectralBackend())  # O(N^{2D}); small grids
 m.net_transfer  # T(k) = Σ_p S(k|p)
 m.transfer      # resolved S(k|p)
 ```
@@ -108,7 +108,7 @@ m.transfer      # resolved S(k|p)
 
 ```julia
 θ̂ = randn(ComplexF64, N, N)
-sf = calculate_scalar_flux(û, θ̂, ks; binning = LinearBinning(2π/L), spectral = FFTBackend())
+sf = calculate_scalar_flux(û, θ̂, ks; binning = LinearBinning(2π/L), spectral = FFTSpectralBackend())
 sf.flux        # Π_θ(K) — forward variance cascade
 ```
 
@@ -116,11 +116,11 @@ sf.flux        # Π_θ(K) — forward variance cascade
 
 ```julia
 # directional flux Π(k⊥)
-Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTBackend(),
+Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTSpectralBackend(),
                                 geometry=PerpendicularShells())
 
 # helical 8-channel partial fluxes
-hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTBackend())
+hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTSpectralBackend())
 hp.channels[(1,1,1)]  # homochiral (+++)
 hp.total              # == full KE flux
 ```
@@ -128,7 +128,7 @@ hp.total              # == full KE flux
 ## Quickstart: exact 3/2 dealiasing
 
 ```julia
-calculate_spectral_flux(û, ks; binning=b, spectral=FFTBackend(), dealiasing=PaddedThreeHalves())
+calculate_spectral_flux(û, ks; binning=b, spectral=FFTSpectralBackend(), dealiasing=PaddedThreeHalves())
 ```
 
 ## Quickstart: Triadic Orthogonal Decomposition
@@ -137,7 +137,7 @@ calculate_spectral_flux(û, ks; binning=b, spectral=FFTBackend(), dealiasing=Pad
 using FlowInvariantTransfer, FFTW
 X = randn(256, 1, 32)                      # (nt, nvar, nx)
 method = TriadicOrthogonalDecompositionMethod(nfft=64, noverlap=32, nmode=2)
-result = calculate_energy_transfer(method, X; dt=0.01, spectral=FFTBackend())
+result = calculate_energy_transfer(method, X; dt=0.01, spectral=FFTSpectralBackend())
 result.frequencies; result.mode_bispectrum; result.modes; result.modal_energy_budget
 ```
 
@@ -145,7 +145,7 @@ result.frequencies; result.mode_bispectrum; result.modes; result.modal_energy_bu
 
 ```julia
 ws = ShellToShellWorkspace(û, ks, LinearBinning(2π / L))
-calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral = FFTBackend())  # 0 allocs
+calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral = FFTSpectralBackend())  # 0 allocs
 ```
 
 ---

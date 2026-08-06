@@ -72,7 +72,7 @@ Verified from arXiv:0909.2386 (HTML):
 
 ### MHD invariants & gauge — [CHOSEN: Plunian–Stepanov–Verma 2020]
 Verified from arXiv:2004.10107 (HTML):
-- KE mode-to-mode is **gauge-dependent** — **Eq. (53):**
+- KE scale-to-scale is **gauge-dependent** — **Eq. (53):**
   `ΔE^u(k|p|q)=α^u_E Re{(u_k,u_p,ω_q)+(u_k,ω_p,u_q)+(ω_k,u_p,u_q)}`, `α` arbitrary (DVE = 0).
   → only combined/shell/flux sums are physical (matches the helicity-gauge note above).
 - **Eq. (16):** `E^u_k=½u_k·u*_k`, `E^b_k=½b_k·b*_k`; **Eq. (28):** magnetic helicity `H^b_k=½b_k·a*_k`.
@@ -94,7 +94,7 @@ Verified from arXiv:2411.12057 (HTML; re-confirm vs final JFM 1031:A34):
 - Welch blocks (Eqs. 14–17), `S_{l,n}=(1/N_blk)Ĉ_{l→n}Û_n^H` (Eq. 17), W-weighted SVD with
   `Φ̂_n^H W Φ̂_n = I` (Eq. 18). Triad: `f_{n−l}+f_l=f_n`.
 
-### Compressible mode-to-mode — [CHOSEN: Singh–Tiwari–Sharma–Verma 2025]
+### Compressible scale-to-scale — [CHOSEN: Singh–Tiwari–Sharma–Verma 2025]
 Verified from arXiv:2508.04300 (HTML):
 - KE (Framework A, **Eqs. 14,15,19**): `v=ρu`, `E_u(k)=½Re[v(k)·u*(k)]`. Framework B
   (**App. B, Eqs. 91,98**): `w=√ρ u`, `E_u=½|w|²`. **[CHOSEN: A for transfer; B available for 4/5-law.]**
@@ -307,7 +307,7 @@ Frequency-domain modal decomposition of triadic nonlinear interactions via the m
 
 - Kolmogorov (1941); Kraichnan (1967, 1971); Batchelor (1969) — cascade phenomenology.
 - Domaradzki & Rogallo (1990) — shell-to-shell transfer.
-- Dar, Verma & Eswaran (2001) — mode-to-mode formalism.
+- Dar, Verma & Eswaran (2001) — scale-to-scale formalism.
 - Verma (2004, Phys. Rep.; 2019 book) — energy transfer review.
 - Alexakis, Mininni & Pouquet (2005) — shell-to-shell, large-scale imprint.
 - Eyink & Aluie (2009, arXiv:0909.2386) I; Aluie & Eyink (2009) II — smooth vs sharp coarse-graining, band-pass.

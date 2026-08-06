@@ -65,7 +65,7 @@ The net energy gain of shell n is ``\sum_m T(n,m)``.
 
 ## Mode-to-Mode Triad Transfer S(k|p)
 
-The mode-to-mode transfer is the **finest** scale-to-scale object: the rate at which the invariant
+The scale-to-scale transfer is the **finest** scale-to-scale object: the rate at which the invariant
 is delivered *to* receiver mode ``\mathbf{k}`` *from* giver mode ``\mathbf{p}`` (mediated by
 ``\mathbf{q}=\mathbf{k}-\mathbf{p}``). It is built directly from the validated pseudospectral
 nonlinear term — for each giver mode ``\mathbf{p}``, ``\hat{N}_{\mathbf p}=\widehat{(u\cdot\nabla)u_{\mathbf p}}``
@@ -101,8 +101,8 @@ T(k), Π(K) spectral flux
 ### Computational Cost
 
 Resolving every receiver/giver pair is ``O(N_\text{modes})`` nonlinear-term evaluations —
-``O(N_\text{modes}\,N^D\log N)`` with `FFTBackend` and an ``O(N_\text{modes}^2)`` result tensor; a
-mode-count guard errors above `max_modes` (pass `force=true` to override). For the aggregates prefer
+``O(N_\text{modes}\,N^D\log N)`` with `FFTSpectralBackend` and an ``O(N_\text{modes}^2)`` result tensor; a
+mode-count guard errors above `max_scales` (pass `force=true` to override). For the aggregates prefer
 the cheaper `calculate_spectral_flux` / `calculate_shell_to_shell_transfer`.
 
 **References:** Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book); Alexakis & Biferale (2018).
@@ -214,7 +214,7 @@ computed pseudospectrally.
 
 **SerialBackend (reference):** Direct O(N²) DFT/IDFT summation.  Exact but slow.
 
-**FFTBackend (production):** O(N log N) via FFTW:
+**FFTSpectralBackend (production):** O(N log N) via FFTW:
 1. ``u_i(x) = \text{IFFT}(\hat{u}_i)``
 2. ``\partial_j u_i(x) = \text{IFFT}(i k_j \hat{u}_i)``
 3. ``N_i(x) = \sum_j u_j(x)\,\partial_j u_i(x)``

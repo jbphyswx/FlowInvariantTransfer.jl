@@ -31,7 +31,7 @@ FlowInvariantTransfer (top-level)
 ├── SpectralFlux       # Π(K) and T(k) accumulation
 ├── CoarseGrainingFlux # Wrapper for CoarseGrainingEnergyFluxes.jl
 ├── ShellToShellTransfer    # T(n,m) matrix computation
-├── ScaleToScaleTransfer    # S(k|p|q) triad computation
+├── ModeToModeTransfer    # S(k|p|q) triad computation
 └── TriadicOrthogonalDecomposition  # TOD (frequency-domain SVD)
 ```
 
@@ -105,14 +105,14 @@ AbstractFieldDecomposition (abstract)
 ```
 AbstractExecutionBackend (abstract)
 ├── SerialBackend           # Reference O(N²) implementation
-├── FFTBackend              # O(N log N) via FFTW
+├── FFTSpectralBackend              # O(N log N) via FFTW
 ├── ThreadedBackend         # OhMyThreads parallelism
 ├── DistributedBackend      # Distributed.jl + SharedArrays
 ├── GPUBackend{B}           # KernelAbstractions (parametric on device)
 ├── AutoBackend             # Auto-detect best available
-├── NUFFTBackend            # Non-uniform FFT (FINUFFT)
-├── SHTBackend              # Regular spherical harmonics (FSH)
-└── NUFSHTBackend           # Scattered spherical harmonics (NUFSHT)
+├── NUFFTSpectralBackend            # Non-uniform FFT (FINUFFT)
+├── FSHTSpectralBackend              # Regular spherical harmonics (FSH)
+└── NUFSHTSpectralBackend           # Scattered spherical harmonics (NUFSHT)
 ```
 
 ### Shell Binning
@@ -256,7 +256,7 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
 | `src/SpectralFlux.jl` | Spectral flux Π(K) and transfer spectrum T(k) |
 | `src/CoarseGrainingFlux.jl` | Wrapper stub for CGEF extension |
 | `src/ShellToShell/ShellToShellTransfer.jl` | Shell-to-shell T(n,m) — Serial core |
-| `src/ScaleToScale/ScaleToScaleTransfer.jl` | Mode-to-mode S(k\|p\|q) — Serial core |
+| `src/ScaleToScale/ModeToModeTransfer.jl` | Mode-to-mode S(k\|p\|q) — Serial core |
 | `src/ScaleToScale/TriadicOrthogonalDecomposition/` | TOD implementation |
 
 ### Extension Files
@@ -264,8 +264,8 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
 | File | Trigger | Overrides |
 |------|---------|-----------|
 | `ext/FlowInvariantTransferFFTWExt.jl` | FFTW | FFT-based nonlinear term, spectral flux, shell-to-shell |
-| `ext/FlowInvariantTransferOhMyThreadsExt.jl` | OhMyThreads | Threaded shell-to-shell and mode-to-mode |
-| `ext/FlowInvariantTransferDistributedExt.jl` | Distributed+SharedArrays | Distributed shell-to-shell and mode-to-mode |
+| `ext/FlowInvariantTransferOhMyThreadsExt.jl` | OhMyThreads | Threaded shell-to-shell and scale-to-scale |
+| `ext/FlowInvariantTransferDistributedExt.jl` | Distributed+SharedArrays | Distributed shell-to-shell and scale-to-scale |
 | `ext/FlowInvariantTransferKernelAbstractionsExt.jl` | KernelAbstractions | GPU kernels for all transfer densities and triads |
 | `ext/FlowInvariantTransferCGEFExt.jl` | CoarseGrainingEnergyFluxes | Coarse-graining flux computation |
 | `ext/FlowInvariantTransferHelmholtzDecompositionExt.jl` | HelmholtzDecomposition | Physical and spectral Helmholtz decomposition |

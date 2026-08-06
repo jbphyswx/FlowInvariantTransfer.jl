@@ -85,15 +85,15 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
     # FIT expects (N,N,N,3) velocity array or we use the 2D interface on slices.
     # For simplicity: use the built-in FIT 3D wavenumber grid + shell-to-shell.
     ks3 = FIT.Utils.wavenumber_grid((N, N, N), (L, L, L))
-    b   = FIT.LinearBinning(2π/L)   # unit shells
+    b   = FIT.Types.LinearBinning(2π/L)   # unit shells
 
     function compute_diagnostics(uh, vh, wh)
         # Pack into (N,N,N,3) array expected by FIT
         û3 = zeros(ComplexF64, N, N, N, 3)
         û3[:,:,:,1] .= uh; û3[:,:,:,2] .= vh; û3[:,:,:,3] .= wh
-        s2s = FIT.calculate_shell_to_shell_transfer(û3, ks3;
-            binning=b, dealiasing=true, verify_antisymmetry=false,
-            spectral=FIT.FFTBackend())
+        s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û3, ks3;
+            binning=b, dealiasing=FIT.Types.OrszagTwoThirds(), verify_antisymmetry=false,
+            spectral=FIT.SpectralBackends.FFTSpectralBackend())
         return s2s.transfer_matrix, s2s.net_transfer
     end
 

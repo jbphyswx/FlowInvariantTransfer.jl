@@ -111,72 +111,72 @@ FlowInvariantTransfer.Decomposition.helmholtz_project_spectral!
 ## Method Types
 
 ```@docs
-AbstractEnergyTransferMethod
-SpectralFluxMethod
-ShellToShellTransferMethod
-ModeToModeTransferMethod
-CoarseGrainingFluxMethod
-TriadicOrthogonalDecompositionMethod
-SphericalTransferMethod
-DivergentSphericalTransferMethod
+FlowInvariantTransfer.Types.AbstractEnergyTransferMethod
+FlowInvariantTransfer.Types.SpectralFluxMethod
+FlowInvariantTransfer.Types.ShellToShellTransferMethod
+FlowInvariantTransfer.Types.ModeToModeTransferMethod
+FlowInvariantTransfer.Types.CoarseGrainingFluxMethod
+FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionMethod
+FlowInvariantTransfer.Types.SphericalTransferMethod
+FlowInvariantTransfer.Types.DivergentSphericalTransferMethod
 ```
 
 ## Invariant Types
 
 ```@docs
-AbstractInvariant
-KineticEnergy
-Helicity
-Enstrophy
-PassiveScalar
+FlowInvariantTransfer.Types.AbstractInvariant
+FlowInvariantTransfer.Types.KineticEnergy
+FlowInvariantTransfer.Types.Helicity
+FlowInvariantTransfer.Types.Enstrophy
+FlowInvariantTransfer.Types.PassiveScalar
 ```
 
 ## Decomposition Types
 
 ```@docs
-AbstractFieldDecomposition
-NoDecomposition
-HelmholtzDecomposition
-RotationalDecomposition
-DivergentDecomposition
-HelicalDecomposition
-ToroidalPoloidalDecomposition
+FlowInvariantTransfer.Types.AbstractFieldDecomposition
+FlowInvariantTransfer.Types.NoDecomposition
+FlowInvariantTransfer.Types.HelmholtzDecomposition
+FlowInvariantTransfer.Types.RotationalDecomposition
+FlowInvariantTransfer.Types.DivergentDecomposition
+FlowInvariantTransfer.Types.HelicalDecomposition
+FlowInvariantTransfer.Types.ToroidalPoloidalDecomposition
 ```
 
 ## Dealiasing Strategies
 
 ```@docs
-AbstractDealiasing
-NoDealiasing
-OrszagTwoThirds
-PaddedThreeHalves
+FlowInvariantTransfer.Types.AbstractDealiasing
+FlowInvariantTransfer.Types.NoDealiasing
+FlowInvariantTransfer.Types.OrszagTwoThirds
+FlowInvariantTransfer.Types.PaddedThreeHalves
 ```
 
 ## Result Types
 
 ```@docs
-SpectralFluxResult
-CompressibleFluxResult
-ShellToShellResult
-ModeToModeTriadResult
-CoarseGrainingFluxResult
-CoarseGrainingFluxResultWithDiagnostics
-TriadicOrthogonalDecompositionResult
-SphericalTransferResult
-DivergentSphericalTransferResult
+FlowInvariantTransfer.Types.SpectralFluxResult
+FlowInvariantTransfer.Types.CompressibleFluxResult
+FlowInvariantTransfer.Types.ShellToShellResult
+FlowInvariantTransfer.Types.ModeToModeTriadResult
+FlowInvariantTransfer.Types.CoarseGrainingFluxResult
+FlowInvariantTransfer.Types.CoarseGrainingFluxResultWithDiagnostics
+FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionResult
+FlowInvariantTransfer.Types.SphericalTransferResult
+FlowInvariantTransfer.Types.DivergentSphericalTransferResult
 ```
 
 ## Workspace Types
 
 ```@docs
-NonlinearTermWorkspace
-SpectralFluxWorkspace
-ShellToShellWorkspace
-CompressibleWorkspace
-SphericalTransferWorkspace
-ScatteredSphericalTransferWorkspace
-DivergentSphericalTransferWorkspace
-ScatteredDivergentSphericalTransferWorkspace
+FlowInvariantTransfer.Workspaces.NonlinearTermWorkspace
+FlowInvariantTransfer.Workspaces.SpectralFluxWorkspace
+FlowInvariantTransfer.Workspaces.ShellToShellWorkspace
+FlowInvariantTransfer.Compressible.CompressibleWorkspace
+FlowInvariantTransfer.Spherical.SphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.ScatteredSphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.DivergentSphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
 ```
 
 ## Wavenumber Utilities
@@ -201,57 +201,49 @@ FlowInvariantTransfer.ShellBinning.shell_coordinate
 ## Binning Types
 
 ```@docs
-AbstractShellBinning
-LinearBinning
-LogarithmicBinning
-DyadicBinning
-CustomBinning
-SmoothBands
+FlowInvariantTransfer.Types.AbstractShellBinning
+FlowInvariantTransfer.Types.LinearBinning
+FlowInvariantTransfer.Types.LogarithmicBinning
+FlowInvariantTransfer.Types.DyadicBinning
+FlowInvariantTransfer.Types.CustomBinning
+FlowInvariantTransfer.Types.SmoothBands
 ```
 
 ## Shell Geometry
 
 ```@docs
-AbstractShellGeometry
-ShellMagnitude
-IsotropicShells
-PerpendicularShells
-ParallelShells
+FlowInvariantTransfer.Types.AbstractShellGeometry
+FlowInvariantTransfer.Types.ShellMagnitude
+FlowInvariantTransfer.Types.IsotropicShells
+FlowInvariantTransfer.Types.PerpendicularShells
+FlowInvariantTransfer.Types.ParallelShells
 ```
 
 ## Spectral (Transform) Backends
 
-```@docs
-AbstractSpectralBackend
-DirectSumBackend
-FFTBackend
-NUFFTBackend
-SHTBackend
-NUFSHTBackend
-```
+The transform-algorithm tags are provided by the shared
+[`SpectralBackends`](https://github.com/jbphyswx/SpectralBackends.jl) package (documented there). FIT
+selects the transform by the tag's geometry; the concrete types are `SpectralBackends.DirectSumSpectralBackend`,
+`SpectralBackends.FFTSpectralBackend`, `SpectralBackends.NUFFTSpectralBackend`,
+`SpectralBackends.FSHTSpectralBackend`, and `SpectralBackends.NUFSHTSpectralBackend` (short aliases of the
+canonical `FastFourierTransformSpectralBackend` etc.), all `<: SpectralBackends.AbstractSpectralBackend`.
 
 ## Execution (Parallelism) Backends
 
-```@docs
-FlowInvariantTransfer.Backends.AbstractExecutionBackend
-SerialBackend
-ThreadedBackend
-DistributedBackend
-MPIBackend
-GPUBackend
-AutoBackend
-local_backend
-is_distributed
-resolve_execution
-```
+The execution tags are provided by the shared
+[`ComputationalBackends`](https://github.com/jbphyswx/ComputationalBackends.jl) package (documented
+there): `ComputationalBackends.SerialBackend`, `ThreadedBackend`, `DistributedBackend`, `MPIBackend`,
+`GPUBackend`, and `AutoBackend`, all `<: ComputationalBackends.AbstractExecutionBackend`. FIT resolves
+`ComputationalBackends.AutoBackend` through its own `FlowInvariantTransfer.Types.resolve_execution`
+(threaded when the OhMyThreads extension is loaded and `Threads.nthreads() > 1`, else serial).
 
 ## Filters
 
 ```@docs
-AbstractFilter
-SharpSpectralFilter
-GaussianFilter
-TopHatFilter
+FlowInvariantTransfer.Types.AbstractFilter
+FlowInvariantTransfer.Types.SharpSpectralFilter
+FlowInvariantTransfer.Types.GaussianFilter
+FlowInvariantTransfer.Types.TopHatFilter
 FlowInvariantTransfer.Filters.filter_response
 FlowInvariantTransfer.Filters.apply_filter_spectral
 FlowInvariantTransfer.Filters.apply_filter_spectral!

@@ -8,7 +8,7 @@
 `FlowInvariantTransfer.jl` is a **general, domain-agnostic** toolkit for how quadratic inviscid
 invariants move across scales in turbulence. At its core is one validated pseudospectral nonlinear
 term `(u·∇)f` — the advection of *any* field `f` by *any* velocity `u` — wrapped in generic
-reduction machinery (spectral flux → shell-to-shell → mode-to-mode → band-to-band), generic field
+reduction machinery (spectral flux → shell-to-shell → scale-to-scale → band-to-band), generic field
 decompositions, anisotropic shell geometry, and a choice of exact dealiasing. It knows nothing
 about a particular physical system, so it applies equally to homogeneous turbulence, atmosphere/
 ocean flows, passive tracers, or abstract fields — and domain models (e.g. MHD) build *on top* of
@@ -75,8 +75,8 @@ using Pkg
 Pkg.add("FlowInvariantTransfer")
 ```
 
-The core is pure Julia (a dependency-free `DirectSumBackend` reference). Load `FFTW` for the
-`O(N log N)` `FFTBackend` workhorse, and other packages to activate optional features (see below).
+The core is pure Julia (a dependency-free `DirectSumSpectralBackend` reference). Load `FFTW` for the
+`O(N log N)` `FFTSpectralBackend` workhorse, and other packages to activate optional features (see below).
 
 ---
 
@@ -91,7 +91,7 @@ ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
 
 result = calculate_spectral_flux(û, ks;
     binning  = LinearBinning(2π / L),
-    spectral = FFTBackend())               # transform backend (DirectSumBackend default)
+    spectral = FFTSpectralBackend())               # transform backend (DirectSumSpectralBackend default)
 
 result.k_shells           # shell-centre wavenumbers
 result.transfer_spectrum  # T(k)
@@ -100,12 +100,12 @@ result.flux               # Π(K) — >0 forward cascade, <0 inverse
 
 `spectral`/`execution` are the two orthogonal backend axes — e.g.
 `execution = ThreadedBackend()` (load `OhMyThreads`) parallelizes the shell/mode loop while
-`spectral = FFTBackend()` chooses the transform.
+`spectral = FFTSpectralBackend()` chooses the transform.
 
 ## Shell-to-shell
 
 ```julia
-r = calculate_shell_to_shell_transfer(û, ks; binning=LinearBinning(2π/L), spectral=FFTBackend())
+r = calculate_shell_to_shell_transfer(û, ks; binning=LinearBinning(2π/L), spectral=FFTSpectralBackend())
 r.transfer_matrix          # T(n,m)
 r.max_antisymmetry_error   # ≈ 0 for incompressible fields
 ```
@@ -113,7 +113,7 @@ r.max_antisymmetry_error   # ≈ 0 for incompressible fields
 ## Mode-to-mode (resolved triads)
 
 ```julia
-m = calculate_mode_to_mode_transfer(û, ks; spectral=FFTBackend())  # small grids: O(N^{2D})
+m = calculate_mode_to_mode_transfer(û, ks; spectral=FFTSpectralBackend())  # small grids: O(N^{2D})
 m.net_transfer  # T(k) = Σ_p S(k|p)   (== the spectral transfer)
 m.transfer      # S(k|p) — antisymmetric; shell-sums to T(n,m)
 ```
@@ -122,21 +122,21 @@ m.transfer      # S(k|p) — antisymmetric; shell-sums to T(n,m)
 
 ```julia
 θ̂ = randn(ComplexF64, N, N)                # a scalar field (ns...) or (ns...,1)
-sf = calculate_scalar_flux(û, θ̂, ks; binning=LinearBinning(2π/L), spectral=FFTBackend())
+sf = calculate_scalar_flux(û, θ̂, ks; binning=LinearBinning(2π/L), spectral=FFTSpectralBackend())
 sf.flux        # Π_θ(K) — forward variance cascade; conserves (Σ T_θ ≈ 0)
 ```
 
 ## Anisotropic directional flux
 
 ```julia
-Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTBackend(),
+Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTSpectralBackend(),
                                 geometry=PerpendicularShells())   # Π(k⊥)
 ```
 
 ## Helical partial fluxes (3D)
 
 ```julia
-hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTBackend())
+hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTSpectralBackend())
 hp.channels[(1,  1,  1)]   # homochiral (+++): inverse-cascade tendency
 hp.channels[(1, -1,  1)]   # a heterochiral channel: forward
 hp.total                   # Σ of the 8 channels == the full KE flux
@@ -145,7 +145,7 @@ hp.total                   # Σ of the 8 channels == the full KE flux
 ## Exact 3/2 dealiasing
 
 ```julia
-calculate_spectral_flux(û, ks; binning=b, spectral=FFTBackend(),
+calculate_spectral_flux(û, ks; binning=b, spectral=FFTSpectralBackend(),
                         dealiasing=PaddedThreeHalves())   # exact to Nyquist
 ```
 
@@ -153,7 +153,7 @@ calculate_spectral_flux(û, ks; binning=b, spectral=FFTBackend(),
 
 ```julia
 ws = ShellToShellWorkspace(û, ks, LinearBinning(2π/L))
-calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral=FFTBackend())  # 0 allocs
+calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral=FFTSpectralBackend())  # 0 allocs
 ```
 
 ---
@@ -185,7 +185,7 @@ and the low-shell-gain / high-shell-loss net transfer are the cascade resolved s
 ![Shell-to-shell transfer](docs/src/assets/shell_to_shell.png)
 
 **Mode-to-mode `S(k|p)` reduces to shell-to-shell `T(n,m)` (2D turbulence).** The resolved
-mode-to-mode tensor summed over shells (left) reproduces the directly-computed `T(n,m)` (right) —
+scale-to-scale tensor summed over shells (left) reproduces the directly-computed `T(n,m)` (right) —
 the reduction hierarchy, validated visually.
 
 ![Mode-to-mode reduces to shell-to-shell](docs/src/assets/mode_to_mode.png)
@@ -232,8 +232,8 @@ from t=0 to t=10 — the forward cascade building in time.
 
 Two orthogonal axes that compose:
 
-- **Spectral (transform):** `DirectSumBackend` (no deps) · `FFTBackend` (FFTW) · `NUFFTBackend`
-  (FINUFFT) · `SHTBackend`/`NUFSHTBackend` (spherical).
+- **Spectral (transform):** `DirectSumSpectralBackend` (no deps) · `FFTSpectralBackend` (FFTW) · `NUFFTSpectralBackend`
+  (FINUFFT) · `FSHTSpectralBackend`/`NUFSHTSpectralBackend` (spherical).
 - **Execution (parallelism):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
   `DistributedBackend` · `GPUBackend{B}` (KernelAbstractions).
 
