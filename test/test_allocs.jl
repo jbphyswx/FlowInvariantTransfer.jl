@@ -247,9 +247,10 @@ Test.@testset "Allocations" begin
     # -----------------------------------------------------------------------
     # Workspace-reuse for the plan-owning extension methods (CGEF / FINUFFT / FSH / NUFSHT / TOD): the `!`
     # form reuses its plans + buffers, so a repeat call allocates far less than a fresh call that rebuilds
-    # the workspace. CGEF prebuilds all of its plans and is genuinely 0-alloc on reuse; the others hold a
-    # ratio (not zero) because each wraps an external transform that allocates internally. (Previously
-    # scattered inline in the extension correctness testsets in runtests.jl; consolidated here.)
+    # the workspace. With a serial backend CGEF prebuilds every plan and reuse is exactly 0-alloc; the
+    # others — and CGEF's own threaded path, whose parallel sweeps carry an OhMyThreads task-spawn floor —
+    # hold a ratio (not zero) because each wraps an external transform or task spawn that allocates
+    # internally. (Previously scattered inline in the extension correctness testsets in runtests.jl.)
     Test.@testset "reuse ratio — plan-owning extension methods" begin
         Random.seed!(7)
 
@@ -259,12 +260,20 @@ Test.@testset "Allocations" begin
             u  = [sin(xs[i]) * cos(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             v  = [-cos(xs[i]) * sin(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             filt = FIT.Types.GaussianFilter(); ℓ = 0.5
-            ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt)
-            a_reuse, a_fresh = _reuse_cgef(ws, u, v, ℓ, filt, xs, ys)
-            # The config-fixed workspace prebuilds all three CGEF plans (ΠWorkspace + filter_plan +
-            # deriv_plan), so a repeat call allocates nothing — a deterministic, platform-portable guarantee.
-            Test.@test a_reuse == 0
+            # Serial backend: the workspace prebuilds all three CGEF plans (ΠWorkspace + filter_plan +
+            # deriv_plan), so a reused call allocates EXACTLY nothing. This is the plan-reuse contract —
+            # deterministic and independent of thread count / platform (unlike a threaded task-spawn floor).
+            ws_ser = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
+                (u, v), (xs, ys), ℓ, filt; backend = FIT.ComputationalBackends.SerialBackend())
+            a_reuse_ser, a_fresh = _reuse_cgef(ws_ser, u, v, ℓ, filt, xs, ys)
+            Test.@test a_reuse_ser == 0
             Test.@test a_fresh > 0
+            # Default (AutoBackend) workspace: under multithreading the parallel filter/derivative sweeps
+            # carry an OhMyThreads task-spawn floor, so reuse is not strictly zero there — but complete plan
+            # reuse still keeps it far below a fresh (plan-rebuilding) call. Guards a plan-reuse regression.
+            ws_auto = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt)
+            a_reuse_auto, _ = _reuse_cgef(ws_auto, u, v, ℓ, filt, xs, ys)
+            Test.@test a_reuse_auto < a_fresh ÷ 4
         end
 
         Test.@testset "nufft_coarse_graining (FINUFFT, scattered)" begin
