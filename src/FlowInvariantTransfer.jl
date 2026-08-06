@@ -29,7 +29,6 @@ include("Spherical/SphericalTransfer.jl")
 # `ComputationalBackends.resolve_backend`, which would be type piracy) — see Types.jl.
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Public surface. Re-import the public names so `FlowInvariantTransfer.foo` resolves, but `export`
 # ONLY the entry-point functions — a bare `using FlowInvariantTransfer` brings in the verbs
 # (`calculate_*`, `triadic_orthogonal_decomposition`, `to_spectral`), never the method/binning/
