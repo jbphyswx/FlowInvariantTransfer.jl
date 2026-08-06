@@ -35,12 +35,12 @@ function shell_flux(density, ks, binning)
 end
 
 # Re{ carrier*(k)·N(k) } via the package's transfer_density (kinetic-energy form = the dot product).
-redot(carrier, N, ks) = FIT.Invariants.transfer_density(FIT.KineticEnergy(), carrier, N, ks)
+redot(carrier, N, ks) = FIT.Invariants.transfer_density(FIT.Types.KineticEnergy(), carrier, N, ks)
 
 function run_mhd_on_top_example(; N=128)
     println("--- MHD built on FlowInvariantTransfer primitives (2D Orszag–Tang) ---")
     û, b̂, ks, L = evolve_orszag_tang(; N=N)
-    da, sp = FIT.OrszagTwoThirds(), FIT.FFTBackend()
+    da, sp = FIT.Types.OrszagTwoThirds(), FIT.SpectralBackends.FFTSpectralBackend()
 
     # --- the four advection terms, all from the GENERAL nonlinear-term engine -------------------
     N_uu = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)u
@@ -51,7 +51,7 @@ function run_mhd_on_top_example(; N=128)
     # MHD energy budget (the sign bookkeeping IS the MHD equations — domain code, lives here):
     t_KE = redot(û, N_uu, ks) .- redot(û, N_bb, ks)   # kinetic: advection − Lorentz work
     t_ME = redot(b̂, N_ub, ks) .- redot(b̂, N_bu, ks)   # magnetic: induction
-    b = FIT.LinearBinning(2π / L)
+    b = FIT.Types.LinearBinning(2π / L)
     K, T_tot, Π_tot = shell_flux(t_KE .+ t_ME, ks, b)
     _, _,    Π_KE   = shell_flux(t_KE, ks, b)
     _, _,    Π_ME   = shell_flux(t_ME, ks, b)

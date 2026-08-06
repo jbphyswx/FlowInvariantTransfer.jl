@@ -18,10 +18,10 @@ include(joinpath(@__DIR__, "flows.jl"))
 function run_mode_to_mode_example(; N=24)
     println("--- Mode-to-Mode Triad Transfer Example (2D turbulence) ---")
     û, ks, L = evolve_2d_turbulence(; N=N)
-    b = FIT.LinearBinning(2π / L)
+    b = FIT.Types.LinearBinning(2π / L)
 
-    # Fully-resolved S(k|p): O(N^{2D}); FFTBackend keeps each per-giver term O(N^D log N).
-    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
+    # Fully-resolved S(k|p): O(N^{2D}); FFTSpectralBackend keeps each per-giver term O(N^D log N).
+    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
     S = m2m.transfer
 
     # Reduce S(k|p) over shells → T(K,Q).
@@ -36,8 +36,8 @@ function run_mode_to_mode_example(; N=24)
     end
 
     # Direct shell-to-shell T(n,m) for comparison.
-    s2s = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(),
-        verify_antisymmetry=false, spectral=FIT.FFTBackend())
+    s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
+        verify_antisymmetry=false, spectral=FIT.SpectralBackends.FFTSpectralBackend())
     Tdir = s2s.transfer_matrix
     println("max|reduce(S) − T_shell| / ‖T‖ = ",
             round(maximum(abs, TKQ .- Tdir) / sqrt(sum(abs2, Tdir)); sigdigits=3))

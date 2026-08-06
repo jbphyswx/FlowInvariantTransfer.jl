@@ -19,7 +19,7 @@ Covered, each reporting median time **and** allocations:
 - shell-to-shell `T(n,m)` — serial vs threaded
 - smooth band-to-band `T(K,Q)` — serial vs threaded
 - compressible momentum-weighted flux — serial vs threaded
-- resolved mode-to-mode `S(k|p)` — serial vs threaded (smallest grid only; `O(N^{2D})`)
+- resolved scale-to-scale `S(k|p)` — serial vs threaded (smallest grid only; `O(N^{2D})`)
 
 Built on `BenchmarkTools`. Absolute numbers are machine- and size-dependent, so none are quoted here —
 run the suite for your hardware. The one hardware-independent result is asymptotic: the `DirectSum → FFT`

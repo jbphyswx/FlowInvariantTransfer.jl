@@ -18,9 +18,9 @@ function run_shell_to_shell_example(; N=32)
     println("--- Shell-to-Shell Transfer Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FIT.LinearBinning(2π / L)
-    result = FIT.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(),
-        verify_antisymmetry=true, spectral=FIT.FFTBackend())
+    b = FIT.Types.LinearBinning(2π / L)
+    result = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
+        verify_antisymmetry=true, spectral=FIT.SpectralBackends.FFTSpectralBackend())
 
     Tn = sqrt(sum(abs2, result.transfer_matrix))
     println("Shells: ", length(result.shell_centers))

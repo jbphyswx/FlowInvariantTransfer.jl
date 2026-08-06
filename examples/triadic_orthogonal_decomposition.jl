@@ -15,7 +15,7 @@ Run from the repo root:
 """
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FFTW: FFTW          # loads the FFTW extension so spectral=FFTBackend() works
+using FFTW: FFTW          # loads the FFTW extension so spectral=FFTSpectralBackend() works
 using CairoMakie: CairoMakie
 using Random: Random
 
@@ -40,8 +40,8 @@ function run_tod_example(; nfft=100, nblocks=64, nx=64, dt=0.1, seed=42)
         end
     end
 
-    method = FIT.TriadicOrthogonalDecompositionMethod(nfft=nfft, noverlap=0, nmode=1)
-    result = FIT.calculate_energy_transfer(method, X; dt=dt, isreal_data=true, spectral=FIT.FFTBackend())
+    method = FIT.Types.TriadicOrthogonalDecompositionMethod(nfft=nfft, noverlap=0, nmode=1)
+    result = FIT.calculate_energy_transfer(method, X; dt=dt, isreal_data=true, spectral=FIT.SpectralBackends.FFTSpectralBackend())
 
     freqs = result.frequencies
     λ = copy(result.mode_bispectrum[:, :, 1]); λ[isnan.(λ)] .= 0.0

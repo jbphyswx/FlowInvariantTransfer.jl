@@ -18,10 +18,10 @@ function run_anisotropic_flux_example(; N=32)
     println("--- Anisotropic Directional Flux Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FIT.LinearBinning(2π / L)
-    iso  = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.IsotropicShells())
-    perp = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.PerpendicularShells())
-    par  = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(), geometry=FIT.ParallelShells())
+    b = FIT.Types.LinearBinning(2π / L)
+    iso  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.IsotropicShells())
+    perp = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.PerpendicularShells())
+    par  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.ParallelShells())
 
     println("peak Π(|k|)=", round(maximum(iso.flux); sigdigits=3),
             "  Π(k⊥)=", round(maximum(perp.flux); sigdigits=3),

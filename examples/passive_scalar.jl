@@ -20,10 +20,10 @@ function run_passive_scalar_example(; N=32)
     println("--- Passive-Scalar Variance Transfer Example (3D Taylor–Green vortex) ---")
     û, θ̂, ks, L = evolve_taylor_green(; N=N, with_scalar=true)
 
-    b = FIT.LinearBinning(2π / L)
-    flux = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
-    s2s  = FIT.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(),
-        verify_antisymmetry=true, spectral=FIT.FFTBackend())
+    b = FIT.Types.LinearBinning(2π / L)
+    flux = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    s2s  = FIT.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
+        verify_antisymmetry=true, spectral=FIT.SpectralBackends.FFTSpectralBackend())
 
     println("Peak variance flux Π_θ = ", round(maximum(flux.flux); sigdigits=4))
     println("antisymmetry of T_θ(n,m) = ",

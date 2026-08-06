@@ -19,10 +19,10 @@ function run_helical_flux_example(; N=32)
     println("--- Helicity-Resolved Energy Flux Example (3D Taylor–Green vortex) ---")
     û, ks, L = evolve_taylor_green(; N=N)
 
-    b = FIT.LinearBinning(2π / L)
-    total = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend())
-    hel   = FIT.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.OrszagTwoThirds(), spectral=FIT.FFTBackend(),
-        decomposition=FIT.HelicalDecomposition())
+    b = FIT.Types.LinearBinning(2π / L)
+    total = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    hel   = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(),
+        decomposition=FIT.Types.HelicalDecomposition())
 
     summed = hel.positive.flux .+ hel.negative.flux
     println("max|Π⁺+Π⁻ − Π| / max|Π| = ",
