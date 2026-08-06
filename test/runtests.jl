@@ -739,7 +739,7 @@ Test.@testset "CoarseGrainingFlux — spherical (lon–lat) Π_ℓ == CGEF direc
 end
 
 # -----------------------------------------------------------------------
-Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + plan cache" begin
+Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + workspace reuse" begin
     Random.seed!(7)
     N = 32; L = 2π
     xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs)
@@ -749,8 +749,8 @@ Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + plan cache" b
 
     # in-place matches the allocating path to machine precision (same computation)
     r0 = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
-    ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), filt)
-    r1 = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
+    ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt)
+    r1 = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v))
     Test.@test r1 isa FIT.Types.CoarseGrainingFluxResult
     Test.@test maximum(abs.(r0.flux_field .- r1.flux_field)) == 0.0
     Test.@test r0.mean_flux == r1.mean_flux
@@ -760,15 +760,17 @@ Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + plan cache" b
     r0d = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt; return_diagnostics = true)
     Test.@test r0d isa FIT.Types.CoarseGrainingFluxResultWithDiagnostics
     Test.@test size(r0d.stress_tensor) == (N, N, 2, 2)
-    wsd = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), filt; return_diagnostics = true)
-    r1d = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(wsd, (u, v), ℓ, filt)
+    wsd = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt; return_diagnostics = true)
+    r1d = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(wsd, (u, v))
     Test.@test maximum(abs.(r0d.stress_tensor .- r1d.stress_tensor)) == 0.0
     Test.@test maximum(abs.(r0d.strain_rate  .- r1d.strain_rate))  == 0.0
 
-    # Filter-scale sweep reusing one workspace matches per-call allocation (plan rebuilt per ℓ).
+    # Filter-scale sweep: the workspace is scale-specific (footprint fixed at construction), so build one
+    # per scale; the reused `!` matches the allocating path.
     for l in (0.3, 0.5, 0.8, 1.2)
         ra = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), l, filt)
-        rb = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v), l, filt)
+        wl = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), l, filt)
+        rb = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(wl, (u, v))
         Test.@test maximum(abs.(ra.flux_field .- rb.flux_field)) == 0.0
     end
 

@@ -23,10 +23,10 @@ function _cg_flux_cgef(args...; kwargs...)
 end
 
 """
-    _cg_flux_workspace(velocity_fields, coords_vecs, filter; kwargs...)
+    _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
 
-Build the reusable CGEF grid + `ΠWorkspace` + output buffer.
-Stub overridden by the CoarseGrainingEnergyFluxes extension.
+Build the reusable CGEF grid + `ΠWorkspace` + derivative/filter plans + output buffer for a fixed
+`(filter, scale, mask, backend)`. Stub overridden by the CoarseGrainingEnergyFluxes extension.
 """
 function _cg_flux_workspace(args...; kwargs...)
     throw(ArgumentError(
@@ -35,9 +35,10 @@ function _cg_flux_workspace(args...; kwargs...)
 end
 
 """
-    _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
+    _cg_flux_cgef!(ws, velocity_fields; kwargs...)
 
-In-place coarse-graining flux reusing `ws`. Stub overridden by the extension.
+In-place coarse-graining flux reusing `ws` (filter/scale/mask/backend fixed at construction).
+Stub overridden by the extension.
 """
 function _cg_flux_cgef!(args...; kwargs...)
     throw(ArgumentError(
@@ -50,38 +51,36 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    CoarseGrainingFluxWorkspace(velocity_fields, coords_vecs, filter;
-                                mask=nothing, return_diagnostics=false)
+    CoarseGrainingFluxWorkspace(velocity_fields, coords_vecs, ℓ, filter;
+                                mask=nothing, return_diagnostics=false, mask_strategy=…, backend=…)
 
-Preallocated, reusable resources for [`calculate_coarse_graining_flux!`](@ref): the
-CGEF `StructuredGrid`, its `ΠWorkspace` (filtered fields + stress/strain scratch), the
-`Π_ℓ(x)` output buffer, and — when `return_diagnostics=true` — the `τ̄`/`S̄` diagnostic
-buffers. Build once, then reuse across a whole filter-scale sweep `Π(ℓ)` or across
-snapshots on the same grid; the grid geometry (`coords_vecs`, `mask`) and array element
-type are fixed at construction.
+Preallocated, reusable resources for [`calculate_coarse_graining_flux!`](@ref), built for a **fixed**
+`(filter, scale ℓ, mask, backend)` configuration: the CGEF `StructuredGrid`, its `ΠWorkspace`
+(filtered fields + stress/strain scratch), the `Π_ℓ(x)` output buffer, the derivative `StencilPlan`,
+the filter plan, and — when `return_diagnostics=true` — the `τ̄`/`S̄` diagnostic buffers. Build once,
+then apply to snapshots on the same grid with `calculate_coarse_graining_flux!(ws, velocity_fields)`.
 
-The dominant per-call cost inside CGEF is the scale-dependent *filter footprint/plan*, not the
-scratch arrays. `filter_plan` caches the last-built plan so repeated snapshots at a fixed scale
-reuse it (the footprint is rebuilt only when the requested scale/kernel/mask changes — e.g. a
-`Π(ℓ)` sweep, where a new footprint is genuinely required). It is a deliberately type-erased
-cache slot (the plan's concrete type varies with kernel/method/backend and is touched once per
-call), so it is not a numeric-payload field; `Π_out`/`diagnostics` carry the real element type.
+All three CGEF plans (`ΠWorkspace`, `filter_plan`, `deriv_plan`) are prebuilt at construction, so a
+repeat call allocates **nothing** inside CGEF. Every field is concretely typed — no `Any` — so the
+struct carries no hardcoded CGEF types into the core package while staying type-stable in the hot
+path. The scale-dependent filter footprint is fixed here; a different scale/filter/mask/backend is a
+new workspace (the footprint has to be rebuilt per scale regardless).
 
-Requires `CoarseGrainingEnergyFluxes` to be loaded. The grid/workspace fields are typed
-via parameters so the struct carries no hardcoded CGEF types into the core package.
+Requires `CoarseGrainingEnergyFluxes` to be loaded.
 """
-struct CoarseGrainingFluxWorkspace{G, W, P, D}
+struct CoarseGrainingFluxWorkspace{G, W, P, D, DP, FP}
     grid::G                       # FlowGeometries.Grids.StructuredGrid (via the CGEF extension)
     cgef_workspace::W             # CGEF.Diagnostics.ΠWorkspace
     Π_out::P                      # reused Π_ℓ(x) output buffer (N-D: Matrix in 2D, Array{,3} in 3D)
     diagnostics::D                # nothing, or (τ_arr, S_arr) reused diagnostic buffers
-    filter_plan::Base.RefValue{Any}  # scale-keyed cache of the CGEF filter plan
+    deriv_plan::DP                # CGEF derivative StencilPlan (grid-only, scale-independent)
+    filter_plan::FP               # CGEF filter plan for the fixed (kernel, scale, mask, backend); carries .kernel / .scale
 end
 
 function CoarseGrainingFluxWorkspace(
-    velocity_fields::Tuple, coords_vecs::Tuple, filter::Types.AbstractFilter; kwargs...,
+    velocity_fields::Tuple, coords_vecs::Tuple, ℓ::Real, filter::Types.AbstractFilter; kwargs...,
 )
-    return _cg_flux_workspace(velocity_fields, coords_vecs, filter; kwargs...)
+    return _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
 end
 
 # ---------------------------------------------------------------------------
@@ -158,32 +157,29 @@ function _calculate_coarse_graining_flux_decomposed(
 end
 
 """
-    calculate_coarse_graining_flux!(ws::CoarseGrainingFluxWorkspace, velocity_fields, ℓ, filter;
-                                    kwargs...) -> CoarseGrainingFluxResult
+    calculate_coarse_graining_flux!(ws::CoarseGrainingFluxWorkspace, velocity_fields)
+        -> CoarseGrainingFluxResult
 
-In-place coarse-graining flux reusing the preallocated `ws` (its CGEF grid, `ΠWorkspace`,
-and `Π_out` buffer) — no per-call grid/workspace/output allocation. Intended for a
-filter-scale sweep `Π(ℓ)` or repeated snapshots on the same grid: build the workspace once
-with [`CoarseGrainingFluxWorkspace`](@ref), then call this per `(velocity_fields, ℓ)`.
+In-place coarse-graining flux reusing the preallocated `ws` — no allocation (its grid, `ΠWorkspace`,
+`Π_out`, and all three CGEF plans are prebuilt). The filter, scale, mask and backend are fixed at
+workspace construction, so this takes only the new `velocity_fields`: build the workspace once with
+[`CoarseGrainingFluxWorkspace`](@ref) and call this per snapshot on the same grid.
 
-The returned result wraps the reused `ws.Π_out` buffer (a subsequent call overwrites it);
-copy `result.flux` if the field must persist across calls. `return_diagnostics` is fixed at
-workspace-construction time. Only `NoDecomposition` is supported here — apply a
-decomposition upstream and pass the decomposed component fields if needed.
+The returned result wraps the reused `ws.Π_out` buffer (a subsequent call overwrites it); copy
+`result.flux` if the field must persist across calls. `return_diagnostics` is fixed at
+workspace-construction time. Only `NoDecomposition` is supported here — apply a decomposition
+upstream and pass the decomposed component fields if needed.
 
 Requires `CoarseGrainingEnergyFluxes` to be loaded.
 """
 function calculate_coarse_graining_flux!(
     ws::CoarseGrainingFluxWorkspace,
     velocity_fields::Tuple,
-    ℓ::Real,
-    filter::Types.AbstractFilter;
-    kwargs...,
 )
-    return _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)
+    return _cg_flux_cgef!(ws, velocity_fields)
 end
 
-# One-line show (the workspace caches a CGEF filter plan in `filter_plan` → default show can segfault).
+# One-line show (the workspace holds CGEF filter/derivative plans → default field-dump show can segfault).
 Base.show(io::IO, ::CoarseGrainingFluxWorkspace) = print(io, "CoarseGrainingFluxWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::CoarseGrainingFluxWorkspace) = show(io, w)
 

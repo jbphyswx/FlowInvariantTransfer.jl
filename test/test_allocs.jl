@@ -83,8 +83,8 @@ end
 # returns (a_reuse, a_fresh) with both paths warmed, args concretely typed inside the `@allocated`.
 function _reuse_cgef(ws, u, v, ℓ, filt, xs, ys)
     FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
-    FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
-    a_reuse = @allocated FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v), ℓ, filt)
+    FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v))
+    a_reuse = @allocated FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v))
     a_fresh = @allocated FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
     return (a_reuse, a_fresh)
 end
@@ -245,11 +245,11 @@ Test.@testset "Allocations" begin
     end
 
     # -----------------------------------------------------------------------
-    # Workspace-reuse ratio for the plan-owning extension methods (CGEF / FINUFFT / FSH / NUFSHT / TOD):
-    # the `!` form reuses its plans + buffers, so a repeat call allocates far less than a fresh call that
-    # rebuilds the workspace. These are the same contract as the 0-alloc `!` tests above, but a ratio
-    # (not zero) because each wraps an external transform that allocates internally. (Previously scattered
-    # inline in the extension correctness testsets in runtests.jl; consolidated here as the alloc contract.)
+    # Workspace-reuse for the plan-owning extension methods (CGEF / FINUFFT / FSH / NUFSHT / TOD): the `!`
+    # form reuses its plans + buffers, so a repeat call allocates far less than a fresh call that rebuilds
+    # the workspace. CGEF prebuilds all of its plans and is genuinely 0-alloc on reuse; the others hold a
+    # ratio (not zero) because each wraps an external transform that allocates internally. (Previously
+    # scattered inline in the extension correctness testsets in runtests.jl; consolidated here.)
     Test.@testset "reuse ratio — plan-owning extension methods" begin
         Random.seed!(7)
 
@@ -259,9 +259,12 @@ Test.@testset "Allocations" begin
             u  = [sin(xs[i]) * cos(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             v  = [-cos(xs[i]) * sin(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             filt = FIT.Types.GaussianFilter(); ℓ = 0.5
-            ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), filt)
+            ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt)
             a_reuse, a_fresh = _reuse_cgef(ws, u, v, ℓ, filt, xs, ys)
-            Test.@test a_reuse < a_fresh ÷ 20
+            # The config-fixed workspace prebuilds all three CGEF plans (ΠWorkspace + filter_plan +
+            # deriv_plan), so a repeat call allocates nothing — a deterministic, platform-portable guarantee.
+            Test.@test a_reuse == 0
+            Test.@test a_fresh > 0
         end
 
         Test.@testset "nufft_coarse_graining (FINUFFT, scattered)" begin
