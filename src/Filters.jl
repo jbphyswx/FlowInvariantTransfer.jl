@@ -1,6 +1,6 @@
 module Filters
 
-using ..Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
+using ..Types: Types
 
 export filter_response, apply_filter_spectral, apply_filter_spectral!
 
@@ -16,13 +16,13 @@ magnitude `k` and filter scale `ℓ`.
 
 The filter scale ℓ is defined so that the filter retains scales larger than ℓ.
 """
-filter_response(::SharpSpectralFilter, k::Real, ℓ::Real) =
+filter_response(::Types.SharpSpectralFilter, k::Real, ℓ::Real) =
     abs(k) < π / ℓ ? one(typeof(k)) : zero(typeof(k))
 
-filter_response(::GaussianFilter, k::Real, ℓ::Real) =
+filter_response(::Types.GaussianFilter, k::Real, ℓ::Real) =
     exp(-k^2 * ℓ^2 / 24)
 
-filter_response(::TopHatFilter, k::Real, ℓ::Real) =
+filter_response(::Types.TopHatFilter, k::Real, ℓ::Real) =
     sinc(k * ℓ / (2π))   # Julia sinc is normalised: sinc(x) = sin(πx)/(πx)
 
 # ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ function apply_filter_spectral!(
     û_out::AbstractArray,
     û_in::AbstractArray,
     k_mag::AbstractArray,
-    filter::AbstractFilter,
+    filter::Types.AbstractFilter,
     ℓ::Real,
 )
     size(û_out) == size(û_in) == size(k_mag) ||
@@ -67,7 +67,7 @@ Non-mutating version of `apply_filter_spectral!`.
 function apply_filter_spectral(
     û_in::AbstractArray,
     k_mag::AbstractArray,
-    filter::AbstractFilter,
+    filter::Types.AbstractFilter,
     ℓ::Real,
 )
     û_out = similar(û_in)

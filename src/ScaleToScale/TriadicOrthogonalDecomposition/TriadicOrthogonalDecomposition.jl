@@ -1,28 +1,9 @@
-#=
-
-    Triadic Orthogonal Decomposition
-
-    Yeung, B., Chu, T., and Schmidt, O. T.,
-    Triadic orthogonal decomposition reveals nonlinearity in fluid flows,
-    J. Fluid Mech. 1031, A34, 2026.
-    https://doi.org/10.1017/jfm.2026.11183
-
-    Reference implementations:
-        - MATLAB:
-            * https://www.mathworks.com/matlabcentral/fileexchange/183683-triadic-orthogonal-decomposition
-        - GitHub:
-            * https://github.com/FlowPhysicsGroup/Triadic-Orthogonal-Decomposition
-
-=#
-
-
 module TriadicOrthogonalDecomposition
 
 using LinearAlgebra: LinearAlgebra
-using ..Types: TriadicOrthogonalDecompositionMethod,
-               TriadicOrthogonalDecompositionResult,
-               AbstractSpectralBackend, DirectSumBackend, FFTBackend
-using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution, is_gpu_array
+using ..Types: Types
+using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
 
 export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!, TODWorkspace,
        hamming_window, hann_window, tukey_window
@@ -383,11 +364,11 @@ end
 # ---------------------------------------------------------------------------
 
 # Dispatch the temporal DFT on the SPECTRAL (transform) backend.
-function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::DirectSumBackend)
+function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::SpectralBackends.DirectSumSpectralBackend)
     _temporal_block_dft_direct!(Q_hat_blk, segment, window, win_weight, nDFT)
 end
 
-function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::FFTBackend)
+function _compute_temporal_dft!(Q_hat_blk, segment, window, win_weight, nDFT, ::SpectralBackends.FFTSpectralBackend)
     _temporal_block_dft_fft!(Q_hat_blk, segment, window, win_weight, nDFT)
 end
 
@@ -401,7 +382,7 @@ function _tod_dft_block!(Q_blk, segment, seg_before_mean, window, win_weight, nD
                          backend, plan, dft_col, windowed, shifted)
     CT = eltype(Q_blk); nx = size(segment, 2)
     for ix in 1:nx
-        if backend isa FFTBackend
+        if backend isa SpectralBackends.FFTSpectralBackend
             _temporal_block_dft_fft!(dft_col, view(segment, :, ix), window, win_weight, nDFT, plan)
         else
             @inbounds for t in 1:nDFT
@@ -709,18 +690,18 @@ function _triad_result(i, Q_hat, fk_idx, fl_idx, fn_idx, weights, sqrt_w, inv_sq
 end
 
 # Dispatch the triad loop on the EXECUTION (parallelism) backend.
-function _dispatch_triadic_loop!(args_tuple...; execution::AbstractExecutionBackend=SerialBackend(), kwargs...)
-    _dispatch_triadic_loop_impl!(resolve_execution(execution), args_tuple...; kwargs...)
+function _dispatch_triadic_loop!(args_tuple...; execution::ComputationalBackends.AbstractExecutionBackend=ComputationalBackends.SerialBackend(), kwargs...)
+    _dispatch_triadic_loop_impl!(Types.resolve_execution(execution), args_tuple...; kwargs...)
 end
 
-_dispatch_triadic_loop_impl!(::SerialBackend, args...; kwargs...) =
+_dispatch_triadic_loop_impl!(::ComputationalBackends.SerialBackend, args...; kwargs...) =
     _triadic_loop_serial!(args...; kwargs...)
 
-_dispatch_triadic_loop_impl!(::ThreadedBackend, args...; kwargs...) =
+_dispatch_triadic_loop_impl!(::ComputationalBackends.ThreadedBackend, args...; kwargs...) =
     _triadic_loop_threaded!(args...; kwargs...)
 
-# The DistributedBackend passes itself through so the ext can read its inner (per-worker) backend.
-_dispatch_triadic_loop_impl!(exec::DistributedBackend, args...; kwargs...) =
+# The ComputationalBackends.DistributedBackend passes itself through so the ext can read its inner (per-worker) backend.
+_dispatch_triadic_loop_impl!(exec::ComputationalBackends.DistributedBackend, args...; kwargs...) =
     _triadic_loop_distributed!(args..., exec; kwargs...)
 
 # GPU path: the triad loop is device-generic — it just runs the loop, and every per-triad primitive
@@ -731,7 +712,7 @@ _dispatch_triadic_loop_impl!(exec::DistributedBackend, args...; kwargs...) =
 # eig hops to the host (small dense eig is CPU-optimal + universally supported). No separate code path,
 # no host↔device movement forced by this knob: a device-array `X` flows to a device-resident `Q_hat`
 # and device factorizations purely by dispatch. Verified device-generic on JLArrays.
-_dispatch_triadic_loop_impl!(::GPUBackend, args...; kwargs...) =
+_dispatch_triadic_loop_impl!(::ComputationalBackends.GPUBackend, args...; kwargs...) =
     _triadic_loop_serial!(args...; kwargs...)
 
 # ---------------------------------------------------------------------------
@@ -794,13 +775,13 @@ function TODWorkspace(
     X::AbstractArray;
     window = nothing, weight = nothing, noverlap = nothing, dt = nothing,
     Q = _default_nonlinear, LHS = identity, nmode = nothing, nfreq = nothing,
-    isreal_data = nothing, mean_type = :zero, spectral::AbstractSpectralBackend = DirectSumBackend(),
+    isreal_data = nothing, mean_type = :zero, spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
 )
     # TOD's `spectral` selects the *temporal* DFT (over the leading time axis); only the uniform-1D
     # transforms apply. The scattered/spherical backends are a category error here.
-    spectral isa Union{DirectSumBackend, FFTBackend} || throw(ArgumentError(
-        "triadic_orthogonal_decomposition uses a temporal DFT; `spectral` must be DirectSumBackend() " *
-        "or FFTBackend() (got $(typeof(spectral)))."))
+    spectral isa Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend} || throw(ArgumentError(
+        "triadic_orthogonal_decomposition uses a temporal DFT; `spectral` must be SpectralBackends.DirectSumSpectralBackend() " *
+        "or SpectralBackends.FFTSpectralBackend() (got $(typeof(spectral)))."))
     dims = size(X)
     ndims(X) >= 2 || throw(ArgumentError("X must have at least 2 dimensions (time × variables)"))
     nt = dims[1]
@@ -866,7 +847,7 @@ end
 
 """
     triadic_orthogonal_decomposition!(ws::TODWorkspace, X; return_coefficients=false,
-                                      return_auxiliary_modes=false, execution=SerialBackend())
+                                      return_auxiliary_modes=false, execution=ComputationalBackends.SerialBackend())
         -> TriadicOrthogonalDecompositionResult
 
 In-place Triadic Orthogonal Decomposition reusing the preallocated `ws` (its `Q_hat`, DFT plan/scratch,
@@ -880,7 +861,7 @@ function triadic_orthogonal_decomposition!(
     X::AbstractArray;
     return_coefficients::Bool = false,
     return_auxiliary_modes::Bool = false,
-    execution::AbstractExecutionBackend = SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     dims = size(X)
     (dims[1] == ws.nt && dims[2] == ws.nVar && prod(dims[3:end]; init = 1) == ws.nx) ||
@@ -926,7 +907,7 @@ function triadic_orthogonal_decomposition!(
         ws.sc, ws.sqrt_w, ws.inv_sqrt_w, ws.permbuf, ws.permbuf_kl;
         execution = execution,
     )
-    return TriadicOrthogonalDecompositionResult(ws.f, ws.L, P, ws.T_budget, A_out, Xi_out)
+    return Types.TriadicOrthogonalDecompositionResult(ws.f, ws.L, P, ws.T_budget, A_out, Xi_out)
 end
 
 """
@@ -959,10 +940,10 @@ strength per frequency triad), convective/recipient modes, and a modal energy bu
 - `mean_type`: `:zero` (default), `:blockwise`, or an array (long-time mean to subtract).
 - `return_coefficients::Bool=false`: Also compute expansion coefficients.
 - `return_auxiliary_modes::Bool=false`: Also compute donor/catalyst modes.
-- `spectral::AbstractSpectralBackend=DirectSumBackend()`: temporal-DFT transform.
-  `FFTBackend()` uses FFTW (much faster; requires `using FFTW`).
-- `execution::AbstractExecutionBackend=SerialBackend()`: triad-loop parallelism.
-  `ThreadedBackend()` parallelises the triad loop (requires OhMyThreads).
+- `spectral::SpectralBackends.AbstractSpectralBackend=SpectralBackends.DirectSumSpectralBackend()`: temporal-DFT transform.
+  `SpectralBackends.FFTSpectralBackend()` uses FFTW (much faster; requires `using FFTW`).
+- `execution::ComputationalBackends.AbstractExecutionBackend=ComputationalBackends.SerialBackend()`: triad-loop parallelism.
+  `ComputationalBackends.ThreadedBackend()` parallelises the triad loop (requires OhMyThreads).
 
 # Returns
 `TriadicOrthogonalDecompositionResult` containing:
@@ -991,8 +972,8 @@ function triadic_orthogonal_decomposition(
     mean_type=:zero,
     return_coefficients=false,
     return_auxiliary_modes=false,
-    spectral::AbstractSpectralBackend=DirectSumBackend(),
-    execution::AbstractExecutionBackend=SerialBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend=SpectralBackends.DirectSumSpectralBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend=ComputationalBackends.SerialBackend(),
 )
     ndims(X) >= 2 || throw(ArgumentError("X must have at least 2 dimensions (time × variables)"))
     ws = TODWorkspace(X; window = window, weight = weight, noverlap = noverlap, dt = dt, Q = Q,

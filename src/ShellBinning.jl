@@ -1,8 +1,7 @@
 module ShellBinning
 
-using ..Types: AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
-using ..Types: AbstractShellGeometry, ShellMagnitude
-using ..Backends: AbstractExecutionBackend
+using ..Types: Types
+using ComputationalBackends: ComputationalBackends
 
 export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
 
@@ -17,7 +16,7 @@ Return an array (shape `ns`) giving the wavenumber coordinate each mode is binne
 `geometry`. For [`ShellMagnitude`](@ref) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
 all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
 """
-function shell_coordinate(g::ShellMagnitude, ks)
+function shell_coordinate(g::Types.ShellMagnitude, ks)
     nd   = length(ks)
     ns   = ntuple(d -> length(ks[d]), nd)
     dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
@@ -48,7 +47,7 @@ Return the monotonically increasing shell boundary vector for `binning` up to `k
 The resulting vector has length `n_shells(binning, k_max) + 1`; shell n covers
 wavenumbers in `[edges[n], edges[n+1])`.
 """
-function shell_edges(b::LinearBinning, k_max::Real)
+function shell_edges(b::Types.LinearBinning, k_max::Real)
     b.Δk > 0 || throw(ArgumentError("LinearBinning: Δk must be positive."))
     k_max > 0 || throw(ArgumentError("k_max must be positive."))
     FT    = typeof(float(k_max))
@@ -57,7 +56,7 @@ function shell_edges(b::LinearBinning, k_max::Real)
     return edges
 end
 
-function shell_edges(b::LogarithmicBinning, k_max::Real)
+function shell_edges(b::Types.LogarithmicBinning, k_max::Real)
     b.k₀ > 0 || throw(ArgumentError("LogarithmicBinning: k₀ must be positive."))
     b.λ > 1  || throw(ArgumentError("LogarithmicBinning: λ must be > 1."))
     k_max >= b.k₀ || throw(ArgumentError("k_max must be >= k₀."))
@@ -70,11 +69,11 @@ function shell_edges(b::LogarithmicBinning, k_max::Real)
     return edges
 end
 
-function shell_edges(b::DyadicBinning, k_max::Real)
-    return shell_edges(LogarithmicBinning(b.k₀, oftype(b.k₀, 2)), k_max)
+function shell_edges(b::Types.DyadicBinning, k_max::Real)
+    return shell_edges(Types.LogarithmicBinning(b.k₀, oftype(b.k₀, 2)), k_max)
 end
 
-function shell_edges(b::CustomBinning, k_max::Real)
+function shell_edges(b::Types.CustomBinning, k_max::Real)
     issorted(b.edges) || throw(ArgumentError("CustomBinning: edges must be monotonically increasing."))
     return b.edges
 end
@@ -89,12 +88,12 @@ end
 Return the geometric midpoint of each shell.  For logarithmic binnings, this is
 the geometric mean of the edge pair; for linear binnings, the arithmetic mean.
 """
-function shell_centers(b::AbstractShellBinning, k_max::Real)
+function shell_centers(b::Types.AbstractShellBinning, k_max::Real)
     edges = shell_edges(b, k_max)
     N = length(edges) - 1
     N > 0 || throw(ArgumentError("No shells within k_max=$k_max for this binning."))
     centers = similar(edges, N)
-    if b isa LogarithmicBinning || b isa DyadicBinning
+    if b isa Types.LogarithmicBinning || b isa Types.DyadicBinning
         for n in 1:N
             centers[n] = sqrt(edges[n] * edges[n+1])
         end
@@ -111,7 +110,7 @@ end
 
 Return the number of shells for `binning` up to `k_max`.
 """
-function n_shells(b::AbstractShellBinning, k_max::Real)
+function n_shells(b::Types.AbstractShellBinning, k_max::Real)
     return length(shell_edges(b, k_max)) - 1
 end
 
@@ -142,9 +141,9 @@ end
 
 # Shell reduction `T_spec[shell_idx[I]] += density[I]` over all modes (shell index 0 = dropped),
 # zeroing `T_spec` first. The host method is a 0-alloc scalar loop; the KernelAbstractions extension
-# adds a `GPUBackend` method (atomic device scatter-add) so device-backed arrays reduce with no scalar
+# adds a `ComputationalBackends.GPUBackend` method (atomic device scatter-add) so device-backed arrays reduce with no scalar
 # indexing. Backend-dispatched so the serial reductions and the distributed pencil flux share one op.
-function shell_scatter_add!(T_spec, density, shell_idx, ::AbstractExecutionBackend)
+function shell_scatter_add!(T_spec, density, shell_idx, ::ComputationalBackends.AbstractExecutionBackend)
     fill!(T_spec, zero(eltype(T_spec)))
     @inbounds for I in CartesianIndices(density)
         s = shell_idx[I]

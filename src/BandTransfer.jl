@@ -1,12 +1,12 @@
 module BandTransfer
 
-using ..Types: SmoothBands, AbstractInvariant, KineticEnergy, AbstractDealiasing, OrszagTwoThirds, AbstractSpectralBackend,
-               DirectSumBackend, AbstractShellGeometry, IsotropicShells, require_coefficient_spectral
-using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend, resolve_execution
-using ..Invariants: transfer_density!
-using ..NonlinearTerm: compute_nonlinear_term!
-using ..Workspaces: NonlinearTermWorkspace
-using ..ShellBinning: shell_coordinate
+using ..Types: Types
+using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
+using ..Invariants: Invariants
+using ..NonlinearTerm: NonlinearTerm
+using ..Workspaces: Workspaces
+using ..ShellBinning: ShellBinning
 
 export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
 
@@ -61,14 +61,14 @@ struct BandTransferWorkspace{WS, FA, DA, WV, CV}
     centers::CV
 end
 
-function BandTransferWorkspace(velocity_hat, ks, bands::SmoothBands;
-                               geometry::AbstractShellGeometry = IsotropicShells())
+function BandTransferWorkspace(velocity_hat, ks, bands::Types.SmoothBands;
+                               geometry::Types.AbstractShellGeometry = Types.IsotropicShells())
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))
-    k_coord = shell_coordinate(geometry, ks)
+    k_coord = ShellBinning.shell_coordinate(geometry, ks)
     W = _band_weights(bands.centers, bands.logwidth, k_coord)
-    return BandTransferWorkspace(NonlinearTermWorkspace(velocity_hat, ks),
+    return BandTransferWorkspace(Workspaces.NonlinearTermWorkspace(velocity_hat, ks),
                                  similar(velocity_hat), similar(velocity_hat, FT, ns...),
                                  W, collect(bands.centers))
 end
@@ -82,17 +82,17 @@ max_antisymmetry_error)` named tuple as the allocating version.
 """
 function calculate_band_to_band_transfer!(
     T, net, bws::BandTransferWorkspace, velocity_hat, ks;
-    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
-    invariant::AbstractInvariant = KineticEnergy(),
-    spectral::AbstractSpectralBackend = DirectSumBackend(),
-    execution::AbstractExecutionBackend = SerialBackend(),
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    require_coefficient_spectral(spectral)
+    Types.require_coefficient_spectral(spectral)
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
     # Fill the transfer matrix (one nonlinear term per band m → column T[·,m]), dispatched on execution.
-    _band_to_band_fill!(resolve_execution(execution), T, bws, velocity_hat, ks;
+    _band_to_band_fill!(Types.resolve_execution(execution), T, bws, velocity_hat, ks;
         dealiasing=dealiasing, invariant=invariant, spectral=spectral, advecting_hat=advecting_hat)
     @inbounds for n in 1:nb
         acc = zero(FT)
@@ -111,7 +111,7 @@ end
 # Fill T[·,m] over bands, dispatched on execution. Bands are independent (disjoint columns) →
 # embarrassingly parallel; threaded/distributed/GPU override the named stubs, each worker using its
 # own single-threaded workspace (inner FFTs stay single-threaded → no oversubscription).
-function _band_to_band_fill!(::SerialBackend, T, bws::BandTransferWorkspace, velocity_hat, ks;
+function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::BandTransferWorkspace, velocity_hat, ks;
                              dealiasing, invariant, spectral, advecting_hat)
     nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat)); nb = length(bws.centers)
@@ -120,8 +120,8 @@ function _band_to_band_fill!(::SerialBackend, T, bws::BandTransferWorkspace, vel
         for c in 1:D, I in CartesianIndices(ns)
             f_m[I, c] = W[m][I] * velocity_hat[I, c]
         end
-        compute_nonlinear_term!(ws, f_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
-        transfer_density!(d, invariant, velocity_hat, ws.N̂, ks)
+        NonlinearTerm.compute_nonlinear_term!(ws, f_m, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+        Invariants.transfer_density!(d, invariant, velocity_hat, ws.N̂, ks)
         for n in 1:nb
             s = zero(FT)
             for I in CartesianIndices(ns)
@@ -132,11 +132,11 @@ function _band_to_band_fill!(::SerialBackend, T, bws::BandTransferWorkspace, vel
     end
     return T
 end
-_band_to_band_fill!(::ThreadedBackend, T, bws, velocity_hat, ks; kwargs...) =
+_band_to_band_fill!(::ComputationalBackends.ThreadedBackend, T, bws, velocity_hat, ks; kwargs...) =
     _band_to_band_threaded!(T, bws, velocity_hat, ks; kwargs...)
-_band_to_band_fill!(exec::DistributedBackend, T, bws, velocity_hat, ks; kwargs...) =
+_band_to_band_fill!(exec::ComputationalBackends.DistributedBackend, T, bws, velocity_hat, ks; kwargs...) =
     _band_to_band_distributed!(T, bws, velocity_hat, ks, exec; kwargs...)
-_band_to_band_fill!(gpu::GPUBackend, T, bws, velocity_hat, ks; kwargs...) =
+_band_to_band_fill!(gpu::ComputationalBackends.GPUBackend, T, bws, velocity_hat, ks; kwargs...) =
     _band_to_band_gpu!(T, bws, velocity_hat, ks, gpu; kwargs...)
 
 _band_to_band_threaded!(args...; kwargs...) = throw(ArgumentError(
@@ -148,7 +148,7 @@ _band_to_band_gpu!(args...; kwargs...) = throw(ArgumentError(
 
 """
     calculate_band_to_band_transfer(velocity_hat, ks; bands::SmoothBands, dealiasing=OrszagTwoThirds(),
-        invariant=KineticEnergy(), spectral=DirectSumBackend(), advecting_hat=velocity_hat,
+        invariant=KineticEnergy(), spectral=SpectralBackends.DirectSumSpectralBackend(), advecting_hat=velocity_hat,
         geometry=IsotropicShells())
         -> (centers, transfer_matrix, net_transfer, max_antisymmetry_error)
 
@@ -162,15 +162,15 @@ a passive scalar advected by the velocity) and an anisotropic `geometry`. See
 function calculate_band_to_band_transfer(
     velocity_hat,
     ks;
-    bands::SmoothBands,
-    dealiasing::AbstractDealiasing = OrszagTwoThirds(),
-    invariant::AbstractInvariant = KineticEnergy(),
-    spectral::AbstractSpectralBackend = DirectSumBackend(),
-    execution::AbstractExecutionBackend = SerialBackend(),
+    bands::Types.SmoothBands,
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
-    geometry::AbstractShellGeometry = IsotropicShells(),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    require_coefficient_spectral(spectral)
+    Types.require_coefficient_spectral(spectral)
     FT = real(eltype(velocity_hat))
     nb = length(bands.centers)
     bws = BandTransferWorkspace(velocity_hat, ks, bands; geometry=geometry)
@@ -181,7 +181,7 @@ function calculate_band_to_band_transfer(
         advecting_hat=advecting_hat)
 end
 
-# One-line show (the workspace holds a NonlinearTermWorkspace whose FFTW plan bundle can segfault
+# One-line show (the workspace holds a Workspaces.NonlinearTermWorkspace whose FFTW plan bundle can segfault
 # under the default field-dump show).
 Base.show(io::IO, ::BandTransferWorkspace) = print(io, "BandTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::BandTransferWorkspace) = show(io, w)

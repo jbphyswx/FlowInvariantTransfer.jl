@@ -1,8 +1,8 @@
 module Spherical
 
-using ..Types: SphericalTransferResult, DivergentSphericalTransferResult,
-               AbstractSpectralBackend, SHTBackend, NUFSHTBackend
-using ..Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend, DistributedBackend, GPUBackend
+using ..Types: Types
+using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
 
 export calculate_spherical_transfer, calculate_spherical_transfer!,
        SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace,
@@ -11,24 +11,24 @@ export calculate_spherical_transfer, calculate_spherical_transfer!,
 
 # ---------------------------------------------------------------------------
 # Backend validation for the spherical transfer (shared by the FSH regular-grid and NUFSHT scattered
-# extensions). The transform is selected by the *input sampling*: SHTBackend ↔ regular colatitude–
-# longitude grid (FastSphericalHarmonics), NUFSHTBackend ↔ scattered points (NUFSHT). Passing an
+# extensions). The transform is selected by the *input sampling*: SpectralBackends.FSHTSpectralBackend ↔ regular colatitude–
+# longitude grid (FastSphericalHarmonics), SpectralBackends.NUFSHTSpectralBackend ↔ scattered points (NUFSHT). Passing an
 # explicit `spectral` that disagrees, or an execution backend the single-pipeline transform cannot
 # honour, raises a clear error rather than silently ignoring it.
 # ---------------------------------------------------------------------------
 
 # `path` is `:regular` (FSH) or `:scattered` (NUFSHT).
-function _validate_spherical_backends(spectral, execution::AbstractExecutionBackend, path::Symbol)
-    expected = path === :regular ? SHTBackend : NUFSHTBackend
-    other    = path === :regular ? "NUFSHTBackend (scattered points)" : "SHTBackend (regular grid)"
+function _validate_spherical_backends(spectral, execution::ComputationalBackends.AbstractExecutionBackend, path::Symbol)
+    expected = path === :regular ? SpectralBackends.FSHTSpectralBackend : SpectralBackends.NUFSHTSpectralBackend
+    other    = path === :regular ? "SpectralBackends.NUFSHTSpectralBackend (scattered points)" : "SpectralBackends.FSHTSpectralBackend (regular grid)"
     (spectral === nothing || spectral isa expected) || throw(ArgumentError(
         "spherical transfer on a $(path === :regular ? "regular colatitude–longitude grid" : "scattered point set") " *
         "uses $(nameof(expected)); got spectral = $(typeof(spectral)). Use $other for the other sampling."))
-    execution isa Union{SerialBackend, ThreadedBackend} || throw(ArgumentError(
+    execution isa Union{ComputationalBackends.SerialBackend, ComputationalBackends.ThreadedBackend} || throw(ArgumentError(
         "spherical transfer runs as a single transform pipeline; execution = $(typeof(execution)) is not a " *
-        "distinct code path. Supported: SerialBackend, ThreadedBackend (threads the transform). Distribute " *
+        "distinct code path. Supported: ComputationalBackends.SerialBackend, ComputationalBackends.ThreadedBackend (threads the transform). Distribute " *
         "independent snapshots with `mpi_batch_map`; for a GPU transform use the NUFSHT scattered path with " *
-        "device-array coordinates (the device path follows the coordinate array type, not execution=GPUBackend())."))
+        "device-array coordinates (the device path follows the coordinate array type, not execution=ComputationalBackends.GPUBackend())."))
     return nothing
 end
 
@@ -85,7 +85,7 @@ struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, RES, R}
     ψv::RV           # per-mode ψ̂ (reduction input)
     ζv::RV           # per-mode ζ̂
     Av::RV           # per-mode Â
-    result::RES      # reused SphericalTransferResult (TE/TZ/ΠE/ΠZ)
+    result::RES      # reused Types.SphericalTransferResult (TE/TZ/ΠE/ΠZ)
     radius::R
     lmax::Int
     dealias::Bool
@@ -123,7 +123,7 @@ struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, RES,
     degcol::DC       # (lmax+1, 1) degrees 0:lmax — row-broadcast for the coefficient-space ops
     Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
     Tcol::TC         # (lmax+1, 1) real per-degree column-sum scratch
-    result::RES      # reused SphericalTransferResult
+    result::RES      # reused Types.SphericalTransferResult
     radius::R
     lmax::Int
     lwork::Int
@@ -156,7 +156,7 @@ function spherical_transfer_reduce(
     lmax::Integer,
 )
     FT = real(eltype(A_lm))
-    result = SphericalTransferResult(
+    result = Types.SphericalTransferResult(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
         zeros(FT, lmax + 1), zeros(FT, lmax + 1))
     return spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm)
@@ -169,7 +169,7 @@ In-place degree-spectrum reduction: writes `T_E`/`T_Z` and the cumulative fluxes
 preallocated `result` vectors (which are zeroed first), reusing them across calls.
 """
 function spherical_transfer_reduce!(
-    result::SphericalTransferResult,
+    result::Types.SphericalTransferResult,
     degree_of_mode::AbstractVector{<:Integer},
     ψ_lm::AbstractVector,
     ζ_lm::AbstractVector,
@@ -259,7 +259,7 @@ parameters. Fields are typed via parameters so the core names no extension type.
 `using FastSphericalHarmonics`.
 """
 struct DivergentSphericalTransferWorkspace{RES, R}
-    result::RES      # reused DivergentSphericalTransferResult
+    result::RES      # reused Types.DivergentSphericalTransferResult
     radius::R
     lmax::Int
     lwork::Int
@@ -317,7 +317,7 @@ Shared finalisation (extension-agnostic): given the per-degree rotational and di
 transfers already written into `result.rotational_transfer` / `result.divergent_transfer`, fill the
 total `energy_transfer = T_rot + T_div` and all three cumulative fluxes `Π(L) = −Σ_{l≤L} T(l)`.
 """
-function divergent_transfer_finalize!(result::DivergentSphericalTransferResult)
+function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferResult)
     Trot = result.rotational_transfer
     Tdiv = result.divergent_transfer
     T = result.energy_transfer

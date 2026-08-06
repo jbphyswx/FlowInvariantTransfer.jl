@@ -2,7 +2,6 @@ module FlowInvariantTransferCairoMakieExt
 
 using CairoMakie: CairoMakie
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SpectralFluxResult, CoarseGrainingFluxResult, ShellToShellResult, TriadicOrthogonalDecompositionResult
 
 # ---------------------------------------------------------------------------
 # Override stub
@@ -19,19 +18,19 @@ Dispatch to the appropriate plot function based on result type.
 - `TriadicOrthogonalDecompositionResult`: the mode bispectrum λ(f_l, f_n) and modal energy budget
   T(f_l, f_n) as heatmaps (Yeung–Chu–Schmidt Fig. 4 style).
 """
-function FIT.plot_energy_transfer(result::SpectralFluxResult; kwargs...)
+function FIT.plot_energy_transfer(result::FIT.Types.SpectralFluxResult; kwargs...)
     return _plot_spectral_flux(result; kwargs...)
 end
 
-function FIT.plot_energy_transfer(result::CoarseGrainingFluxResult; kwargs...)
+function FIT.plot_energy_transfer(result::FIT.Types.CoarseGrainingFluxResult; kwargs...)
     return _plot_cg_flux(result; kwargs...)
 end
 
-function FIT.plot_energy_transfer(result::ShellToShellResult; kwargs...)
+function FIT.plot_energy_transfer(result::FIT.Types.ShellToShellResult; kwargs...)
     return _plot_shell_transfer_matrix(result; kwargs...)
 end
 
-function FIT.plot_energy_transfer(result::TriadicOrthogonalDecompositionResult; kwargs...)
+function FIT.plot_energy_transfer(result::FIT.Types.TriadicOrthogonalDecompositionResult; kwargs...)
     return _plot_tod_bispectrum(result; kwargs...)
 end
 
@@ -39,7 +38,7 @@ end
 # SpectralFluxResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_spectral_flux(r::SpectralFluxResult;
+function _plot_spectral_flux(r::FIT.Types.SpectralFluxResult;
     title::String = "Spectral Energy Flux",
     xscale = CairoMakie.log10,
 )
@@ -77,7 +76,7 @@ end
 # CoarseGrainingFluxResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_cg_flux(r::CoarseGrainingFluxResult{FT, N};
+function _plot_cg_flux(r::FIT.Types.CoarseGrainingFluxResult{FT, N};
     title::String = "Coarse-Graining Energy Flux Π_ℓ(x)",
 ) where {FT, N}
     N == 2 || @warn "plot_energy_transfer: CoarseGrainingFluxResult has $N spatial dimensions; only 2D heatmaps are supported."
@@ -113,7 +112,7 @@ end
 # ShellToShellResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_shell_transfer_matrix(r::ShellToShellResult{FT};
+function _plot_shell_transfer_matrix(r::FIT.Types.ShellToShellResult{FT};
     title::String = "Shell-to-Shell Transfer T(n,m)",
 ) where {FT}
     T    = r.transfer_matrix
@@ -164,7 +163,7 @@ non-negative half (real data); pass `fmax` to clip the symmetric `f_l` band. Mir
 Fig. 4 panels; the per-triad recipient/convective *mode shapes* are problem-specific and left to
 the caller (see `examples/triadic_orthogonal_decomposition.jl`).
 """
-function _plot_tod_bispectrum(r::TriadicOrthogonalDecompositionResult;
+function _plot_tod_bispectrum(r::FIT.Types.TriadicOrthogonalDecompositionResult;
     mode::Int = 1,
     fmax = nothing,
     title::String = "Triadic Orthogonal Decomposition",

@@ -2,10 +2,7 @@ module FlowInvariantTransferFINUFFTExt
 
 using FINUFFT: FINUFFT
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: AbstractFilter, CoarseGrainingFluxMethod, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
-using FlowInvariantTransfer.Filters: filter_response
-using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
-using FlowInvariantTransfer.Backends: AbstractExecutionBackend, SerialBackend, ThreadedBackend
+using ComputationalBackends: ComputationalBackends
 
 # ---------------------------------------------------------------------------
 # Non-uniform coarse-graining flux via FINUFFT type-1/type-2 round-trips.
@@ -22,21 +19,21 @@ using FlowInvariantTransfer.Backends: AbstractExecutionBackend, SerialBackend, T
 @inline _page(A::AbstractArray, c::Int) = view(A, ntuple(_ -> Colon(), ndims(A) - 1)..., c)
 
 """
-    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8, execution=SerialBackend())
+    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8, execution=ComputationalBackends.SerialBackend())
 
 Build the reusable FINUFFT plans (type-1 analysis, type-2 synthesis; points set) and every working
 buffer for [`nufft_coarse_graining_flux!`](@ref). 1D/2D/3D scattered Cartesian points.
 
-`execution` selects the FINUFFT plan thread count. `SerialBackend()` (default) → single-threaded
+`execution` selects the FINUFFT plan thread count. `ComputationalBackends.SerialBackend()` (default) → single-threaded
 transforms: 0 allocation per `finufft_exec!` (FINUFFT shares `libfftw3` with FFTW.jl, so a
 multithreaded plan routes its internal FFT through FFTW's Julia-thread spawn callback and allocates
 Task/Channel/lock scratch on every exec), and the right choice when the outer batch axis (a scale
 sweep or snapshot series) is itself parallelised one-worker-per-item — no oversubscription.
-`ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
+`ComputationalBackends.ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
 """
 function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol::Real = 1e-8,
-                                          execution::AbstractExecutionBackend = SerialBackend())
-    fft_nthreads = execution isa ThreadedBackend ? Threads.nthreads() : 1
+                                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+    fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
@@ -54,7 +51,7 @@ function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol:
         N_d = ms[d]; dk = 2 * FT(π) / Ls[d]
         [FT(k <= N_d ÷ 2 ? k : k - N_d) * dk for k in 0:N_d-1]
     end
-    k_mag = wavenumber_magnitude_grid(ks_1d)
+    k_mag = FIT.Utils.wavenumber_magnitude_grid(ks_1d)
     k_comp_grids = ntuple(d -> _build_k_component_nufft(ks_1d, d, ms), nd)
 
     # Coordinates rescaled to [-π, π) for FINUFFT.
@@ -105,7 +102,7 @@ function FIT.nufft_coarse_graining_flux!(
     ws::FIT.NUFFTCoarseGrainingWorkspace,
     velocity_fields::Tuple,
     ℓ::Real,
-    filter::AbstractFilter,
+    filter::FIT.Types.AbstractFilter,
     ms::Tuple;
     return_diagnostics::Bool = false,
 )
@@ -125,7 +122,7 @@ function FIT.nufft_coarse_graining_flux!(
     # Filter weights Ĝ(k) for this scale.
     Ĝ = ws.Ĝ
     @inbounds for I in CartesianIndices(ws.k_mag)
-        Ĝ[I] = FT(filter_response(filter, ws.k_mag[I], FT(ℓ)))
+        Ĝ[I] = FT(FIT.Filters.filter_response(filter, ws.k_mag[I], FT(ℓ)))
     end
 
     # Per component: û_filt = Ĝ·(type-1 u)/N (spectral), then filtered velocity at the points (type-2).
@@ -177,9 +174,9 @@ function FIT.nufft_coarse_graining_flux!(
     mean_Π = FT(sum(ws.Π) / N)
 
     if return_diagnostics
-        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), ws.Π, mean_Π, ws.τ, ws.S̄)
+        return FIT.Types.CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), ws.Π, mean_Π, ws.τ, ws.S̄)
     else
-        return CoarseGrainingFluxResult(FT(ℓ), ws.Π, mean_Π)
+        return FIT.Types.CoarseGrainingFluxResult(FT(ℓ), ws.Π, mean_Π)
     end
 end
 
@@ -203,18 +200,18 @@ and all intermediate buffers are reused.
 # Keyword Arguments
 - `return_diagnostics::Bool=false`: also return τ̄ᵢⱼ and S̄ᵢⱼ at the points.
 - `tol=1e-8`: FINUFFT accuracy tolerance.
-- `execution=SerialBackend()`: `ThreadedBackend()` threads the FINUFFT transforms across cores (for a
-  lone/under-saturated call); `SerialBackend()` keeps them single-threaded (batch the outer axis instead).
+- `execution=ComputationalBackends.SerialBackend()`: `ComputationalBackends.ThreadedBackend()` threads the FINUFFT transforms across cores (for a
+  lone/under-saturated call); `ComputationalBackends.SerialBackend()` keeps them single-threaded (batch the outer axis instead).
 """
 function FIT.nufft_coarse_graining_flux(
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ℓ::Real,
-    filter::AbstractFilter,
+    filter::FIT.Types.AbstractFilter,
     ms::Tuple;
     return_diagnostics::Bool = false,
     tol::Real = 1e-8,
-    execution::AbstractExecutionBackend = SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol = tol, execution = execution)
     return FIT.nufft_coarse_graining_flux!(
@@ -235,7 +232,7 @@ method in the core; it routes to [`nufft_coarse_graining_flux`](@ref) using the 
 Requires `using FINUFFT`.
 """
 function FIT.calculate_energy_transfer(
-    method::CoarseGrainingFluxMethod,
+    method::FIT.Types.CoarseGrainingFluxMethod,
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ms::Tuple;
@@ -258,7 +255,7 @@ function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
 end
 
 # ---------------------------------------------------------------------------
-# Scattered-Cartesian physical → uniform Fourier coefficients (the NUFFTBackend `to_spectral` path).
+# Scattered-Cartesian physical → uniform Fourier coefficients (the SpectralBackends.NUFFTSpectralBackend `to_spectral` path).
 # Reconstruct û on a uniform ms-grid from samples at scattered points via a FINUFFT type-1 transform
 # (density-normalized adjoint û = type1(u)/N, exact for samples on the uniform grid). The uniform
 # wavenumber grid ks is inferred from the coordinate spans (fftfreq convention, matching

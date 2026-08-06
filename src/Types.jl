@@ -1,5 +1,8 @@
 module Types
 
+using SpectralBackends: SpectralBackends
+using ComputationalBackends: ComputationalBackends
+
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod, DivergentSphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
@@ -8,10 +11,24 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
-export AbstractSpectralBackend, DirectSumBackend, FFTBackend, NUFFTBackend, SHTBackend, NUFSHTBackend
-# Execution backends (SerialBackend/ThreadedBackend/GPUBackend/DistributedBackend/MPIBackend/…) live
-# in the sibling `Backends` module.
 export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult
+
+# ---------------------------------------------------------------------------
+# Execution-backend resolution (FIT-owned; not type piracy)
+# ---------------------------------------------------------------------------
+# Concrete execution backends pass through `ComputationalBackends.resolve_backend`; the AutoBackend
+# selector maps to ThreadedBackend only when the OhMyThreads extension is loaded and Julia has more
+# than one thread, else SerialBackend. Defined on FIT's own `resolve_execution` — NOT by adding a
+# method to `ComputationalBackends.resolve_backend` — so it commits no type piracy and never collides
+# with another consumer's AutoBackend policy.
+resolve_execution(execution::ComputationalBackends.AbstractExecutionBackend) = ComputationalBackends.resolve_backend(execution)
+function resolve_execution(::ComputationalBackends.AutoBackend)
+    if Threads.nthreads() > 1 &&
+       Base.get_extension(parentmodule(@__MODULE__), :FlowInvariantTransferOhMyThreadsExt) !== nothing
+        return ComputationalBackends.ThreadedBackend()
+    end
+    return ComputationalBackends.SerialBackend()
+end
 
 # ---------------------------------------------------------------------------
 # Method hierarchy
@@ -271,7 +288,7 @@ triad closure `k = p + q`:
 
     S(k|p|q) = −Im{ [k · û(q)] [û*(k) · û(p)] }.
 
-This is the most fundamental (delta-in-`k`) scale-to-scale object; it reduces to
+This is the most fundamental (delta-in-`k`) mode-to-mode object; it reduces to
 the shell-to-shell matrix and the spectral transfer `T(k)` under summation.
 
 # Fields
@@ -590,54 +607,16 @@ ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 
 # ---------------------------------------------------------------------------
 # Transform (spectral) backends — WHICH transform (direct / FFT / NUFFT / SHT / NUFSHT). Orthogonal
-# to the EXECUTION axis (serial / threaded / distributed / MPI / GPU), which lives in the sibling
-# `Backends` module: a computation picks one of each (e.g. FFT transform + threaded mediator loop, or
-# a NUFSHT transform + MPI reduction). Keeping "what" and "where" separate avoids conflating them.
+# to the EXECUTION axis (serial / threaded / distributed / MPI / GPU), which lives in the shared
+# `ComputationalBackends` package: a computation picks one of each (e.g. FFT transform + threaded
+# mediator loop, or a NUFSHT transform + MPI reduction). Keeping "what" and "where" separate avoids
+# conflating them.
 # ---------------------------------------------------------------------------
 
-"""
-    AbstractSpectralBackend
-
-Abstract supertype for *transform* backends: how physical↔spectral coefficients and the
-pseudospectral nonlinear term are computed. Orthogonal to [`AbstractExecutionBackend`](@ref FlowInvariantTransfer.Backends.AbstractExecutionBackend).
-"""
-abstract type AbstractSpectralBackend end
-
-"""
-    DirectSumBackend <: AbstractSpectralBackend
-
-Dependency-free direct DFT/sum reference transform (no external packages); exact but slow.
-The default — load `FFTW` and pass [`FFTBackend`](@ref) for the O(N log N) fast path.
-"""
-struct DirectSumBackend <: AbstractSpectralBackend end
-
-"""
-    FFTBackend <: AbstractSpectralBackend
-
-Uniform-grid FFT transform via FFTW (O(N log N)). Requires `using FFTW`.
-"""
-struct FFTBackend <: AbstractSpectralBackend end
-
-"""
-    NUFFTBackend <: AbstractSpectralBackend
-
-Non-uniform FFT for scattered Cartesian points, via FINUFFT. Requires `using FINUFFT`.
-"""
-struct NUFFTBackend <: AbstractSpectralBackend end
-
-"""
-    SHTBackend <: AbstractSpectralBackend
-
-Spherical-harmonic transform for regular spherical grids, via FastSphericalHarmonics.
-"""
-struct SHTBackend <: AbstractSpectralBackend end
-
-"""
-    NUFSHTBackend <: AbstractSpectralBackend
-
-Non-uniform spherical-harmonic transform for scattered spherical data, via NUFSHT.
-"""
-struct NUFSHTBackend <: AbstractSpectralBackend end
+# Transform (spectral) backend TYPES come from the shared `SpectralBackends` package
+# (`SpectralBackends.DirectSumSpectralBackend`/`FFTSpectralBackend`/`NUFFTSpectralBackend`/
+# `FSHTSpectralBackend`/`NUFSHTSpectralBackend`, all `<: SpectralBackends.AbstractSpectralBackend`).
+# FIT adds the geometry classification + coefficient-input validation below.
 
 # ---------------------------------------------------------------------------
 # Transform-backend geometry classification + validation
@@ -645,7 +624,7 @@ struct NUFSHTBackend <: AbstractSpectralBackend end
 # Each transform backend targets one (geometry, sampling). The Fourier-coefficient Cartesian
 # diagnostics accept only the uniform-Cartesian transforms — the DirectSum reference and FFT — because
 # their input already *is* a uniform-Cartesian Fourier field. Passing a scattered (NUFFT) or spherical
-# (SHT/NUFSHT) backend to them is a geometry mismatch and must raise a clear error, never a bare
+# (FSHT/NUFSHT) backend to them is a geometry mismatch and must raise a clear error, never a bare
 # `MethodError` and never a silent misroute to FFT.
 
 """
@@ -654,29 +633,29 @@ struct NUFSHTBackend <: AbstractSpectralBackend end
 The (geometry, sampling) a transform backend targets: `:any` (the DirectSum reference works on any
 geometry), `:cartesian_uniform`, `:cartesian_scattered`, `:spherical_uniform`, `:spherical_scattered`.
 """
-spectral_geometry(::DirectSumBackend) = :any
-spectral_geometry(::FFTBackend)       = :cartesian_uniform
-spectral_geometry(::NUFFTBackend)     = :cartesian_scattered
-spectral_geometry(::SHTBackend)       = :spherical_uniform
-spectral_geometry(::NUFSHTBackend)    = :spherical_scattered
+spectral_geometry(::SpectralBackends.DirectSumSpectralBackend) = :any
+spectral_geometry(::SpectralBackends.FFTSpectralBackend)       = :cartesian_uniform
+spectral_geometry(::SpectralBackends.NUFFTSpectralBackend)     = :cartesian_scattered
+spectral_geometry(::SpectralBackends.FSHTSpectralBackend)      = :spherical_uniform
+spectral_geometry(::SpectralBackends.NUFSHTSpectralBackend)    = :spherical_scattered
 
 """
     require_coefficient_spectral(spectral) -> spectral
 
 Assert that `spectral` is a valid transform for a Fourier-coefficient Cartesian diagnostic (input is a
-uniform-Cartesian Fourier field). Returns `spectral` for [`DirectSumBackend`](@ref)/[`FFTBackend`](@ref);
+uniform-Cartesian Fourier field). Returns `spectral` for the DirectSum reference / FFT backends;
 raises a clear geometry-mismatch error for the scattered/spherical backends directing the caller to the
 right entry point.
 """
-require_coefficient_spectral(spectral::Union{DirectSumBackend, FFTBackend}) = spectral
-require_coefficient_spectral(::NUFFTBackend) = throw(ArgumentError(
-    "NUFFTBackend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
+require_coefficient_spectral(spectral::Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend}) = spectral
+require_coefficient_spectral(::SpectralBackends.NUFFTSpectralBackend) = throw(ArgumentError(
+    "NUFFTSpectralBackend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
     "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
-    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=NUFFTBackend())`."))
-require_coefficient_spectral(::Union{SHTBackend, NUFSHTBackend}) = throw(ArgumentError(
-    "SHTBackend and NUFSHTBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
-    "on the sphere (regular grid → SHTBackend, scattered points → NUFSHTBackend). The Cartesian flux " *
-    "diagnostics take FFTBackend (uniform grid) or NUFFTBackend (scattered, via the physical-space entry)."))
+    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=NUFFTSpectralBackend())`."))
+require_coefficient_spectral(::Union{SpectralBackends.FSHTSpectralBackend, SpectralBackends.NUFSHTSpectralBackend}) = throw(ArgumentError(
+    "FSHTSpectralBackend and NUFSHTSpectralBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
+    "on the sphere (regular grid → FSHTSpectralBackend, scattered points → NUFSHTSpectralBackend). The Cartesian flux " *
+    "diagnostics take FFTSpectralBackend (uniform grid) or NUFFTSpectralBackend (scattered, via the physical-space entry)."))
 
 # ---------------------------------------------------------------------------
 # Result containers

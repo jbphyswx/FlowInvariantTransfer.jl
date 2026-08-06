@@ -1,7 +1,5 @@
 module Utils
 
-using LinearAlgebra: LinearAlgebra as LA
-
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 export as_component_field

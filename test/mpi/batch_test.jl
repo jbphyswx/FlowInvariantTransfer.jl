@@ -6,6 +6,7 @@ using MPI: MPI
 using FFTW: FFTW
 using Random: Random
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using SpectralBackends: SpectralBackends
 
 MPI.Init()
 comm = MPI.COMM_WORLD
@@ -16,7 +17,7 @@ N = 12; L = 2π
 ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
 kx = [ks[1][i] for i in 1:N, j in 1:N]
 ky = [ks[2][j] for i in 1:N, j in 1:N]
-binning = FIT.LinearBinning(2π / L)
+binning = FIT.Types.LinearBinning(2π / L)
 
 # Deterministic incompressible snapshots (identical list on every rank).
 function snapshot(seed)
@@ -27,7 +28,7 @@ end
 snapshots = [snapshot(s) for s in 1:5]
 
 # Per-snapshot diagnostic returned by the batch map.
-f(û) = FIT.calculate_spectral_flux(û, ks; binning = binning, spectral = FIT.FFTBackend()).flux
+f(û) = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = binning, spectral = SpectralBackends.FFTSpectralBackend()).flux
 
 # Serial reference (cheap; every rank can compute it for assertions).
 ref = [f(s) for s in snapshots]

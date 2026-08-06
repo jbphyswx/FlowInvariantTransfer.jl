@@ -1,6 +1,6 @@
 module Invariants
 
-using ..Types: AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
+using ..Types: Types
 
 export transfer_density, transfer_density!
 
@@ -51,10 +51,10 @@ function _transfer_density_dot!(t, carrier_hat, N̂, ks)
     return t
 end
 
-transfer_density!(t, ::KineticEnergy, velocity_hat, N̂, ks) =
+transfer_density!(t, ::Types.KineticEnergy, velocity_hat, N̂, ks) =
     _transfer_density_dot!(t, velocity_hat, N̂, ks)
 
-transfer_density!(t, ::PassiveScalar, scalar_hat, N̂, ks) =
+transfer_density!(t, ::Types.PassiveScalar, scalar_hat, N̂, ks) =
     _transfer_density_dot!(t, scalar_hat, N̂, ks)
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ transfer_density!(t, ::PassiveScalar, scalar_hat, N̂, ks) =
 # ---------------------------------------------------------------------------
 
 # 3D helicity: ω̂ = i k×û; t[I] = Σ_c Re{ conj(ω̂_c) N̂_c }.
-function transfer_density!(t, ::Helicity, velocity_hat, N̂, ks)
+function transfer_density!(t, ::Types.Helicity, velocity_hat, N̂, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
@@ -84,7 +84,7 @@ end
 
 # Enstrophy: 2D scalar vorticity (conserved dual cascade) / 3D vector vorticity (non-conservative via
 # vortex stretching — N̂_ω = i k×N̂ = curl[(u·∇)u] includes the stretching term).
-function transfer_density!(t, ::Enstrophy, velocity_hat, N̂, ks)
+function transfer_density!(t, ::Types.Enstrophy, velocity_hat, N̂, ks)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     if nd == 2
@@ -117,7 +117,7 @@ end
 Allocating version of [`transfer_density!`](@ref): returns a real array of shape
 `ns` with the per-mode transfer density.
 """
-function transfer_density(invariant::AbstractInvariant, velocity_hat, N̂, ks)
+function transfer_density(invariant::Types.AbstractInvariant, velocity_hat, N̂, ks)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))

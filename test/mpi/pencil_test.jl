@@ -1,14 +1,16 @@
 # PencilFFTs pencil-axis test — run under `mpiexec -n 2` (launched from runtests.jl).
 # Splits one grid across ranks (transpose-based distributed FFT) and verifies the distributed
-# KE spectral flux equals the serial FFTBackend result on the same field. Exits nonzero on failure.
+# KE spectral flux equals the serial SpectralBackends.FFTSpectralBackend result on the same field. Exits nonzero on failure.
 
 using MPI: MPI
-using PencilFFTs: PencilFFTs, allocate_input
-using PencilArrays: PencilArrays, range_local
+using PencilFFTs: PencilFFTs
+using PencilArrays: PencilArrays
 using FFTW: FFTW
 using Random: Random
 using KernelAbstractions: KernelAbstractions as KA
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
 
 MPI.Init()
 comm = MPI.COMM_WORLD
@@ -27,15 +29,15 @@ ky = [ks[2][j] for i in 1:N, j in 1:N]
 û  = cat(ûx, ûy; dims = 3)
 Uphys = (real.(FFTW.bfft(ûx)), real.(FFTW.bfft(ûy)))
 
-binning = FIT.LinearBinning(2π / L)
-ref = FIT.calculate_spectral_flux(û, ks; binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), spectral = FIT.FFTBackend())
+binning = FIT.Types.LinearBinning(2π / L)
+ref = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = binning,
+        dealiasing = FIT.Types.OrszagTwoThirds(), spectral = SpectralBackends.FFTSpectralBackend())
 
 # Distribute the physical field into pencils: each rank fills the portion it owns.
 plan = FIT.build_pencil_plan((N, N), comm)
 upen = ntuple(nd) do c
-    a  = allocate_input(plan)
-    rl = range_local(a)                # global physical indices owned by this rank
+    a  = PencilFFTs.allocate_input(plan)
+    rl = PencilArrays.range_local(a)                # global physical indices owned by this rank
     for I in CartesianIndices(a)
         gI = CartesianIndex(ntuple(d -> rl[d][I[d]], nd))
         a[I] = Uphys[c][gI]
@@ -43,19 +45,19 @@ upen = ntuple(nd) do c
     a
 end
 res = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds())
+        dealiasing = FIT.Types.OrszagTwoThirds())
 
 # Composable execution: MPIBackend(GPUBackend(KA.CPU())) unwraps to a per-rank GPUBackend, routing the
 # local shell reduction through the atomic device scatter-add instead of the host scalar loop. Verified
 # on KA.CPU (plain-Array pencils); the identical code path runs on a CuArray-backed pencil (multi-GPU).
 resG = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), execution = FIT.MPIBackend(FIT.GPUBackend(KA.CPU())))
+        dealiasing = FIT.Types.OrszagTwoThirds(), execution = ComputationalBackends.MPIBackend(ComputationalBackends.GPUBackend(KA.CPU())))
 
 # Enstrophy (2D) — the pencil path now supports every invariant; reuse the same distributed field.
-refZ = FIT.calculate_spectral_flux(û, ks; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
-        spectral = FIT.FFTBackend(), invariant = FIT.Enstrophy())
+refZ = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds(),
+        spectral = SpectralBackends.FFTSpectralBackend(), invariant = FIT.Types.Enstrophy())
 resZ = FIT.pencil_spectral_flux(upen, plan, ks; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Enstrophy())
+        dealiasing = FIT.Types.OrszagTwoThirds(), invariant = FIT.Types.Enstrophy())
 
 # Helicity (3D) — a divergence-free field u = ∇×A on a 3D grid split across ranks. N=16: at N=8 the
 # 2/3-dealiased retained band is too small to form helicity-transferring triads (T_H ≈ 0, degenerate).
@@ -69,11 +71,11 @@ rng3 = Random.MersenneTwister(1)
 Âz = FFTW.fft(randn(rng3, N3, N3, N3)) ./ N3^3
 û3 = cat(im .* (ky3 .* Âz .- kz3 .* Ây), im .* (kz3 .* Âx .- kx3 .* Âz), im .* (kx3 .* Ây .- ky3 .* Âx); dims = 4)
 U3 = ntuple(3) do c; real.(FFTW.bfft(û3[:, :, :, c])); end
-ref3 = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
-        spectral = FIT.FFTBackend(), invariant = FIT.Helicity())
+ref3 = FIT.SpectralFlux.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds(),
+        spectral = SpectralBackends.FFTSpectralBackend(), invariant = FIT.Types.Helicity())
 plan3 = FIT.build_pencil_plan((N3, N3, N3), comm)
 upen3 = ntuple(3) do c
-    a = allocate_input(plan3); rl = range_local(a)
+    a = PencilFFTs.allocate_input(plan3); rl = PencilArrays.range_local(a)
     for I in CartesianIndices(a)
         gI = CartesianIndex(ntuple(d -> rl[d][I[d]], 3))
         a[I] = U3[c][gI]
@@ -81,23 +83,23 @@ upen3 = ntuple(3) do c
     a
 end
 res3 = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Helicity())
+        dealiasing = FIT.Types.OrszagTwoThirds(), invariant = FIT.Types.Helicity())
 
 # Anisotropic geometry (3D): cylindrical k_⊥ = √(kx²+ky²) shells — exercises the geometry generalization.
-refP = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
-        spectral = FIT.FFTBackend(), geometry = FIT.PerpendicularShells())
+refP = FIT.SpectralFlux.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds(),
+        spectral = SpectralBackends.FFTSpectralBackend(), geometry = FIT.Types.PerpendicularShells())
 resP = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), geometry = FIT.PerpendicularShells())
+        dealiasing = FIT.Types.OrszagTwoThirds(), geometry = FIT.Types.PerpendicularShells())
 
 # Enstrophy 3D (vector vorticity + vortex stretching) through the pencil path — reuse the ∇×A field.
-refZ3 = FIT.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.OrszagTwoThirds(),
-        spectral = FIT.FFTBackend(), invariant = FIT.Enstrophy())
+refZ3 = FIT.SpectralFlux.calculate_spectral_flux(û3, ks3; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds(),
+        spectral = SpectralBackends.FFTSpectralBackend(), invariant = FIT.Types.Enstrophy())
 resZ3 = FIT.pencil_spectral_flux(upen3, plan3, ks3; comm = comm, binning = binning,
-        dealiasing = FIT.OrszagTwoThirds(), invariant = FIT.Enstrophy())
+        dealiasing = FIT.Types.OrszagTwoThirds(), invariant = FIT.Types.Enstrophy())
 
 # 0-alloc reuse: a workspace reused across snapshots of the same distributed grid allocates only the
 # small per-shell result vectors (Tglob + flux), not the O(field) Fourier grids/scratch each call.
-wsK = FIT.PencilWorkspace(plan, ks, comm; binning = binning, dealiasing = FIT.OrszagTwoThirds())
+wsK = FIT.PencilWorkspace(plan, ks, comm; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds())
 resWS = FIT.pencil_spectral_flux!(wsK, upen)              # warm (all ranks; collective Allreduce)
 a_reuse = @allocated FIT.pencil_spectral_flux!(wsK, upen)
 

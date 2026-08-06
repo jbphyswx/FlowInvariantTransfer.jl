@@ -1,8 +1,7 @@
 module FlowInvariantTransferFlowFieldSpectraExt
 
-using FlowFieldSpectra: FlowFieldSpectra as FFS, calculate_spectrum
+using FlowFieldSpectra: FlowFieldSpectra as FFS
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod
 
 """
     calculate_energy_transfer(method, velocity_fields::Tuple, coords_vecs::Tuple, ms::Tuple; kwargs...)
@@ -20,7 +19,7 @@ The coordinate axes are treated as a `NonuniformCartesianGrid` (correct for arbi
 the direct-sum transform is exact on uniform axes too).
 """
 function FIT.calculate_energy_transfer(
-    method::Union{SpectralFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod},
+    method::Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod, FIT.Types.ModeToModeTransferMethod},
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ms::Tuple;

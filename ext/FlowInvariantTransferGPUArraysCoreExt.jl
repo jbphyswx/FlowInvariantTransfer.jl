@@ -1,18 +1,20 @@
 module FlowInvariantTransferGPUArraysCoreExt
 
-using GPUArraysCore: AbstractGPUArray
+using GPUArraysCore: GPUArraysCore
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
 using LinearAlgebra: LinearAlgebra as LA
 
-# Device-array detection trait: any `AbstractGPUArray` (CuArray / JLArray / ROCArray / …) is a device
+# Device-array detection trait: any `GPUArraysCore.AbstractGPUArray` (CuArray / JLArray / ROCArray / …) is a device
 # array; host arrays keep the core default `false`. Used to route device inputs correctly (reject the
 # host-only DirectSum reference and the host-array-under-GPUBackend case).
-FIT.Backends.is_gpu_array(::AbstractGPUArray) = true
+ComputationalBackends.is_gpu_array(::GPUArraysCore.AbstractGPUArray) = true
 
 # ---------------------------------------------------------------------------
 # Device-generic versions of the three compressible-pipeline reductions/masks that the scalar `src`
 # methods can't express without scalar indexing (a dealias-truncated copy, the Helmholtz split, and the
-# shell-binning reduction). Selected for device arrays (CuArray / JLArray) via `AbstractGPUArray`
+# shell-binning reduction). Selected for device arrays (CuArray / JLArray) via `GPUArraysCore.AbstractGPUArray`
 # dispatch; host `Array`s keep the scalar 0-alloc `src` methods. Everything else in the compressible
 # pipeline is already device-generic broadcasts + the device-generic FFT transform context, so these
 # complete the on-device path (FFT → cuFFT by construction). Pure broadcasts/reductions — no KA kernel,
@@ -34,7 +36,7 @@ function _dealias_keep(proto, ns::NTuple{nd,Int}) where {nd}
 end
 
 # dst = src, zeroing the Orszag 2/3 discard band (|k| ≥ n_d÷3) when `trunc`.
-function FIT.Compressible._copy_trunc!(dst::AbstractGPUArray, src, ns::NTuple{nd,Int}, nd_::Int, trunc::Bool) where {nd}
+function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src, ns::NTuple{nd,Int}, nd_::Int, trunc::Bool) where {nd}
     if trunc
         keep = _dealias_keep(dst, ns)
         dst .= reshape(keep, ns..., 1) .* src
@@ -45,7 +47,7 @@ function FIT.Compressible._copy_trunc!(dst::AbstractGPUArray, src, ns::NTuple{nd
 end
 
 # Helmholtz split (rot ⊥ k, comp ∥ k) via broadcasts with a guarded 1/k² (0 at the DC mode → comp=0).
-function FIT.Compressible._helmholtz_split!(rot::AbstractGPUArray, comp, field_hat, ks, ns::NTuple{nd,Int}) where {nd}
+function FIT.Compressible._helmholtz_split!(rot::GPUArraysCore.AbstractGPUArray, comp, field_hat, ks, ns::NTuple{nd,Int}) where {nd}
     FT = real(eltype(field_hat)); colons = ntuple(_ -> Colon(), nd)
     kg = ntuple(nd) do d
         v = similar(rot, FT, ns[d]); copyto!(v, collect(FT, ks[d]))
@@ -68,7 +70,7 @@ end
 
 # Shell-bin a per-mode density into shell sums (device reductions → host vector); the keep-mask excludes
 # the 2/3 band when `dealias`. Mode → shell 0 (unassigned) is excluded since `n` runs 1:N_sh.
-function FIT.Compressible._bin(td::AbstractGPUArray, sidx, N_sh, ::Type{FT}, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
+function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
     sidx_d = similar(td, Int, ns); copyto!(sidx_d, sidx)
     keep = dealias ? _dealias_keep(td, ns) : nothing
     T = Vector{FT}(undef, N_sh)
@@ -80,7 +82,7 @@ function FIT.Compressible._bin(td::AbstractGPUArray, sidx, N_sh, ::Type{FT}, ns:
 end
 
 # ---------------------------------------------------------------------------
-# Device-generic Triadic Orthogonal Decomposition kernels (dispatched on AbstractGPUArray). The host
+# Device-generic Triadic Orthogonal Decomposition kernels (dispatched on GPUArraysCore.AbstractGPUArray). The host
 # `Array` methods (0-alloc, scalar-optimized) are untouched; these run the same math with broadcasts /
 # array-dispatched LinearAlgebra so a device-array input `X` executes device-resident. The big
 # `O(nDFT²·nx)` / `O(nStateNx·nBlks)` products go through cuBLAS/cuSOLVER (`*`, `mul!`, `qr!`); the tiny
@@ -89,18 +91,18 @@ end
 # ---------------------------------------------------------------------------
 
 # Whole-block temporal DFT for a device-array segment: one matmul with the DFT matrix + fftshift (the host
-# method is a per-column loop). `spectral=FFTBackend` on a device array would need a batched cuFFT (not
+# method is a per-column loop). `spectral=SpectralBackends.FFTSpectralBackend` on a device array would need a batched cuFFT (not
 # wired) — error clearly and direct to DirectSum. `_` args match the host signature (per-column scratch,
-# unused here). Runs on any AbstractGPUArray (device-resident) and on JLArrays under allowscalar(false).
+# unused here). Runs on any GPUArraysCore.AbstractGPUArray (device-resident) and on JLArrays under allowscalar(false).
 function FIT.TriadicOrthogonalDecomposition._tod_dft_block!(
-    Q_blk, segment::AbstractGPUArray, seg_before_mean, window, win_weight, nDFT, shift, blk_mean,
+    Q_blk, segment::GPUArraysCore.AbstractGPUArray, seg_before_mean, window, win_weight, nDFT, shift, blk_mean,
     backend, _plan, _dft_col, _windowed, _shifted)
-    backend isa FIT.Types.FFTBackend && throw(ArgumentError(
+    backend isa SpectralBackends.FFTSpectralBackend && throw(ArgumentError(
         "device-array triadic_orthogonal_decomposition uses the DirectSum whole-block temporal DFT " *
-        "(matmul); spectral=FFTBackend() on a device array needs a batched cuFFT (not wired) — pass " *
-        "spectral=DirectSumBackend()."))
+        "(matmul); spectral=SpectralBackends.FFTSpectralBackend() on a device array needs a batched cuFFT (not wired) — pass " *
+        "spectral=SpectralBackends.DirectSumSpectralBackend()."))
     CT = eltype(Q_blk); RT = real(CT)
-    win = window isa AbstractGPUArray ? window : copyto!(similar(segment, RT, length(window)), window)
+    win = window isa GPUArraysCore.AbstractGPUArray ? window : copyto!(similar(segment, RT, length(window)), window)
     wnd = segment .* win .* (win_weight / nDFT)                            # (nDFT × nx)
     idx = copyto!(similar(segment, RT, nDFT), RT.(0:nDFT-1))
     W = exp.((-2 * RT(π) * im / RT(nDFT)) .* (idx * transpose(idx)))       # DFT matrix W[k,t]=e^{-2πi(k-1)(t-1)/N}
@@ -114,13 +116,13 @@ function FIT.TriadicOrthogonalDecomposition._tod_dft_block!(
 end
 
 # Put `A` on `proto`'s device (type-stable dispatch; host method returns `A` unchanged).
-FIT.TriadicOrthogonalDecomposition._dev_like(proto::AbstractGPUArray, A) =
+FIT.TriadicOrthogonalDecomposition._dev_like(proto::GPUArraysCore.AbstractGPUArray, A) =
     copyto!(similar(proto, eltype(A), size(A)), A)
 
 # Modal energy budget on device: T_j = s_j · Re Σ_k conj(v[k,j])·W[k]·u[k,j] via a broadcast column
 # reduction (u/v are device views, wdev a genuine device vector). Result brought to host for the scalar
 # T_budget writes (T_budget is the host result array).
-function FIT.TriadicOrthogonalDecomposition._tod_modal_budget!(T_budget, fi_l, fi_n, u, v, s, nm, wdev::AbstractGPUArray)
+function FIT.TriadicOrthogonalDecomposition._tod_modal_budget!(T_budget, fi_l, fi_n, u, v, s, nm, wdev::GPUArraysCore.AbstractGPUArray)
     tb = Array(real.(vec(sum(conj.(v) .* wdev .* u; dims = 1))))
     @inbounds for j in 1:nm
         T_budget[fi_l, fi_n, j] = s[j] * tb[j]
@@ -131,7 +133,7 @@ end
 # Default quadratic nonlinearity out[ix,iv,b] = q1[iv,ix,b]·q2[iv,ix,b] — the fused product+permute as a
 # device broadcast + permutedims! (the host method is a scalar loop). `out` is a genuine device buffer.
 function FIT.TriadicOrthogonalDecomposition._apply_nonlinear!(
-    out::AbstractGPUArray, ::typeof(FIT.TriadicOrthogonalDecomposition._default_nonlinear), q1, q2)
+    out::GPUArraysCore.AbstractGPUArray, ::typeof(FIT.TriadicOrthogonalDecomposition._default_nonlinear), q1, q2)
     permutedims!(out, q1 .* q2, (2, 1, 3))
     return out
 end
@@ -139,16 +141,16 @@ end
 # Per-triad method-of-snapshots SVD — device-generic broadcasts + array-dispatched qr!/mul!, tiny eig
 # on the host. Same math + same return contract (views into sc.Ubuf/sc.Vbuf) as the host method.
 # Dispatched on the SCRATCH element type: `sc`'s buffers are genuine device arrays (`similar(X,…)`),
-# whereas `Q_hat_n`/`Q_hat_kl` arrive as `reshape`d views (wrappers, not `<:AbstractGPUArray`), so
+# whereas `Q_hat_n`/`Q_hat_kl` arrive as `reshape`d views (wrappers, not `<:GPUArraysCore.AbstractGPUArray`), so
 # dispatching on them would miss. Their broadcasts still run device-resident (reshape is a lazy device view).
 function FIT.TriadicOrthogonalDecomposition._triadic_svd_serial!(
-    sc::FIT.TriadicOrthogonalDecomposition._TriadSVDScratch{<:AbstractGPUArray}, sqrt_w, inv_sqrt_w,
+    sc::FIT.TriadicOrthogonalDecomposition._TriadSVDScratch{<:GPUArraysCore.AbstractGPUArray}, sqrt_w, inv_sqrt_w,
     Q_hat_n, Q_hat_kl, nBlks)
     nStateNx = size(Q_hat_n, 1); RT = real(eltype(Q_hat_n)); CT = eltype(Q_hat_n)
     # √w / 1/√w are host metadata vectors (shared struct type param) — move to the device once for the
     # broadcasts (constant across triads; small).
-    sw  = sqrt_w     isa AbstractGPUArray ? sqrt_w     : copyto!(similar(Q_hat_n, RT, length(sqrt_w)), sqrt_w)
-    isw = inv_sqrt_w isa AbstractGPUArray ? inv_sqrt_w : copyto!(similar(Q_hat_n, RT, length(inv_sqrt_w)), inv_sqrt_w)
+    sw  = sqrt_w     isa GPUArraysCore.AbstractGPUArray ? sqrt_w     : copyto!(similar(Q_hat_n, RT, length(sqrt_w)), sqrt_w)
+    isw = inv_sqrt_w isa GPUArraysCore.AbstractGPUArray ? inv_sqrt_w : copyto!(similar(Q_hat_n, RT, length(inv_sqrt_w)), inv_sqrt_w)
     Xw, Q3 = sc.Xw, sc.Q3
     Q3 .= Q_hat_kl .* sw                                         # [i,b] = Q̂_kl[i,b]·√w[i]
     Xw .= LA.adjoint(Q_hat_n) .* transpose(sw) ./ nBlks          # [b,i] = conj(Q̂_n[i,b])·√w[i]/nBlks

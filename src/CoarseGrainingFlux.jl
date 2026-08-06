@@ -1,7 +1,7 @@
 module CoarseGrainingFlux
 
-using ..Types: CoarseGrainingFluxMethod, CoarseGrainingFluxResult, AbstractFilter, AbstractFieldDecomposition, NoDecomposition
-using ..Decomposition: decompose_field
+using ..Types: Types
+using ..Decomposition: Decomposition
 
 export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGrainingFluxWorkspace
 
@@ -79,7 +79,7 @@ struct CoarseGrainingFluxWorkspace{G, W, P, D}
 end
 
 function CoarseGrainingFluxWorkspace(
-    velocity_fields::Tuple, coords_vecs::Tuple, filter::AbstractFilter; kwargs...,
+    velocity_fields::Tuple, coords_vecs::Tuple, filter::Types.AbstractFilter; kwargs...,
 )
     return _cg_flux_workspace(velocity_fields, coords_vecs, filter; kwargs...)
 end
@@ -123,11 +123,11 @@ function calculate_coarse_graining_flux(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
-    decomposition::AbstractFieldDecomposition = NoDecomposition(),
+    filter::Types.AbstractFilter;
+    decomposition::Types.AbstractFieldDecomposition = Types.NoDecomposition(),
     kwargs...,
 )
-    decomposed = decompose_field(decomposition, velocity_fields, coords_vecs; kwargs...)
+    decomposed = Decomposition.decompose_field(decomposition, velocity_fields, coords_vecs; kwargs...)
     return _calculate_coarse_graining_flux_decomposed(
         decomposed, velocity_fields, coords_vecs, ℓ, filter; kwargs...
     )
@@ -138,7 +138,7 @@ function _calculate_coarse_graining_flux_decomposed(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
+    filter::Types.AbstractFilter;
     kwargs...,
 )
     return _cg_flux_cgef(decomp_fields, coords_vecs, ℓ, filter; kwargs...)
@@ -149,7 +149,7 @@ function _calculate_coarse_graining_flux_decomposed(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
+    filter::Types.AbstractFilter;
     kwargs...,
 )
     return map(decomposed) do fields
@@ -177,7 +177,7 @@ function calculate_coarse_graining_flux!(
     ws::CoarseGrainingFluxWorkspace,
     velocity_fields::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
+    filter::Types.AbstractFilter;
     kwargs...,
 )
     return _cg_flux_cgef!(ws, velocity_fields, ℓ, filter; kwargs...)

@@ -1,6 +1,6 @@
 module Decomposition
 
-using ..Types: AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
+using ..Types: Types
 
 export decompose_field, helmholtz_project_spectral!
 
@@ -14,16 +14,16 @@ export decompose_field, helmholtz_project_spectral!
 Decompose a physical-space velocity field `fields` (e.g. `(u, v)`) using the coordinate
 vectors `coords` and the specified decomposition strategy.
 """
-function decompose_field(::NoDecomposition, fields::Tuple, coords::Tuple; kwargs...)
+function decompose_field(::Types.NoDecomposition, fields::Tuple, coords::Tuple; kwargs...)
     return fields
 end
 
-function decompose_field(decomp::AbstractFieldDecomposition, fields::Tuple, coords::Tuple; kwargs...)
+function decompose_field(decomp::Types.AbstractFieldDecomposition, fields::Tuple, coords::Tuple; kwargs...)
     return _decompose_field_physical(decomp, fields, coords; kwargs...)
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
-function _decompose_field_physical(decomp::AbstractFieldDecomposition, fields::Tuple, coords::Tuple; kwargs...)
+function _decompose_field_physical(decomp::Types.AbstractFieldDecomposition, fields::Tuple, coords::Tuple; kwargs...)
     throw(ArgumentError(
         "Physical-space decomposition ($(typeof(decomp))) requires HelmholtzDecomposition.jl. " *
         "Run `using HelmholtzDecomposition` to load the extension."
@@ -39,11 +39,11 @@ end
 
 Decompose a spectral-space velocity field `velocity_hat` along the wavenumbers `ks`.
 """
-function decompose_field(::NoDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+function decompose_field(::Types.NoDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return velocity_hat
 end
 
-function decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+function decompose_field(decomp::Types.AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return _decompose_field_spectral(decomp, velocity_hat, ks)
 end
 
@@ -58,7 +58,7 @@ Project a 3D spectral velocity onto the positive/negative-helicity vector compon
 [`HelicalDecomposition`](@ref)). Each returned array has the shape of `velocity_hat`; for an
 incompressible field `positive .+ negative ≈ velocity_hat`.
 """
-function _decompose_field_spectral(::HelicalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+function _decompose_field_spectral(::Types.HelicalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("HelicalDecomposition is defined in 3D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
@@ -121,7 +121,7 @@ Split a 3D solenoidal velocity into toroidal (horizontal/vortical) and poloidal 
 components in the Craya–Herring frame (see [`ToroidalPoloidalDecomposition`](@ref)). Both returned
 arrays are divergence-free and sum to the solenoidal part of `velocity_hat`.
 """
-function _decompose_field_spectral(::ToroidalPoloidalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
+function _decompose_field_spectral(::Types.ToroidalPoloidalDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("ToroidalPoloidalDecomposition is defined in 3D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
@@ -171,7 +171,7 @@ function _decompose_field_spectral(::ToroidalPoloidalDecomposition, velocity_hat
 end
 
 # Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
-function _decompose_field_spectral(decomp::AbstractFieldDecomposition, ::AbstractArray{<:Complex}, ::Any)
+function _decompose_field_spectral(decomp::Types.AbstractFieldDecomposition, ::AbstractArray{<:Complex}, ::Any)
     throw(ArgumentError(
         "Spectral-space decomposition ($(typeof(decomp))) requires HelmholtzDecomposition.jl. " *
         "Run `using HelmholtzDecomposition` to load the extension."

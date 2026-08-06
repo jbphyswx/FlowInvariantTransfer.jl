@@ -2,15 +2,14 @@ module FlowInvariantTransferCGEFExt
 
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes as CGEF
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics
 
 # ---------------------------------------------------------------------------
 # Filter type mapping: FIT.AbstractFilter → CGEF.AbstractFilterKernel
 # ---------------------------------------------------------------------------
 
-_to_cgef_kernel(::GaussianFilter)      = CGEF.Kernels.GaussianKernel()
-_to_cgef_kernel(::TopHatFilter)        = CGEF.Kernels.TopHatKernel()
-_to_cgef_kernel(::SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
+_to_cgef_kernel(::FIT.Types.GaussianFilter)      = CGEF.Kernels.GaussianKernel()
+_to_cgef_kernel(::FIT.Types.TopHatFilter)        = CGEF.Kernels.TopHatKernel()
+_to_cgef_kernel(::FIT.Types.SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
 
 # ---------------------------------------------------------------------------
 # Override CoarseGrainingFlux._cg_flux_cgef
@@ -39,7 +38,7 @@ Build the reusable CGEF `StructuredGrid`, its `ΠWorkspace`, the `Π_ℓ(x)` out
 function FIT.CoarseGrainingFlux._cg_flux_workspace(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
-    filter::AbstractFilter;
+    filter::FIT.Types.AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
     radius::Union{Nothing, Real} = nothing,
@@ -121,7 +120,7 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     ws::FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace,
     velocity_fields::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
+    filter::FIT.Types.AbstractFilter;
     backend::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
     mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.Deformable(),
     kwargs...,
@@ -152,11 +151,11 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     mean_Π = _masked_mean(Π_out, ws.grid.mask)
 
     if ws.diagnostics === nothing
-        return CoarseGrainingFluxResult(FT(ℓ), Π_out, FT(mean_Π))
+        return FIT.Types.CoarseGrainingFluxResult(FT(ℓ), Π_out, FT(mean_Π))
     else
         τ_arr, S_arr = ws.diagnostics
         _fill_diagnostics!(τ_arr, S_arr, ws.cgef_workspace, Val(ndims(Π_out)))
-        return CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
+        return FIT.Types.CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), Π_out, FT(mean_Π), τ_arr, S_arr)
     end
 end
 
@@ -172,7 +171,7 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef(
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ℓ::Real,
-    filter::AbstractFilter;
+    filter::FIT.Types.AbstractFilter;
     return_diagnostics::Bool = false,
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
     radius::Union{Nothing, Real} = nothing,

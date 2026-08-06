@@ -3,7 +3,7 @@ module FlowInvariantTransferOhMyThreadsExt
 using OhMyThreads: OhMyThreads
 using LinearAlgebra: LinearAlgebra
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: AbstractInvariant, KineticEnergy
+using SpectralBackends: SpectralBackends
 
 # ---------------------------------------------------------------------------
 # Thread-parallel shell-to-shell transfer (OhMyThreads scheduler)
@@ -29,7 +29,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
     spectral;            # transform backend, passed to each per-mediator nonlinear term
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
-    invariant::AbstractInvariant = KineticEnergy(),
+    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
     advecting_hat = velocity_hat,
 )
     nd        = length(ks)
@@ -116,7 +116,7 @@ function FIT.SpectralFlux._spectral_flux_threaded!(
     N̂,
     ks,
     shell_idx;
-    invariant::AbstractInvariant = KineticEnergy(),
+    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
 )
     nd   = length(ks)
     ns   = size(velocity_hat)[1:nd]
@@ -240,11 +240,11 @@ end
 # Each chunk keeps a private partial `net` (Σ_p S[·,p]) reduced with `+`; each task builds its OWN
 # single-threaded workspace + giver scratch (the shared one can't be reused concurrently, and the inner
 # FFTs stay single-threaded so the giver-loop threading is never oversubscribed).
-function FIT.ScaleToScaleTransfer._mode_to_mode_threaded!(
+function FIT.ModeToModeTransfer._mode_to_mode_threaded!(
     result, ws, û_p, velocity_hat, ks;
-    invariant::AbstractInvariant = KineticEnergy(),
+    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
-    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
     advecting_hat = velocity_hat,
 )
     nd = length(ks)
@@ -252,11 +252,11 @@ function FIT.ScaleToScaleTransfer._mode_to_mode_threaded!(
     M  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     S       = result.transfer
-    Nmodes  = prod(ns)
+    Nscales  = prod(ns)
     cis     = CartesianIndices(ns)
     colons  = ntuple(_ -> Colon(), nd)
     nchunks = max(1, Threads.nthreads())
-    net_partial = OhMyThreads.tmapreduce(+, OhMyThreads.index_chunks(1:Nmodes; n = nchunks)) do rng
+    net_partial = OhMyThreads.tmapreduce(+, OhMyThreads.index_chunks(1:Nscales; n = nchunks)) do rng
         local_ws  = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
         local_ûp  = similar(velocity_hat)
         local_net = zeros(FT, ns...)
@@ -288,8 +288,8 @@ end
 function FIT.BandTransfer._band_to_band_threaded!(
     T, bws, velocity_hat, ks;
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
-    invariant::AbstractInvariant = KineticEnergy(),
-    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
     advecting_hat = velocity_hat,
 )
     nd = length(ks)
@@ -339,7 +339,7 @@ end
 function FIT.SpectralFlux._partial_fluxes_threaded!(
     channels, ws, comps, names, velocity_hat, ks, sidx, centers, Nsh;
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
-    spectral::FIT.Types.AbstractSpectralBackend = FIT.Types.DirectSumBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
 )
     FT = real(eltype(velocity_hat)); nd = length(ks); ns = size(velocity_hat)[1:nd]
     prs = [(sp, sq) for sp in names for sq in names]
@@ -356,7 +356,7 @@ function FIT.SpectralFlux._partial_fluxes_threaded!(
             FIT.NonlinearTerm.compute_nonlinear_term!(p.ws, comps[sq], ks;
                 advecting_hat = comps[sp], dealiasing = dealiasing, spectral = spectral)
             for sk in names
-                FIT.Invariants.transfer_density!(p.d, KineticEnergy(), comps[sk], p.ws.N̂, ks)
+                FIT.Invariants.transfer_density!(p.d, FIT.Types.KineticEnergy(), comps[sk], p.ws.N̂, ks)
                 p.ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(p.d, sidx, centers, Nsh)
             end
         end

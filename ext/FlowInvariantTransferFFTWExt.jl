@@ -2,11 +2,7 @@ module FlowInvariantTransferFFTWExt
 
 using FFTW: FFTW
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: AbstractShellBinning, LinearBinning, ShellToShellResult, AbstractInvariant, KineticEnergy
-using FlowInvariantTransfer.Invariants: transfer_density!
-using FlowInvariantTransfer.ShellBinning: shell_edges, shell_centers, n_shells, assign_shells
-using FlowInvariantTransfer.Utils: wavenumber_magnitude_grid
-using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
+using SpectralBackends: SpectralBackends
 using LinearAlgebra: LinearAlgebra
 
 # ---------------------------------------------------------------------------
@@ -67,7 +63,7 @@ struct FFTPlanBundle{PF, PB, CA, KC, MA, PS}
     ctmp2::CA      # complex (ns...) scratch
     k_comp::KC     # nd real (ns...) wavenumber-component arrays (on the input's device)
     keepmask::MA   # Bool (ns...): true where the mode is KEPT (not 2/3-dealiased) (on the device)
-    pad::PS        # PaddedScratch when built for PaddedThreeHalves, else `nothing` — concrete either
+    pad::PS        # PaddedScratch when built for FIT.Types.PaddedThreeHalves, else `nothing` — concrete either
                    # way, so `bundle.pad` access is type-stable (no dynamic dispatch in the hot path).
 end
 
@@ -97,7 +93,7 @@ function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, 
     # `Array` → FFTW plan, a `CuArray` (CUDA loaded) → cuFFT plan — one device-generic engine, built
     # single-threaded. If the array type has no registered FFT provider (e.g. a JLArray test surrogate),
     # planning throws a `MethodError`: catch it and return `nothing` so workspace construction still
-    # succeeds; the FFT compute path then errors clearly (never silently) if `FFTBackend` is requested.
+    # succeeds; the FFT compute path then errors clearly (never silently) if `SpectralBackends.FFTSpectralBackend` is requested.
     plans = try
         _plan_fft_bfft(ct; nthreads = fft_nthreads)
     catch err
@@ -320,13 +316,13 @@ antisymmetric definition. Writes into `result` using workspace `ws`.
 Reuses ws.û_m and ws.nonlinear.N̂ buffers per mediator shell — no N_sh-fold allocations.
 """
 function FIT.ShellToShellTransfer._shell_to_shell_fft!(
-    result::ShellToShellResult,
-    ws::ShellToShellWorkspace,
+    result::FIT.Types.ShellToShellResult,
+    ws::FIT.Workspaces.ShellToShellWorkspace,
     velocity_hat,
     ks;
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
-    invariant::AbstractInvariant = KineticEnergy(),
+    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
     advecting_hat = velocity_hat,
 )
     nd    = length(ks)
@@ -349,8 +345,8 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
             for c in 1:M; ws.û_m[I, c] = velocity_hat[I, c]; end
         end
         FIT.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-            dealiasing=dealiasing, spectral=FIT.Types.FFTBackend(), advecting_hat=advecting_hat)
-        transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)
+            dealiasing=dealiasing, spectral=SpectralBackends.FFTSpectralBackend(), advecting_hat=advecting_hat)
+        FIT.Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, ws.nonlinear.N̂, ks)
         @inbounds for I in CartesianIndices(ns)
             n = ws.shell_idx[I]
             n == 0 && continue
@@ -385,7 +381,7 @@ end
 # A reusable length-`nDFT` FFTW plan + windowed scratch, built once per `triadic_orthogonal_decomposition`
 # call and shared across every column — replacing the per-column `fft()` (which re-plans + allocates
 # on each of ~nBlks·nVar·nx calls).
-function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(nDFT, ::FIT.Types.FFTBackend, ::Type{CT}) where {CT}
+function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(nDFT, ::SpectralBackends.FFTSpectralBackend, ::Type{CT}) where {CT}
     windowed = Vector{CT}(undef, nDFT)
     return (plan = FFTW.plan_fft(windowed), windowed = windowed)
 end
@@ -415,9 +411,9 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
 end
 
 # ---------------------------------------------------------------------------
-# FFT transform context for the compressible spectral transfer (FFTBackend). Provides the
+# FFT transform context for the compressible spectral transfer (SpectralBackends.FFTSpectralBackend). Provides the
 # O(Nᵈ log Nᵈ) analysis/synthesis/gradient primitives the compressible core assembly calls through
-# `FIT.Compressible.TransformContext`, replacing its dependency-free explicit-DFT (DirectSumBackend).
+# `FIT.Compressible.TransformContext`, replacing its dependency-free explicit-DFT (SpectralBackends.DirectSumSpectralBackend).
 # One forward + one backward plan and two (ns...) scratch buffers are shared across every component
 # and every transform in a call (created once under the plan lock). Convention matches the core:
 # synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).

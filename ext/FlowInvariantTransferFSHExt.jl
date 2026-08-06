@@ -2,9 +2,7 @@ module FlowInvariantTransferFSHExt
 
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowInvariantTransfer.Types: SphericalTransferMethod, SphericalTransferResult,
-                                   DivergentSphericalTransferMethod, DivergentSphericalTransferResult
-using FlowInvariantTransfer.Spherical: spherical_transfer_reduce, spherical_transfer_reduce!
+using ComputationalBackends: ComputationalBackends
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer on a regular colatitude–longitude grid, via
@@ -55,7 +53,7 @@ band-limited well below `lmax`). Requires `using FastSphericalHarmonics`.
 # workspace-level choice. The FSH transforms themselves (spinsph_transform/eth/evaluate) allocate
 # internally on every call — no in-place API — so that portion is an irreducible floor; the workspace
 # reuses the embed/Jacobian/reduction buffers (~20% of the per-call allocation here).
-function FIT.SphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true)
+function FIT.Spherical.SphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true)
     lwork = dealias ? 2 * lmax : lmax
     Nwork = lwork + 1
     Cζ = zeros(Float64, Nwork, 2Nwork - 1)
@@ -68,14 +66,14 @@ function FIT.SphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, deali
     ψv = Vector{Float64}(undef, nmode)
     ζv = Vector{Float64}(undef, nmode)
     Av = Vector{Float64}(undef, nmode)
-    result = SphericalTransferResult(
+    result = FIT.Types.SphericalTransferResult(
         collect(Float64, 0:lmax), zeros(Float64, lmax + 1), zeros(Float64, lmax + 1),
         zeros(Float64, lmax + 1), zeros(Float64, lmax + 1))
     return FIT.Spherical.SphericalTransferWorkspace(
         Cζ, Cψ, Gψ, Gζ, J, degs, ψv, ζv, Av, result, Float64(radius), Int(lmax), dealias)
 end
 
-function FIT.calculate_spherical_transfer!(
+function FIT.Spherical.calculate_spherical_transfer!(
     ws::FIT.Spherical.SphericalTransferWorkspace,
     vorticity::AbstractMatrix{<:Real},
 )
@@ -114,23 +112,23 @@ function FIT.calculate_spherical_transfer!(
         ws.ζv[k] = ws.Cζ[i]
         ws.Av[k] = CA[i]
     end
-    return spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
+    return FIT.Spherical.spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
 end
 
 function FIT.calculate_energy_transfer(
-    method::SphericalTransferMethod,
+    method::FIT.Types.SphericalTransferMethod,
     vorticity::AbstractMatrix{<:Real};
     dealias::Bool = true,
     spectral = nothing,
-    execution::FIT.Backends.AbstractExecutionBackend = FIT.Backends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :regular)
     Nθ, Nφ = size(vorticity)
     Nφ == 2Nθ - 1 || throw(ArgumentError(
         "vorticity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
-    ws = FIT.SphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias)
-    return FIT.calculate_spherical_transfer!(ws, vorticity)
+    ws = FIT.Spherical.SphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias)
+    return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
 end
 
 # ---------------------------------------------------------------------------
@@ -190,11 +188,11 @@ in-place transform API, so the spin transforms allocate internally (an irreducib
 only the reused [`DivergentSphericalTransferResult`](@ref) and resolution parameters. Requires
 `using FastSphericalHarmonics`.
 """
-function FIT.DivergentSphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true)
+function FIT.Spherical.DivergentSphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true)
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     lwork = dealias ? 2 * lmax : lmax
     z() = zeros(Float64, lmax + 1)
-    result = DivergentSphericalTransferResult(collect(Float64, 0:lmax), z(), z(), z(), z(), z(), z())
+    result = FIT.Types.DivergentSphericalTransferResult(collect(Float64, 0:lmax), z(), z(), z(), z(), z(), z())
     return FIT.Spherical.DivergentSphericalTransferWorkspace(result, Float64(radius), Int(lmax), Int(lwork), dealias)
 end
 
@@ -256,11 +254,11 @@ grid — each `size == (lmax+1, 2lmax+1)`. Returns a [`DivergentSphericalTransfe
 advection is dealiased at degree `2·lmax` (`dealias=false` skips it). Requires `using FastSphericalHarmonics`.
 """
 function FIT.calculate_energy_transfer(
-    method::DivergentSphericalTransferMethod,
+    method::FIT.Types.DivergentSphericalTransferMethod,
     velocity::Tuple{<:AbstractMatrix, <:AbstractMatrix};
     dealias::Bool = true,
     spectral = nothing,
-    execution::FIT.Backends.AbstractExecutionBackend = FIT.Backends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :regular)
@@ -270,7 +268,7 @@ function FIT.calculate_energy_transfer(
     Nθ, Nφ = size(u_θ)
     Nφ == 2Nθ - 1 || throw(ArgumentError(
         "velocity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
-    ws = FIT.DivergentSphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias)
+    ws = FIT.Spherical.DivergentSphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias)
     return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
 end
 

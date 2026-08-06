@@ -1,11 +1,7 @@
 module Workspaces
 
-using ..Types: AbstractShellBinning, LinearBinning,
-               AbstractShellGeometry, IsotropicShells, AbstractDealiasing, OrszagTwoThirds
-using ..Backends: AbstractExecutionBackend, SerialBackend
-using ..ShellBinning: shell_edges, assign_shells, shell_coordinate
-using ..Utils: wavenumber_magnitude_grid
-
+using ..Types: Types
+using ..ShellBinning: ShellBinning
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
@@ -64,7 +60,7 @@ itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned tra
 `dealiasing` you will use so the extension can size the scratch (only `PaddedThreeHalves` needs the
 larger 3/2 buffers — the default 2/3 path builds none).
 """
-function NonlinearTermWorkspace(advected_hat, ks; dealiasing::AbstractDealiasing = OrszagTwoThirds(),
+function NonlinearTermWorkspace(advected_hat, ks; dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
                                 fft_nthreads::Int = 1)
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
@@ -109,12 +105,12 @@ end
 
 Construct a `SpectralFluxWorkspace` for the given input and binning.
 """
-function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
-                               geometry::AbstractShellGeometry = IsotropicShells(),
-                               dealiasing::AbstractDealiasing = OrszagTwoThirds(),
+function SpectralFluxWorkspace(velocity_hat, ks, binning::Types.AbstractShellBinning;
+                               geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+                               dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
                                fft_nthreads::Int = 1)
-    k_mag  = shell_coordinate(geometry, ks)
-    edges  = shell_edges(binning, maximum(k_mag))
+    k_mag  = ShellBinning.shell_coordinate(geometry, ks)
+    edges  = ShellBinning.shell_edges(binning, maximum(k_mag))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
     ns     = size(velocity_hat)[1:length(ks)]
@@ -122,7 +118,7 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing, fft_nthreads=fft_nthreads),
         similar(velocity_hat, FT, N_sh),     # T_spec
         similar(velocity_hat, FT, N_sh),     # flux
-        similar(velocity_hat, FT, ns...),    # transfer_density
+        similar(velocity_hat, FT, ns...),    # Invariants.transfer_density
     )
 end
 
@@ -161,14 +157,14 @@ end
 
 Construct a `ShellToShellWorkspace` for the given input and binning.
 """
-function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
-                               geometry::AbstractShellGeometry = IsotropicShells(),
-                               dealiasing::AbstractDealiasing = OrszagTwoThirds())
+function ShellToShellWorkspace(velocity_hat, ks, binning::Types.AbstractShellBinning;
+                               geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+                               dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds())
     FT        = real(eltype(velocity_hat))
-    k_mag     = shell_coordinate(geometry, ks)
-    edges     = shell_edges(binning, maximum(k_mag))
+    k_mag     = ShellBinning.shell_coordinate(geometry, ks)
+    edges     = ShellBinning.shell_edges(binning, maximum(k_mag))
     N_sh      = length(edges) - 1
-    shell_idx = assign_shells(k_mag, edges)
+    shell_idx = ShellBinning.assign_shells(k_mag, edges)
     ns        = size(velocity_hat)[1:length(ks)]
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
@@ -176,7 +172,7 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::AbstractShellBinning;
         similar(velocity_hat, FT, N_sh, N_sh),   # T_mat
         similar(velocity_hat, FT, N_sh),         # net_transfer
         shell_idx,
-        similar(velocity_hat, FT, ns...),        # transfer_density
+        similar(velocity_hat, FT, ns...),        # Invariants.transfer_density
     )
 end
 
