@@ -18,8 +18,10 @@ parallelised; each task writes a disjoint column of `result.transfer_matrix`, so
 there is no data race. Writes into `result` and `ws`, and returns `max_asym`
 (matching the serial `_calculate_shell_to_shell_direct!` contract).
 
-Each task allocates its own `NonlinearTermWorkspace` because the shared workspace
-cannot be reused concurrently across threads.
+The mediator shells are chunked so each task builds ONE `NonlinearTermWorkspace` (+ band-field and
+density scratch) and reuses it across its shells — the shared workspace cannot be reused concurrently
+across threads, and a per-shell build would put full-grid allocation (GC contention, a stop-the-world
+sync under threads) inside the parallel region. Mirrors the band/mode/partial threaded methods below.
 """
 function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
     result,
@@ -41,34 +43,42 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
 
     fill!(result.transfer_matrix, zero(FT))
 
-    # Thread-parallel over mediator shells. Each task writes only column m.
-    OhMyThreads.@tasks for m in 1:N_sh
-        local_ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
-        û_m      = similar(velocity_hat)
-        fill!(û_m, zero(eltype(û_m)))
-        for I in CartesianIndices(ns)
-            shell_idx[I] == m || continue
-            for c in 1:M
-                û_m[I, c] = velocity_hat[I, c]
-            end
-        end
+    # Chunk the mediator shells so each task builds its workspace + scratch ONCE (per chunk) and reuses
+    # them across its shells — NOT once per shell (a full-grid workspace+plan build inside the parallel
+    # region puts GC contention in the hot loop). Each shell m writes only column m → race-free. The pool
+    # is built serially, OUTSIDE the parallel region, exactly as the band/mode/partial methods below.
+    nchunks = max(1, min(Threads.nthreads(), N_sh))
+    rngs = collect(OhMyThreads.index_chunks(1:N_sh; n = nchunks))
+    pool = [(nlw = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
+             ûm = similar(velocity_hat),
+             d  = similar(velocity_hat, FT, ns...)) for _ in 1:length(rngs)]
 
-        # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field
-        # (AMP 2005) — for energy gives an antisymmetric A[n,m] reducing to transfer_spectrum[n].
-        FIT.NonlinearTerm.compute_nonlinear_term!(local_ws, û_m, ks;
-            dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
-        N̂_m = local_ws.N̂
-
-        local_density = similar(velocity_hat, FT, ns...)
-        FIT.Invariants.transfer_density!(local_density, invariant, velocity_hat, N̂_m, ks)
-
-        for n in 1:N_sh
-            s = zero(FT)
+    OhMyThreads.tforeach(eachindex(rngs)) do ci
+        p = pool[ci]
+        for m in rngs[ci]
+            fill!(p.ûm, zero(eltype(p.ûm)))
             for I in CartesianIndices(ns)
-                shell_idx[I] == n || continue
-                s += local_density[I]
+                shell_idx[I] == m || continue
+                for c in 1:M
+                    p.ûm[I, c] = velocity_hat[I, c]
+                end
             end
-            result.transfer_matrix[n, m] = s
+
+            # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field
+            # (AMP 2005) — for energy gives an antisymmetric A[n,m] reducing to transfer_spectrum[n].
+            FIT.NonlinearTerm.compute_nonlinear_term!(p.nlw, p.ûm, ks;
+                dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+
+            FIT.Invariants.transfer_density!(p.d, invariant, velocity_hat, p.nlw.N̂, ks)
+
+            for n in 1:N_sh
+                s = zero(FT)
+                for I in CartesianIndices(ns)
+                    shell_idx[I] == n || continue
+                    s += p.d[I]
+                end
+                result.transfer_matrix[n, m] = s
+            end
         end
     end
 
