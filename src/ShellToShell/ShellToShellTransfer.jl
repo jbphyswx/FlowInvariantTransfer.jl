@@ -9,7 +9,7 @@ using ..Utils: Utils
 using ..NonlinearTerm: NonlinearTerm
 using ..Workspaces: Workspaces
 
-export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!,
+export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_shell_to_shell_transfer_batch,
        calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 
 # ---------------------------------------------------------------------------
@@ -130,6 +130,79 @@ function calculate_shell_to_shell_transfer!(
         advecting_hat=advecting_hat)
     return result
 end
+
+"""
+    calculate_shell_to_shell_transfer_batch(velocity_hats, ks; binning, dealiasing, verify_antisymmetry,
+        invariant, spectral, geometry, execution) -> Vector{ShellToShellResult}
+
+Shell-to-shell transfer for a batch of snapshots that share one grid (`velocity_hats` an iterable of
+`(ns..., D)` coefficient arrays). The shell structure is built ONCE and each worker reuses a single
+`ShellToShellWorkspace` across its snapshots; `execution = ThreadedBackend()` (requires `using
+OhMyThreads`) threads over snapshots with a **serial** inner transform (the batch is the outer parallel
+axis, so no nested threading). Results are in input order, bit-identical to calling
+[`calculate_shell_to_shell_transfer`](@ref) per snapshot (each snapshot self-advects).
+"""
+function calculate_shell_to_shell_transfer_batch(
+    velocity_hats,
+    ks;
+    binning::Types.AbstractShellBinning = _default_binning(ks),
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    verify_antisymmetry::Bool = true,
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+)
+    Types.require_coefficient_spectral(spectral)
+    n = length(velocity_hats)
+    n == 0 && return Types.ShellToShellResult[]
+    k_mag   = ShellBinning.shell_coordinate(geometry, ks)
+    edges   = ShellBinning.shell_edges(binning, maximum(k_mag))
+    centers = ShellBinning.shell_centers(binning, maximum(k_mag))
+    N_sh    = length(centers)
+    results = Vector{Types.ShellToShellResult}(undef, n)
+    _shell_to_shell_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, centers, edges, N_sh;
+        binning=binning, dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
+        spectral=spectral, geometry=geometry)
+    return results
+end
+
+# Serial reference: one workspace reused across the whole batch; each snapshot self-advects.
+function _shell_to_shell_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, centers, edges, N_sh;
+                                binning, dealiasing, verify_antisymmetry, invariant, spectral, geometry)
+    FT = real(eltype(first(velocity_hats)))
+    ws = Workspaces.ShellToShellWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
+    for i in eachindex(velocity_hats)
+        vh = velocity_hats[i]
+        T_mat = Matrix{FT}(undef, N_sh, N_sh); net = Vector{FT}(undef, N_sh)
+        res  = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
+        max_asym = _calculate_shell_to_shell!(res, ws, vh, ks, ComputationalBackends.SerialBackend(), spectral;
+            dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant, advecting_hat=vh)
+        results[i] = Types.ShellToShellResult(centers, edges, T_mat, net, max_asym)
+    end
+    return results
+end
+
+# Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace pool, serial inner).
+function _shell_to_shell_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the shell-to-shell batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_shell_to_shell_batch!(::ComputationalBackends.AbstractThreadedBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
+    _shell_to_shell_batch_threaded!(results, velocity_hats, ks, centers, edges, N_sh; kwargs...)
+
+# Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
+function _shell_to_shell_batch_distributed!(args...; kwargs...)
+    throw(ArgumentError("execution = DistributedBackend() for the shell-to-shell batch requires Distributed. " *
+                        "Run `using Distributed` to load the extension."))
+end
+_shell_to_shell_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
+    _shell_to_shell_batch_distributed!(results, velocity_hats, ks, centers, edges, N_sh; kwargs...)
+
+# Any other execution backend has no batch hook — refuse rather than silently run serial.
+_shell_to_shell_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
+    throw(ArgumentError("calculate_shell_to_shell_transfer_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 """
     calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ShellToShellResult

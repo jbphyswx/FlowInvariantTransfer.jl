@@ -2,6 +2,8 @@ module FlowInvariantTransferFlowFieldSpectraExt
 
 using FlowFieldSpectra: FlowFieldSpectra as FFS
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using SpectralBackends: SpectralBackends
+using ComputationalBackends: ComputationalBackends
 
 """
     calculate_energy_transfer(method, velocity_fields::Tuple, coords_vecs::Tuple, ms::Tuple; kwargs...)
@@ -15,27 +17,30 @@ Convention bridge: FlowFieldSpectra takes a tensor-product grid (per-axis coordi
 grid-shaped field tensor `(spatial…, batch…)`, returning fftSHIFTED (centred, `k = −N/2 … N/2−1`)
 coefficients `(ms…, ncomp)`, whereas FlowInvariantTransfer's core uses grid-shaped arrays in FFTW
 fftfreq order (`0,1,…,N/2−1,−N/2,…,−1`). This method `ifftshift`s the coefficients on the way out.
-The coordinate axes are treated as a `NonuniformCartesianGrid` (correct for arbitrary axis vectors;
-the direct-sum transform is exact on uniform axes too).
+The axes build an all-periodic Cartesian `FlowGeometries.Grids.StructuredGrid`. Pass each axis as a
+uniform range so its period is inferred (`n·Δ`); a stretched or plain-vector axis needs `domain_size`
+(its per-direction period). The direct-sum transform is exact on uniform axes.
 """
 function FIT.calculate_energy_transfer(
     method::Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod, FIT.Types.ModeToModeTransferMethod},
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ms::Tuple;
-    backend::FFS.AbstractSpectralBackend = FFS.DirectSumBackend(),
-    execution::FFS.AbstractExecutionBackend = FFS.AutoBackend(),
+    backend::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     domain_size = nothing,
     kwargs...
 )
     nd  = length(coords_vecs)
-    ds  = domain_size === nothing ?
-          ntuple(d -> (cv = coords_vecs[d]; length(cv) > 1 ? length(cv) * (cv[2] - cv[1]) : one(eltype(cv))), nd) :
-          domain_size
+    FT  = float(eltype(coords_vecs[1]))
 
-    # FlowFieldSpectra reads per-axis coordinate vectors + grid-shaped field components directly (it
-    # stacks the tuple onto a trailing batch axis), so no flattening is needed.
-    grid = FFS.NonuniformCartesianGrid(coords_vecs; domain_size = ds)
+    # Build an all-periodic Cartesian StructuredGrid straight from the coordinate axes. FlowGeometries'
+    # `_to_axis` adapts each axis to `FT` while keeping its type, so a uniform *range* axis carries its
+    # spacing and its period is inferred (n·Δ, the spectral domain) — no hand-computed Δ. `domain_size`
+    # supplies the period only for axes handed in as plain vectors, whose type can't carry the spacing.
+    geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
+    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...;
+                                                   topology = ntuple(_ -> true, nd), period = domain_size)
 
     # Transform physical → spectral, then reorder centred → fftfreq (ifftshift = circshift by −N/2 per axis)
     # so the coefficient at grid index i carries the fftfreq wavenumber FlowInvariantTransfer's core expects.

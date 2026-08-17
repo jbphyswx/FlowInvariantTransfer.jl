@@ -2,8 +2,9 @@ module CoarseGrainingFlux
 
 using ..Types: Types
 using ..Decomposition: Decomposition
+using ComputationalBackends: ComputationalBackends
 
-export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, CoarseGrainingFluxWorkspace
+export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch, CoarseGrainingFluxWorkspace
 
 # ---------------------------------------------------------------------------
 # Internal stubs — overridden by FlowInvariantTransferCGEFExt when
@@ -178,6 +179,58 @@ function calculate_coarse_graining_flux!(
 )
     return _cg_flux_cgef!(ws, velocity_fields)
 end
+
+"""
+    calculate_coarse_graining_flux_batch(velocity_fields_batch, coords_vecs, ℓ, filter; execution, kwargs...)
+        -> Vector{CoarseGrainingFluxResult}
+
+Coarse-graining flux Π_ℓ(x) for a batch of snapshots on the same grid (`velocity_fields_batch` an
+iterable of velocity-component tuples `(u, v[, w])`). One `CoarseGrainingFluxWorkspace` (grid + all CGEF
+plans, fixed for `(ℓ, filter)`) is built per worker and reused across its snapshots — the plans are built
+ONCE, not per snapshot. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over
+snapshots with a serial inner filter (no nested threading). Each result owns an independent copy of its
+flux field. Only `NoDecomposition` is supported; `kwargs` (`mask`, `return_diagnostics`, `radius`,
+`backend`, …) are forwarded to the workspace. Requires `CoarseGrainingEnergyFluxes` to be loaded.
+"""
+function calculate_coarse_graining_flux_batch(
+    velocity_fields_batch,
+    coords_vecs::Tuple,
+    ℓ::Real,
+    filter::Types.AbstractFilter;
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    kwargs...,
+)
+    length(velocity_fields_batch) == 0 && return []
+    return _cg_flux_batch!(Types.resolve_execution(execution), velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+end
+
+# Serial reference: one workspace reused across the batch; each result gets an independent copy (the
+# workspace overwrites its output buffer on every snapshot, so the results must not alias it).
+function _cg_flux_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+    ws = CoarseGrainingFluxWorkspace(first(velocity_fields_batch), coords_vecs, ℓ, filter; kwargs...)
+    return [deepcopy(calculate_coarse_graining_flux!(ws, vf)) for vf in velocity_fields_batch]
+end
+
+# Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace, serial inner).
+function _cg_flux_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the coarse-graining batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_cg_flux_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
+    _cg_flux_batch_threaded!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+
+# Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
+function _cg_flux_batch_distributed!(args...; kwargs...)
+    throw(ArgumentError("execution = DistributedBackend() for the coarse-graining batch requires Distributed. " *
+                        "Run `using Distributed` to load the extension."))
+end
+_cg_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
+    _cg_flux_batch_distributed!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+
+# Any other execution backend has no batch hook — refuse rather than silently run serial.
+_cg_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
+    throw(ArgumentError("calculate_coarse_graining_flux_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 # One-line show (the workspace holds CGEF filter/derivative plans → default field-dump show can segfault).
 Base.show(io::IO, ::CoarseGrainingFluxWorkspace) = print(io, "CoarseGrainingFluxWorkspace(…)")

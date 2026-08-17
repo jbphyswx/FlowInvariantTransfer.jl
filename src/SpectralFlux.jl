@@ -10,7 +10,7 @@ using ..Utils: Utils
 using ..NonlinearTerm: NonlinearTerm
 using ..Workspaces: Workspaces
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -71,6 +71,12 @@ function calculate_spectral_flux(
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
     Types.require_coefficient_spectral(spectral)
+    # DirectSum uses scalar-indexed direct sums (host-only); reject a device array up front, before the
+    # workspace/FFT-plan build would fail with an opaque "JLArray to Ptr" (FFTW plan on a device array).
+    (spectral isa SpectralBackends.DirectSumSpectralBackend && ComputationalBackends.is_gpu_array(velocity_hat)) &&
+        throw(ArgumentError(
+            "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot " *
+            "run on device arrays; use spectral = SpectralBackends.FFTSpectralBackend() (cuFFT via AbstractFFTs) for the device path."))
     decomposed = Decomposition.decompose_field(decomposition, velocity_hat, ks)
     return _calculate_spectral_flux_decomposed(
         decomposed, velocity_hat, ks, binning, dealiasing, invariant, spectral, Types.resolve_execution(execution), advecting_hat, geometry
@@ -168,6 +174,77 @@ function calculate_spectral_flux!(
     _calculate_spectral_flux_with_N̂!(result, ws, velocity_hat, ws.nonlinear.N̂, ks, shell_idx, Types.resolve_execution(execution); invariant=invariant)
     return result
 end
+
+"""
+    calculate_spectral_flux_batch(velocity_hats, ks; binning, dealiasing, invariant, spectral, geometry, execution)
+        -> Vector{SpectralFluxResult}
+
+Spectral flux for a batch of snapshots that share one grid (`velocity_hats` an iterable of `(ns..., D)`
+coefficient arrays). The snapshot-independent shell structure is built ONCE, and each worker reuses a
+single `SpectralFluxWorkspace` (FFT plans + scratch) across its snapshots — so the plan build is
+amortised over the whole batch, not paid per snapshot. `execution = ThreadedBackend()` (requires
+`using OhMyThreads`) splits the snapshots across threads with a **serial** inner transform (the batch is
+the outer parallel axis; the FFTs stay single-threaded, so there is no nested threading). Results are
+returned in input order and are bit-identical to calling [`calculate_spectral_flux`](@ref) per snapshot.
+"""
+function calculate_spectral_flux_batch(
+    velocity_hats,
+    ks;
+    binning::Types.AbstractShellBinning = _default_binning(ks),
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+)
+    Types.require_coefficient_spectral(spectral)
+    n = length(velocity_hats)
+    n == 0 && return Types.SpectralFluxResult[]
+    û1        = first(velocity_hats)
+    k_mag     = ShellBinning.shell_coordinate(geometry, ks)
+    edges     = ShellBinning.shell_edges(binning, maximum(k_mag))
+    centers   = ShellBinning.shell_centers(binning, maximum(k_mag))
+    shell_idx = ShellBinning.assign_shells(k_mag, edges)
+    RT        = real(eltype(û1))
+    results   = [Types.SpectralFluxResult(centers, similar(centers, RT, length(centers)), similar(centers, RT, length(centers)))
+                 for _ in 1:n]
+    _spectral_flux_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, shell_idx;
+                          binning=binning, dealiasing=dealiasing, invariant=invariant, spectral=spectral, geometry=geometry)
+    return results
+end
+
+# Serial reference: one workspace reused across the whole batch.
+function _spectral_flux_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, shell_idx;
+                               binning, dealiasing, invariant, spectral, geometry)
+    ws = Workspaces.SpectralFluxWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
+    for i in eachindex(velocity_hats)
+        calculate_spectral_flux!(results[i], ws, velocity_hats[i], ks, shell_idx;
+                                 dealiasing=dealiasing, invariant=invariant, spectral=spectral,
+                                 execution=ComputationalBackends.SerialBackend())
+    end
+    return results
+end
+
+# Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace pool, serial inner).
+function _spectral_flux_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the spectral-flux batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_spectral_flux_batch!(::ComputationalBackends.AbstractThreadedBackend, results, velocity_hats, ks, shell_idx; kwargs...) =
+    _spectral_flux_batch_threaded!(results, velocity_hats, ks, shell_idx; kwargs...)
+
+# Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
+function _spectral_flux_batch_distributed!(args...; kwargs...)
+    throw(ArgumentError("execution = DistributedBackend() for the spectral-flux batch requires Distributed. " *
+                        "Run `using Distributed` to load the extension."))
+end
+_spectral_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, shell_idx; kwargs...) =
+    _spectral_flux_batch_distributed!(results, velocity_hats, ks, shell_idx; kwargs...)
+
+# Any other execution backend has no batch hook — refuse rather than silently run serial.
+_spectral_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, shell_idx; kwargs...) =
+    throw(ArgumentError("calculate_spectral_flux_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 # ---------------------------------------------------------------------------
 # Transfer-density write + mode→shell reduction, dispatched on the execution backend.

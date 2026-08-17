@@ -11,53 +11,46 @@ using ComputationalBackends: ComputationalBackends
 # points, spectral-grid size, and tolerance. `NUFFTCoarseGrainingWorkspace` builds ONE type-1 and
 # ONE type-2 guru plan (points set once) plus every working buffer, so a repeat call re-plans
 # nothing and allocates nothing on the Julia side (`finufft_exec!` writes into the reused buffers).
-# Plans are C resources with no finalizer of their own — the workspace registers one.
+# FINUFFT.jl registers no finalizer on its plans, so each C plan gets one attached to the (mutable) plan
+# object itself when built — letting the workspaces stay immutable.
 # ---------------------------------------------------------------------------
 
 # View of the c-th component page of an (spatial…, D) array — contiguous (last-dim slice), so
 # FINUFFT's `InputArray = Union{Array,SubArray}` + contiguity check accepts it.
 @inline _page(A::AbstractArray, c::Int) = view(A, ntuple(_ -> Colon(), ndims(A) - 1)..., c)
 
-"""
-    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8, execution=ComputationalBackends.SerialBackend())
-
-Build the reusable FINUFFT plans (type-1 analysis, type-2 synthesis; points set) and every working
-buffer for [`nufft_coarse_graining_flux!`](@ref). 1D/2D/3D scattered Cartesian points.
-
-`execution` selects the FINUFFT plan thread count. `ComputationalBackends.SerialBackend()` (default) → single-threaded
-transforms: 0 allocation per `finufft_exec!` (FINUFFT shares `libfftw3` with FFTW.jl, so a
-multithreaded plan routes its internal FFT through FFTW's Julia-thread spawn callback and allocates
-Task/Channel/lock scratch on every exec), and the right choice when the outer batch axis (a scale
-sweep or snapshot series) is itself parallelised one-worker-per-item — no oversubscription.
-`ComputationalBackends.ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
-"""
-function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol::Real = 1e-8,
-                                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+# Provider builder dispatched from `NUFFTCoarseGrainingWorkspace(scatter_coords, ms;
+# spectral = Types.FINUFFTBackend(), …)` — builds the reusable FINUFFT plans (type-1 analysis, type-2
+# synthesis; points set) and every working buffer for `nufft_coarse_graining_flux!`. 1D/2D/3D scattered
+# Cartesian points. `execution` selects the FINUFFT plan thread count: `SerialBackend()` (default) →
+# single-threaded, 0 allocation per `finufft_exec!` (FINUFFT shares libfftw3 with FFTW.jl, so a
+# multithreaded plan routes its FFT through FFTW's Julia-thread callback and allocates Task scratch per
+# exec) — the right choice when the outer batch axis is parallelised one-worker-per-item.
+# `ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
+function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tuple, ms::Tuple; Ls::Tuple, tol::Real = 1e-8,
+                                 execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
     fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
+    length(Ls) == nd || throw(ArgumentError("Ls ($(length(Ls))D) must match scatter_coords ($(nd)D)"))
+    all(>(0), Ls) || throw(ArgumentError("Ls must be positive (periodic domain size per dimension); got $Ls"))
     N  = length(scatter_coords[1])
     FT = float(eltype(scatter_coords[1]))
     CT = Complex{FT}
     D  = nd    # velocity has one component per spatial dimension
 
-    # Uniform wavenumber grid inferred from the coordinate spans.
-    Ls = ntuple(nd) do d
-        cv = scatter_coords[d]; rng = maximum(cv) - minimum(cv)
-        rng > 0 ? FT(rng) : one(FT)
-    end
-    ks_1d = ntuple(nd) do d
-        N_d = ms[d]; dk = 2 * FT(π) / Ls[d]
-        [FT(k <= N_d ÷ 2 ? k : k - N_d) * dk for k in 0:N_d-1]
-    end
+    Lf = ntuple(d -> FT(Ls[d]), nd)              # periodic domain per dimension (k = 2πn/L)
+    ks_1d = FIT.Utils.wavenumber_grid(ms, Lf)    # fftfreq/FFTW ordering, matching the modeord=1 plans below
     k_mag = FIT.Utils.wavenumber_magnitude_grid(ks_1d)
     k_comp_grids = ntuple(d -> _build_k_component_nufft(ks_1d, d, ms), nd)
 
-    # Coordinates rescaled to [-π, π) for FINUFFT.
+    # Coordinates mapped to [-π, π) at the *physical* scale x ↦ 2π(x−xₘᵢₙ)/L − π. `xₘᵢₙ` is a pure phase
+    # reference (the type-1→type-2 round-trip cancels it and Πℓ is shift-invariant); `L` sets the scale,
+    # so samples on the uniform L-grid land on the DFT nodes and |k|/kⱼ carry physical units.
     scaled_coords = ntuple(nd) do d
-        cmin = FT(minimum(scatter_coords[d])); rng = FT(maximum(scatter_coords[d])) - cmin
-        rng > 0 ? (FT.(scatter_coords[d]) .- cmin) ./ rng .* (2 * FT(π)) .- FT(π) : zeros(FT, N)
+        cmin = FT(minimum(scatter_coords[d]))
+        (FT.(scatter_coords[d]) .- cmin) ./ Lf[d] .* (2 * FT(π)) .- FT(π)
     end
 
     # Working buffers (all reused across calls).
@@ -74,19 +67,22 @@ function FIT.NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; tol:
     grad_j = zeros(FT, N)
 
     nmodes = Int64[ms...]
-    p1 = FINUFFT.finufft_makeplan(1, nmodes, 1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads)   # nonuniform → uniform
-    p2 = FINUFFT.finufft_makeplan(2, nmodes, 1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads)   # uniform → nonuniform
+    # type-1 is the ANALYSIS transform, so it must use e^{-ikx} (iflag = -1) to match the fft/DFT
+    # convention — the ū = type2(Ĝ·type1(v)/N) round-trip is then a convolution filter, not a correlation.
+    # modeord = 1 → FFTW mode ordering (0,1,…,N/2-1,-N/2,…,-1), matching `ks_1d`/`Ĝ`; the default (CMCL,
+    # -N/2…N/2-1) would scramble the filter/derivative against the k-grid.
+    p1 = FINUFFT.finufft_makeplan(1, nmodes, -1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads, modeord = 1)   # nonuniform → uniform, e^{-ikx}
+    p2 = FINUFFT.finufft_makeplan(2, nmodes,  1, 1, FT(tol); dtype = FT, nthreads = fft_nthreads, modeord = 1)   # uniform → nonuniform, e^{+ikx}
     FINUFFT.finufft_setpts!(p1, scaled_coords...)
     FINUFFT.finufft_setpts!(p2, scaled_coords...)
+    # FINUFFT.jl registers no finalizer on its plans, so free each C plan when it is GC'd. Attaching the
+    # finalizer to the (mutable) plan object — not the workspace — lets the workspace stay immutable.
+    finalizer(FINUFFT.finufft_destroy!, p1)
+    finalizer(FINUFFT.finufft_destroy!, p2)
 
-    ws = FIT.NUFFTCoarseGrainingWorkspace(
+    return FIT.NUFFTCoarseGrainingWorkspace(
         p1, p2, scaled_coords, k_mag, k_comp_grids, ks_1d, Ĝ, û_filt, u_filt,
         τ, S̄, Π, spec, scat_in, scat_out, prod_r, grad_j, N, FT(tol))
-    finalizer(ws) do w
-        FINUFFT.finufft_destroy!(w.p1)
-        FINUFFT.finufft_destroy!(w.p2)
-    end
-    return ws
 end
 
 """
@@ -203,43 +199,21 @@ and all intermediate buffers are reused.
 - `execution=ComputationalBackends.SerialBackend()`: `ComputationalBackends.ThreadedBackend()` threads the FINUFFT transforms across cores (for a
   lone/under-saturated call); `ComputationalBackends.SerialBackend()` keeps them single-threaded (batch the outer axis instead).
 """
-function FIT.nufft_coarse_graining_flux(
+function FIT._nufft_coarse_graining_flux(
+    ::FIT.Types.FINUFFTBackend,
     velocity_fields::Tuple,
     scatter_coords::Tuple,
     ℓ::Real,
     filter::FIT.Types.AbstractFilter,
     ms::Tuple;
+    Ls::Tuple,
     return_diagnostics::Bool = false,
     tol::Real = 1e-8,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol = tol, execution = execution)
+    ws = FIT._nufft_cg_workspace(FIT.Types.FINUFFTBackend(), scatter_coords, ms; Ls = Ls, tol = tol, execution = execution)
     return FIT.nufft_coarse_graining_flux!(
         ws, velocity_fields, ℓ, filter, ms; return_diagnostics = return_diagnostics)
-end
-
-# ---------------------------------------------------------------------------
-# Unified entry: scattered-Cartesian coarse-graining flux through calculate_energy_transfer
-# ---------------------------------------------------------------------------
-
-"""
-    calculate_energy_transfer(method::CoarseGrainingFluxMethod, velocity_fields, scatter_coords, ms; kwargs...)
-
-Scattered / non-uniform-Cartesian coarse-graining flux `Π_ℓ(x)` through the unified
-[`calculate_energy_transfer`](@ref) front-end. The extra `ms::Tuple` positional (the intermediate
-uniform spectral-grid size) distinguishes this from the uniform-grid 3-argument `CoarseGrainingFluxMethod`
-method in the core; it routes to [`nufft_coarse_graining_flux`](@ref) using the method's `scale`/`filter`.
-Requires `using FINUFFT`.
-"""
-function FIT.calculate_energy_transfer(
-    method::FIT.Types.CoarseGrainingFluxMethod,
-    velocity_fields::Tuple,
-    scatter_coords::Tuple,
-    ms::Tuple;
-    kwargs...,
-)
-    return FIT.nufft_coarse_graining_flux(
-        velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
 end
 
 # ---------------------------------------------------------------------------
@@ -255,71 +229,67 @@ function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
 end
 
 # ---------------------------------------------------------------------------
-# Scattered-Cartesian physical → uniform Fourier coefficients (the SpectralBackends.NUFFTSpectralBackend `to_spectral` path).
-# Reconstruct û on a uniform ms-grid from samples at scattered points via a FINUFFT type-1 transform
-# (density-normalized adjoint û = type1(u)/N, exact for samples on the uniform grid). The uniform
-# wavenumber grid ks is inferred from the coordinate spans (fftfreq convention, matching
-# Utils.wavenumber_grid), so the result feeds the ordinary uniform flux diagnostics unchanged.
+# Scattered-Cartesian physical → uniform Fourier coefficients (the Types.FINUFFTBackend `to_spectral`
+# path). The workspace holds a preset type-1 plan + reusable buffers; `to_spectral!` reuses them so a
+# repeat call allocates nothing. Reconstruction is the density-normalized adjoint û = type1(u)/N (exact
+# for samples on the uniform grid); ks is the fftfreq/FFTW wavenumber grid, so the result feeds the
+# uniform flux diagnostics unchanged.
 # ---------------------------------------------------------------------------
-function FIT._to_spectral_nufft(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple, tol::Real,
-                                Ls::Union{Nothing, Tuple})
+function FIT._to_spectral_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tuple, ms::Tuple;
+                                    ncomponents::Int = length(scatter_coords), tol::Real = 1e-9,
+                                    Ls::Tuple,
+                                    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+    fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
-    Ls === nothing || length(Ls) == nd || throw(ArgumentError("Ls ($(length(Ls))D) must match scatter_coords ($(nd)D)"))
-    D = length(velocity_fields)
+    length(Ls) == nd || throw(ArgumentError("Ls ($(length(Ls))D) must match scatter_coords ($(nd)D)"))
+    all(>(0), Ls) || throw(ArgumentError("Ls must be positive (periodic domain size per dimension); got $Ls"))
+    ncomponents >= 1 || throw(ArgumentError("ncomponents must be ≥ 1"))
     N = length(scatter_coords[1])
     for d in 2:nd
         length(scatter_coords[d]) == N || throw(DimensionMismatch("all scatter_coords must have equal length"))
     end
-    for f in velocity_fields
-        length(f) == N || throw(DimensionMismatch("velocity field length $(length(f)) ≠ scatter point count $N"))
-    end
-    FT = float(real(eltype(velocity_fields[1])))
+    FT = float(real(eltype(scatter_coords[1])))
     CT = Complex{FT}
 
-    # Periodic domain size per dimension: use the provided `Ls` if given, else infer from the sample span.
-    Lused = ntuple(nd) do d
-        if Ls === nothing
-            cv = scatter_coords[d]; rng = FT(maximum(cv) - minimum(cv)); rng > 0 ? rng : one(FT)
-        else
-            FT(Ls[d])
-        end
-    end
-    # Uniform wavenumber grid (fftfreq convention, matching Utils.wavenumber_grid).
-    ks = ntuple(nd) do d
-        m = ms[d]; dk = 2 * FT(π) / Lused[d]
-        [FT(k <= m ÷ 2 ? k : k - m) * dk for k in 0:m-1]
-    end
+    # Periodic domain size per dimension (k = 2πn/L). Required — the samples under-span the period, so L
+    # is a caller input, not inferred.
+    Lused = ntuple(d -> FT(Ls[d]), nd)
+    ks = FIT.Utils.wavenumber_grid(ms, Lused)   # fftfreq/FFTW ordering, matching the modeord=1 plan below
     # Samples mapped to [0, 2π) about each dimension's minimum: for samples on a uniform grid this lands
-    # exactly on the DFT node locations, so `û = type1(u)/N` (iflag=−1) equals `fft(u)/Nᵈ` (the package
-    # coefficient convention) — making the reconstruction an exact drop-in for the uniform diagnostics.
+    # exactly on the DFT node locations, so `û = type1(u)/N` (iflag=−1) equals `fft(u)/Nᵈ`.
     scaled = ntuple(nd) do d
         cmin = FT(minimum(scatter_coords[d]))
         (FT.(scatter_coords[d]) .- cmin) ./ Lused[d] .* (2 * FT(π))
     end
+    # iflag=−1 → e^{-ik·x} analysis (Julia `fft` convention); modeord=1 → FFTW mode order, matching
+    # Utils.wavenumber_grid. execution = SerialBackend() (default, fft_nthreads = 1) keeps the exec off
+    # FFTW's Julia-thread callback → 0-alloc reuse (batch the outer axis to parallelise); ThreadedBackend()
+    # threads a single large transform across `Threads.nthreads()` at the cost of per-exec Task scratch.
+    p1 = FINUFFT.finufft_makeplan(1, Int64[ms...], -1, 1, FT(tol); dtype = FT, modeord = 1, nthreads = fft_nthreads)
+    FINUFFT.finufft_setpts!(p1, scaled...)
+    finalizer(FINUFFT.finufft_destroy!, p1)   # FINUFFT.jl registers none; free the C plan when GC'd
 
-    û    = Array{CT}(undef, ms..., D)
-    invN = one(FT) / FT(N)
+    û    = Array{CT}(undef, ms..., ncomponents)
     scat = Vector{CT}(undef, N)
     spec = Array{CT}(undef, ms...)
-    # iflag=−1 → e^{-ik·x} analysis (Julia `fft` convention); modeord=1 → FFT mode ordering
-    # (0,1,…,m/2,−m/2+1,…,−1), matching Utils.wavenumber_grid + FFTW. Together these make û a drop-in
-    # for the uniform Cartesian diagnostics (which assume the fft convention + ordering).
-    p1 = FINUFFT.finufft_makeplan(1, Int64[ms...], -1, 1, FT(tol); dtype = FT, modeord = 1)
-    try
-        FINUFFT.finufft_setpts!(p1, scaled...)
-        colons = ntuple(_ -> Colon(), nd)
-        for c in 1:D
-            scat .= velocity_fields[c]
-            FINUFFT.finufft_exec!(p1, scat, spec)
-            ûc = view(û, colons..., c)
-            @. ûc = spec * invN
-        end
-    finally
-        FINUFFT.finufft_destroy!(p1)
+    return FIT.NUFFTToSpectralWorkspace(p1, scaled, ks, û, scat, spec, N, one(FT) / FT(N))
+end
+
+function FIT.to_spectral!(ws::FIT.NUFFTToSpectralWorkspace{<:FINUFFT.finufft_plan}, velocity_fields::Tuple)
+    D = size(ws.û, ndims(ws.û))
+    length(velocity_fields) == D || throw(DimensionMismatch(
+        "to_spectral! got $(length(velocity_fields)) fields; workspace was built for $D components"))
+    colons = ntuple(_ -> Colon(), ndims(ws.û) - 1)
+    @inbounds for c in 1:D
+        length(velocity_fields[c]) == ws.npoints || throw(DimensionMismatch("field length ≠ workspace points $(ws.npoints)"))
+        ws.scat .= velocity_fields[c]
+        FINUFFT.finufft_exec!(ws.plan, ws.scat, ws.spec)   # nonuniform → uniform, into reused buffers
+        ûc = view(ws.û, colons..., c)
+        @. ûc = ws.spec * ws.invN
     end
-    return (û, ks)
+    return (ws.û, ws.ks)
 end
 
 end # module FlowInvariantTransferFINUFFTExt

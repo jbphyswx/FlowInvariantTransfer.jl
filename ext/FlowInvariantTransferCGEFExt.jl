@@ -66,13 +66,15 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
             "Cartesian coarse-graining supports 2D or 3D grids (nd=$nd); pass `radius=…` for a spherical " *
             "(lon, lat) surface."))
         geom = CGEF.FlowGeometries.Geometry.CartesianGeometry{FT}()   # spacing lives in the grid axes
-        CGEF.FlowGeometries.Grids.StructuredGrid(geom, ntuple(i -> FT.(coords_vecs[i]), nd)..., active)
+        # Pass axes as given: `_to_axis` adapts to FT preserving a uniform range's uniformity (CGEF's
+        # fast separable path); materializing to a plain vector would look stretched.
+        CGEF.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs..., active)
     else
         nd == 2 || throw(ArgumentError(
             "Spherical coarse-graining is on a 2D lon–lat surface: pass coords_vecs = (lon, lat) and two " *
             "horizontal velocity components (got nd=$nd)."))
         geom = CGEF.FlowGeometries.Geometry.SphericalGeometry(FT(radius))
-        CGEF.FlowGeometries.Grids.StructuredGrid(geom, FT.(coords_vecs[1]), FT.(coords_vecs[2]), active)
+        CGEF.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs[1], coords_vecs[2], active)
     end
 
     workspace = CGEF.Diagnostics.ΠWorkspace(grid)                # dimensionality inferred from the grid
