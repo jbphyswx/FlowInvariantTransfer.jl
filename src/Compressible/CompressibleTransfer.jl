@@ -41,7 +41,7 @@ function _idft(field_hat, ns::NTuple{nd,Int}) where {nd}
                 phase = zero(FT)
                 for d in 1:nd
                     kidx = kI[d] - 1
-                    km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                    km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                     phase += FT(2π) * km * FT(xI[d] - 1) / FT(ns[d])
                 end
                 acc += field_hat[kI, c] * cis(phase)
@@ -64,7 +64,7 @@ function _dft(field_phys, ns::NTuple{nd,Int}) where {nd}
                 phase = zero(FT)
                 for d in 1:nd
                     kidx = kI[d] - 1
-                    km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                    km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                     phase += FT(2π) * km * FT(xI[d] - 1) / FT(ns[d])
                 end
                 acc += field_phys[xI, c] * cis(-phase)
@@ -85,7 +85,7 @@ function _idft!(out, field_hat, ns::NTuple{nd,Int}) where {nd}
             phase = zero(FT)
             for d in 1:nd
                 kidx = kI[d] - 1
-                km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                 phase += FT(2π) * km * FT(xI[d] - 1) / FT(ns[d])
             end
             acc += field_hat[kI, c] * cis(phase)
@@ -105,7 +105,7 @@ function _dft!(out, field_phys, ns::NTuple{nd,Int}) where {nd}
             phase = zero(FT)
             for d in 1:nd
                 kidx = kI[d] - 1
-                km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                 phase += FT(2π) * km * FT(xI[d] - 1) / FT(ns[d])
             end
             acc += field_phys[xI, c] * cis(-phase)

@@ -179,10 +179,12 @@ function _decompose_field_spectral(decomp::Types.AbstractFieldDecomposition, ::A
 end
 
 """
-    helmholtz_project_spectral!(args...; kwargs...)
+    helmholtz_project_spectral!(û_rot, û_div, û_harm, velocity_hat, ks)
 
-In-place spectral Helmholtz projection of a velocity field into its rotational/divergent parts.
-Provided by the `HelmholtzDecomposition.jl` extension; this core stub errors until it is loaded.
+In-place spectral Helmholtz–Hodge projection of `velocity_hat` into its rotational, divergent, and
+harmonic (k = 0 / constant) parts (`û_rot + û_div + û_harm == velocity_hat`), writing into the three
+caller-provided buffers — allocation-free. Provided by the `HelmholtzDecomposition.jl` extension; this
+core stub errors until it is loaded.
 """
 function helmholtz_project_spectral!(args...; kwargs...)
     throw(ArgumentError(

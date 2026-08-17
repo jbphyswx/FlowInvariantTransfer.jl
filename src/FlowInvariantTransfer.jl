@@ -35,21 +35,21 @@ include("Spherical/SphericalTransfer.jl")
 # geometry/dealiasing/result TYPES, which stay reachable qualified (`FlowInvariantTransfer.LinearBinning`).
 # ---------------------------------------------------------------------------
 
-using .SpectralFlux: SpectralFlux, calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+using .SpectralFlux: SpectralFlux, calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 using .Compressible: Compressible, calculate_compressible_flux, calculate_compressible_flux!
 using .Spherical: Spherical, calculate_spherical_transfer, calculate_spherical_transfer!, calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!
-using .CoarseGrainingFlux: CoarseGrainingFlux, calculate_coarse_graining_flux, calculate_coarse_graining_flux!
-using .ShellToShellTransfer: ShellToShellTransfer, calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
-using .BandTransfer: BandTransfer, calculate_band_to_band_transfer, calculate_band_to_band_transfer!
+using .CoarseGrainingFlux: CoarseGrainingFlux, calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch
+using .ShellToShellTransfer: ShellToShellTransfer, calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_shell_to_shell_transfer_batch, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
+using .BandTransfer: BandTransfer, calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch
 using .ModeToModeTransfer: ModeToModeTransfer, calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 using .TriadicOrthogonalDecomposition: TriadicOrthogonalDecomposition, triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 export calculate_compressible_flux, calculate_compressible_flux!
 export calculate_spherical_transfer, calculate_spherical_transfer!, calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!
-export calculate_coarse_graining_flux, calculate_coarse_graining_flux!
-export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
-export calculate_band_to_band_transfer, calculate_band_to_band_transfer!
+export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch
+export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_shell_to_shell_transfer_batch, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
+export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch
 export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 export triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!
 export calculate_energy_transfer
@@ -150,14 +150,26 @@ end
 export plot_energy_transfer
 
 """
-    nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms; kwargs...)
+    nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms; spectral, Ls, kwargs...)
 
-Coarse-graining energy flux `Π_ℓ(x)` at scattered (non-uniform) Cartesian points via FINUFFT.
-Requires `using FINUFFT` (the extension supplies the method).
+Coarse-graining energy flux `Π_ℓ(x)` at scattered (non-uniform) Cartesian points. `spectral` (required —
+the two providers are peers, neither is a default) picks the NUFFT provider: `Types.FINUFFTBackend()`
+(`using FINUFFT`) or `Types.NonuniformFFTsBackend()` (pure Julia — `using NonuniformFFTs`). Dispatches on
+the backend type, so both coexist in one session.
+
+`Ls` (required) is the periodic domain size per dimension. It sets the wavenumber grid `k = 2πn/L`, and
+hence the filter cutoff `Ĝ(|k|, ℓ)` and the strain derivatives `i·kⱼ` — a physical input the samples
+cannot supply (points in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` under-span the period), so `L` is never inferred from them.
 """
-function nufft_coarse_graining_flux(args...; kwargs...)
-    throw(ArgumentError("nufft_coarse_graining_flux requires FINUFFT. Run `using FINUFFT`."))
+function nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms;
+                                    spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+                                    Ls::Tuple,
+                                    kwargs...)
+    return _nufft_coarse_graining_flux(spectral, velocity_fields, scatter_coords, ℓ, filter, ms; Ls = Ls, kwargs...)
 end
+_nufft_coarse_graining_flux(spectral, args...; kwargs...) = throw(ArgumentError(
+    "nufft_coarse_graining_flux with $(nameof(typeof(spectral))) requires its extension: `using FINUFFT` " *
+    "(Types.FINUFFTBackend) or `using NonuniformFFTs` (Types.NonuniformFFTsBackend)."))
 
 """
     NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8)
@@ -171,45 +183,121 @@ scattered scratch that `finufft_exec!` writes into. A repeat call therefore allo
 the Julia side (only the tiny result struct, which wraps the reused `Π` buffer); the FINUFFT plans
 avoid re-planning the FFT + re-sorting the points (dominant for small inputs).
 
-`mutable` is required ONLY so a `finalizer` can free the two plans (C resources FINUFFT never
-finalizes itself — holding them without this would leak the FFTW plan + spreading grid); every
-field is `const`. `show` is a one-liner (never introspect a live plan). Requires `using FINUFFT`;
-each array/plan field is its own type parameter, so nothing is hardcoded to `Vector`/`Array{T}` and
-the core names no FINUFFT type.
+Immutable. FINUFFT's C plans (which FINUFFT.jl registers no finalizer for) are freed by a finalizer the
+extension attaches to each plan object itself — so the workspace needs no finalizer and no mutability;
+NonuniformFFTs plans are pure Julia and need neither. `show` is a one-liner (never introspect a live
+plan). Each array/plan field is its own type parameter, so nothing is hardcoded to `Vector`/`Array{T}`
+and the core names no provider type.
 """
-mutable struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SD, UM, TA, CV, RV, R<:Real}
-    const p1::P1              # FINUFFT type-1 (nonuniform → uniform) plan, points set
-    const p2::P2              # FINUFFT type-2 (uniform → nonuniform) plan, points set
-    const scaled_coords::SC   # coordinates rescaled to [-π, π)
-    const k_mag::KM           # |k| grid
-    const k_comp_grids::KC    # per-dimension kⱼ grids
-    const ks_1d::K1           # per-axis wavenumber vectors
-    const Ĝ::KM               # filter weights Ĝ(k) (recomputed per ℓ into this buffer)
-    const û_filt::SD          # (ms…, D) filtered spectral velocity (page c = component c)
-    const u_filt::UM          # (N, D) filtered velocity at the scattered points (real)
-    const τ::TA               # (N, D, D) SFS stress — doubles as the Π-contraction buffer
-    const S̄::TA               # (N, D, D) strain rate
-    const Π::RV               # (N,) flux (the result wraps this)
-    const spec::SA            # (ms…) complex spectral scratch (exec output / filtered product / gradient)
-    const scat_in::CV         # (N,) complex type-1 input scratch
-    const scat_out::CV        # (N,) complex type-2 output scratch
-    const prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
-    const grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
-    const npoints::Int        # number of scattered points (type-1 normalization)
-    const tol::R
+struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SD, UM, TA, CV, RV, R<:Real}
+    p1::P1              # type-1 (nonuniform → uniform) plan, points set
+    p2::P2              # type-2 (uniform → nonuniform) plan, points set
+    scaled_coords::SC   # coordinates rescaled to the provider's periodic cell
+    k_mag::KM           # |k| grid
+    k_comp_grids::KC    # per-dimension kⱼ grids
+    ks_1d::K1           # per-axis wavenumber vectors
+    Ĝ::KM               # filter weights Ĝ(k) (recomputed per ℓ into this buffer)
+    û_filt::SD          # (ms…, D) filtered spectral velocity (page c = component c)
+    u_filt::UM          # (N, D) filtered velocity at the scattered points (real)
+    τ::TA               # (N, D, D) SFS stress — doubles as the Π-contraction buffer
+    S̄::TA               # (N, D, D) strain rate
+    Π::RV               # (N,) flux (the result wraps this)
+    spec::SA            # (ms…) complex spectral scratch (exec output / filtered product / gradient)
+    scat_in::CV         # (N,) complex type-1 input scratch
+    scat_out::CV        # (N,) complex type-2 output scratch
+    prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
+    grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
+    npoints::Int        # number of scattered points (type-1 normalization)
+    tol::R
 end
 Base.show(io::IO, ::NUFFTCoarseGrainingWorkspace) = print(io, "NUFFTCoarseGrainingWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::NUFFTCoarseGrainingWorkspace) = show(io, w)
 
-function NUFFTCoarseGrainingWorkspace(args...; kwargs...)
-    throw(ArgumentError("NUFFTCoarseGrainingWorkspace requires FINUFFT. Run `using FINUFFT`."))
+"""
+    NUFFTCoarseGrainingWorkspace(scatter_coords, ms; spectral, Ls, tol=1e-8, execution=…)
+
+Build the reusable coarse-graining workspace for `spectral`'s NUFFT provider (`Types.FINUFFTBackend()`
+or `Types.NonuniformFFTsBackend()` — required, the two are peers). Dispatches on the backend type to the
+corresponding extension. `Ls` (required) is the periodic domain size per dimension (sets `k = 2πn/L`; not
+inferable from the scattered samples).
+"""
+function NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple;
+                                      spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+                                      Ls::Tuple,
+                                      kwargs...)
+    return _nufft_cg_workspace(spectral, scatter_coords, ms; Ls = Ls, kwargs...)
 end
+_nufft_cg_workspace(spectral, args...; kwargs...) = throw(ArgumentError(
+    "NUFFTCoarseGrainingWorkspace with $(nameof(typeof(spectral))) requires its extension: `using FINUFFT` " *
+    "(Types.FINUFFTBackend) or `using NonuniformFFTs` (Types.NonuniformFFTsBackend)."))
 
 function nufft_coarse_graining_flux!(args...; kwargs...)
-    throw(ArgumentError("nufft_coarse_graining_flux! requires FINUFFT. Run `using FINUFFT`."))
+    throw(ArgumentError("nufft_coarse_graining_flux! requires a NUFFT extension: `using FINUFFT` or `using NonuniformFFTs`."))
+end
+
+# Unified scattered-Cartesian coarse-graining entry (provider-agnostic — routes through the
+# backend-dispatched one-shot above). The 4-positional (…, scatter_coords, ms) form disambiguates it
+# from the uniform-grid `calculate_energy_transfer` methods.
+function calculate_energy_transfer(method::Types.CoarseGrainingFluxMethod, velocity_fields::Tuple,
+                                   scatter_coords::Tuple, ms::Tuple; kwargs...)
+    return nufft_coarse_graining_flux(velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
+end
+
+"""
+    NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R}
+
+Reusable resources for the in-place scattered → uniform reconstruction [`to_spectral!`](@ref): the
+provider's type-1 plan (points preset), the uniform wavenumber grid `ks`, and every working buffer (the
+`(ms…, D)` coefficient array `û` plus complex type-1 scratch). A repeat `to_spectral!` re-plans nothing
+and allocates nothing on the Julia side. Immutable — each field its own type parameter, nothing hardcoded
+to `Array{T}` and the core names no provider type. FINUFFT's C plan (which FINUFFT.jl registers no
+finalizer for) is freed by a finalizer the extension attaches to the plan object itself, so the workspace
+needs no finalizer and no mutability; NonuniformFFTs plans are pure Julia and need neither.
+"""
+struct NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R<:Real}
+    plan::P              # provider type-1 (nonuniform → uniform) plan, points set
+    scaled_coords::SC    # coordinates rescaled to the provider's periodic cell
+    ks::KS               # per-axis uniform wavenumber vectors (returned with û)
+    û::UH                # (ms…, D) coefficient buffer (the result aliases this)
+    scat::CV             # (N,) complex type-1 input scratch
+    spec::SP             # (ms…) complex type-1 output scratch
+    npoints::Int         # number of scattered points (type-1 normalization)
+    invN::R
+end
+Base.show(io::IO, ::NUFFTToSpectralWorkspace) = print(io, "NUFFTToSpectralWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::NUFFTToSpectralWorkspace) = show(io, w)
+
+"""
+    NUFFTToSpectralWorkspace(scatter_coords, ms; spectral, Ls, tol=1e-9)
+
+Build the reusable scattered → uniform workspace for `spectral`'s NUFFT provider (peers
+`Types.FINUFFTBackend()` / `Types.NonuniformFFTsBackend()`, required). `Ls` (required) is the periodic
+domain size per dimension (`k = 2πn/L`; not inferable from the samples). Dispatches on the backend type to
+the corresponding extension.
+"""
+function NUFFTToSpectralWorkspace(scatter_coords::Tuple, ms::Tuple;
+                                  spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+                                  Ls::Tuple,
+                                  kwargs...)
+    return _to_spectral_workspace(spectral, scatter_coords, ms; Ls = Ls, kwargs...)
+end
+_to_spectral_workspace(spectral, args...; kwargs...) = throw(ArgumentError(
+    "NUFFTToSpectralWorkspace with $(nameof(typeof(spectral))) requires its extension: `using FINUFFT` " *
+    "(Types.FINUFFTBackend) or `using NonuniformFFTs` (Types.NonuniformFFTsBackend)."))
+
+"""
+    to_spectral!(ws::NUFFTToSpectralWorkspace, velocity_fields) -> (velocity_hat, ks)
+
+In-place scattered → uniform reconstruction reusing `ws` (plan + buffers): `û = type1(u)/N` in FFTW mode
+order, returned with the uniform wavenumber grid `ks`. A repeat call allocates nothing on the Julia side
+— the returned `velocity_hat` aliases `ws.û`, overwritten on the next call. Dispatches on the plan type.
+"""
+function to_spectral!(args...; kwargs...)
+    throw(ArgumentError("to_spectral! requires a NUFFT extension: `using FINUFFT` or `using NonuniformFFTs`."))
 end
 
 export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, NUFFTCoarseGrainingWorkspace
+export NUFFTToSpectralWorkspace, to_spectral!
 
 # ---------------------------------------------------------------------------
 # Unified entry point
@@ -315,8 +403,8 @@ wavenumber convention — you do not build `û`/`ks` by hand.
 
 `coords_vecs` are the **1D coordinate vectors** `(x, y[, z])` of the grid (one vector per axis, of
 length `nₐ`), *not* per-sample coordinates. Scattered (non-uniform) Cartesian data is handled by the
-NUFFT path (`spectral = SpectralBackends.NUFFTSpectralBackend()`), and spherical data by
-[`calculate_spherical_transfer`](@ref) — see [`spectral_geometry`](@ref).
+NUFFT path (`spectral = Types.FINUFFTBackend()` or `Types.NonuniformFFTsBackend()`), and spherical data
+by [`calculate_spherical_transfer`](@ref) — see [`spectral_geometry`](@ref).
 
 # Keyword Arguments
 - `spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.FFTSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
@@ -342,7 +430,7 @@ function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
     D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
     spectral isa Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend} || throw(ArgumentError(
         "to_spectral transforms uniform-grid Cartesian data (spectral = SpectralBackends.FFTSpectralBackend() or the SpectralBackends.DirectSumSpectralBackend " *
-        "reference). For scattered Cartesian data use the SpectralBackends.NUFFTSpectralBackend physical entry; for spherical data use " *
+        "reference). For scattered Cartesian data use the NUFFT physical entry (Types.FINUFFTBackend / Types.NonuniformFFTsBackend); for spherical data use " *
         "calculate_spherical_transfer."))
     ns = Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
     Utils.validate_uniform_grid(coords_vecs)
@@ -362,38 +450,37 @@ function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
 end
 
 """
-    to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
-                spectral=SpectralBackends.NUFFTSpectralBackend(), tol=1e-9) -> (velocity_hat, ks)
+    to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple; spectral, Ls, tol=1e-9) -> (velocity_hat, ks)
 
 Scattered-Cartesian physical-space entry: reconstruct the Fourier coefficients `velocity_hat` on a
 uniform `ms = (m₁,…,m_D)` grid from velocity components sampled at **scattered** (non-uniform) points,
-via a FINUFFT type-1 transform, and return them with the matching uniform wavenumber grid `ks`. The
+via a NUFFT type-1 transform, and return them with the matching uniform wavenumber grid `ks`. The
 result feeds the ordinary Cartesian flux diagnostics unchanged — the scattered→uniform step lives
 entirely here, so the whole flux family works on scattered data through the uniform path.
 
 `scatter_coords = (x, y[, z])` are per-sample coordinate vectors (each length `N`, the number of
-samples), *not* grid axes; `ms` is the target uniform mode count per dimension. Requires
-`using FINUFFT`. For uniform-grid data use the 2-argument form with `SpectralBackends.FFTSpectralBackend()`.
+samples), *not* grid axes; `ms` is the target uniform mode count per dimension. `spectral` (required —
+the two NUFFT providers are peers) picks `Types.FINUFFTBackend()` (`using FINUFFT`) or
+`Types.NonuniformFFTsBackend()` (`using NonuniformFFTs`). For uniform-grid data use the 2-argument form
+with `SpectralBackends.FFTSpectralBackend()`.
 
 The reconstruction is the density-normalized adjoint (`û = type1(u)/N`, exact for samples on the
-uniform grid; the package's established scattered-Cartesian convention). `tol` sets the FINUFFT
-tolerance. `Ls` gives the periodic domain size per dimension; pass it for correct wavenumbers on a
-periodic domain (the samples live in `[xₘᵢₙ, xₘᵢₙ+Lₐ)`). If omitted it is inferred from the sample
-span `maxₐ − minₐ`, which for scattered samples that do not cover the full period is only approximate.
+uniform grid; the package's established scattered-Cartesian convention). `tol` sets the NUFFT
+tolerance. `Ls` (required) is the periodic domain size per dimension — it fixes the wavenumbers
+`k = 2πn/L`. The samples live in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` and under-span the period, so `L` cannot be inferred
+from them; samples on the uniform `L`-grid give `û = fft(u)/Nᵈ` exactly.
 """
 function to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
-                     spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.NUFFTSpectralBackend(), tol::Real = 1e-9,
-                     Ls::Union{Nothing, Tuple} = nothing)
-    spectral isa SpectralBackends.NUFFTSpectralBackend || throw(ArgumentError(
+                     spectral::SpectralBackends.AbstractSpectralBackend, tol::Real = 1e-9,
+                     Ls::Tuple)
+    spectral isa SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend || throw(ArgumentError(
         "the 3-argument to_spectral(fields, scatter_coords, ms; …) is the scattered-Cartesian NUFFT " *
-        "entry — use spectral = SpectralBackends.NUFFTSpectralBackend(). For uniform-grid data use to_spectral(fields, coords_vecs; " *
-        "spectral = SpectralBackends.FFTSpectralBackend())."))
-    return _to_spectral_nufft(velocity_fields, scatter_coords, ms, tol, Ls)
+        "entry — pass spectral = Types.FINUFFTBackend() or Types.NonuniformFFTsBackend(). For uniform-grid " *
+        "data use to_spectral(fields, coords_vecs; spectral = SpectralBackends.FFTSpectralBackend())."))
+    ws = NUFFTToSpectralWorkspace(scatter_coords, ms; spectral = spectral,
+                                  ncomponents = length(velocity_fields), tol = tol, Ls = Ls)
+    return to_spectral!(ws, velocity_fields)
 end
-
-# Overridden by the FINUFFT extension (requires `using FINUFFT`).
-_to_spectral_nufft(args...; kwargs...) = throw(ArgumentError(
-    "Scattered-Cartesian to_spectral (SpectralBackends.NUFFTSpectralBackend) requires FINUFFT. Run `using FINUFFT` to load the extension."))
 
 # ---------------------------------------------------------------------------
 # Precompilation workload (small grid to reduce TTFX)
@@ -402,7 +489,7 @@ _to_spectral_nufft(args...; kwargs...) = throw(ArgumentError(
 PrecompileTools.@setup_workload begin
     N = 4
     L = 2π
-    ks_1d = [Float64(k <= N÷2 ? k : k-N) * (2π/L) for k in 0:N-1]
+    ks_1d = Utils.wavenumber_grid((N,), (L,))[1]
     ks = (ks_1d, ks_1d)
     # minimal 4×4×2 spectral data
     û = zeros(ComplexF64, N, N, 2)

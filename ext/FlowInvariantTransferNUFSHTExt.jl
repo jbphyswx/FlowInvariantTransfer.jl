@@ -66,9 +66,9 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     # so a multithreaded plan spawns Julia Tasks per exec (allocating), and single-threaded is 0-alloc +
     # oversubscription-free when the outer batch axis is parallelised. ComputationalBackends.ThreadedBackend threads a lone call.
     nthr = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
-    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,  0; tol = tol, T = FT, nthreads = nthr)
-    plan1  = NUFSHT.make_spin_plan(θ, φ, lmax,  1; tol = tol, T = FT, nthreads = nthr)
-    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork, 0; tol = tol, T = FT, nthreads = nthr)
+    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  0; tol = tol, nthreads = nthr)
+    plan1  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  1; tol = tol, nthreads = nthr)
+    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork, 0; tol = tol, nthreads = nthr)
 
     # Buffers follow the coordinate array type (`similar(θ, …)`): device-array coordinates θ, φ make
     # NUFSHT build device (cuFINUFFT) plans, and these matching device buffers keep the whole transform
@@ -209,11 +209,11 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     # Single-threaded FINUFFT plans by default (see the barotropic workspace above for the rationale);
     # ComputationalBackends.ThreadedBackend threads a lone call. Five plans: spin ±1 & spin-0 at lmax, spin-0 & spin+1 at lwork.
     nthr = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
-    planp  = NUFSHT.make_spin_plan(θ, φ, lmax,   1; tol = tol, T = FT, nthreads = nthr)
-    planm  = NUFSHT.make_spin_plan(θ, φ, lmax,  -1; tol = tol, T = FT, nthreads = nthr)
-    plan0  = NUFSHT.make_spin_plan(θ, φ, lmax,   0; tol = tol, T = FT, nthreads = nthr)
-    plan0w = NUFSHT.make_spin_plan(θ, φ, lwork,  0; tol = tol, T = FT, nthreads = nthr)
-    planpw = NUFSHT.make_spin_plan(θ, φ, lwork,  1; tol = tol, T = FT, nthreads = nthr)
+    planp  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   1; tol = tol, nthreads = nthr)
+    planm  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  -1; tol = tol, nthreads = nthr)
+    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   0; tol = tol, nthreads = nthr)
+    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  0; tol = tol, nthreads = nthr)
+    planpw = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  1; tol = tol, nthreads = nthr)
 
     # Buffers follow the coordinate array type (device-array coords → device buffers → cuFINUFFT).
     _z(dims...) = fill!(similar(θ, CT, dims...), zero(CT))

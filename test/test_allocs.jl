@@ -23,10 +23,9 @@ using FFTW: FFTW
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using SpectralBackends: SpectralBackends
 # Extension triggers for the plan-owning methods whose workspace-reuse allocation contract is asserted
-# below (CGEF coarse-graining, FINUFFT scattered CG, FSH/NUFSHT spherical). Loaded here so this file's
-# alloc contract is self-contained rather than depending on the includer's load order.
+# below (CGEF coarse-graining, FSH/NUFSHT spherical). Loaded here so this file's alloc contract is
+# self-contained rather than depending on the includer's load order.
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
-using FINUFFT: FINUFFT
 using FastSphericalHarmonics: FastSphericalHarmonics
 using NUFSHT: NUFSHT
 
@@ -86,13 +85,6 @@ function _reuse_cgef(ws, u, v, ℓ, filt, xs, ys)
     FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v))
     a_reuse = @allocated FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, (u, v))
     a_fresh = @allocated FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt)
-    return (a_reuse, a_fresh)
-end
-function _reuse_nufft(ws, u, v, ℓ, filt, ms, xs, ys)
-    FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
-    FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
-    a_reuse = @allocated FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
-    a_fresh = @allocated FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
     return (a_reuse, a_fresh)
 end
 function _reuse_spherical!(ws, ζ, fresh)
@@ -276,15 +268,9 @@ Test.@testset "Allocations" begin
             Test.@test a_reuse_auto < a_fresh ÷ 4
         end
 
-        Test.@testset "nufft_coarse_graining (FINUFFT, scattered)" begin
-            Np = 400
-            xs = 2π .* rand(Np); ys = 2π .* rand(Np)
-            u = @. sin(xs) * cos(ys); v = @. -cos(xs) * sin(ys)
-            ms = (16, 16); ℓ = 0.5; filt = FIT.Types.GaussianFilter()
-            ws = FIT.NUFFTCoarseGrainingWorkspace((xs, ys), ms)
-            a_reuse, a_fresh = _reuse_nufft(ws, u, v, ℓ, filt, ms, xs, ys)
-            Test.@test a_reuse < a_fresh ÷ 100
-        end
+        # (scattered NUFFT coarse-graining workspace-reuse allocation is asserted per provider in the
+        # "NUFFT scattered coarse-graining — both providers vs exact NDFT" testset in runtests.jl,
+        # alongside the NDFT correctness gate.)
 
         Test.@testset "spherical (FSH, equiangular grid)" begin
             lmax = 20; Ng = lmax + 1

@@ -8,7 +8,7 @@ using ..NonlinearTerm: NonlinearTerm
 using ..Workspaces: Workspaces
 using ..ShellBinning: ShellBinning
 
-export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, BandTransferWorkspace
+export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch, BandTransferWorkspace
 
 # ---------------------------------------------------------------------------
 # Smooth band-to-band transfer T(K,Q) (Eyink & Aluie 2009)
@@ -180,6 +180,76 @@ function calculate_band_to_band_transfer(
         dealiasing=dealiasing, invariant=invariant, spectral=spectral, execution=execution,
         advecting_hat=advecting_hat)
 end
+
+"""
+    calculate_band_to_band_transfer_batch(velocity_hats, ks; bands, dealiasing, invariant, spectral,
+        geometry, execution) -> Vector
+
+Band-to-band transfer for a batch of snapshots sharing one grid (`velocity_hats` an iterable of
+`(ns..., D)` coefficient arrays). The band weights are built ONCE and each worker reuses one
+`BandTransferWorkspace` across its snapshots; `execution = ThreadedBackend()` (requires `using
+OhMyThreads`) threads over snapshots with a **serial** inner transform (the batch is the outer parallel
+axis, no nested threading). Results (the same NamedTuple as the single-snapshot form) are in input
+order, bit-identical to calling [`calculate_band_to_band_transfer`](@ref) per snapshot.
+"""
+function calculate_band_to_band_transfer_batch(
+    velocity_hats,
+    ks;
+    bands::Types.SmoothBands,
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+)
+    Types.require_coefficient_spectral(spectral)
+    n       = length(velocity_hats)
+    FT      = real(eltype(first(velocity_hats)))
+    nb      = length(bands.centers)
+    centers = collect(bands.centers)
+    NT = @NamedTuple{centers::typeof(centers), transfer_matrix::Matrix{FT}, net_transfer::Vector{FT}, max_antisymmetry_error::FT}
+    results = Vector{NT}(undef, n)
+    n == 0 && return results
+    _band_to_band_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, bands, nb;
+        dealiasing=dealiasing, invariant=invariant, spectral=spectral, geometry=geometry)
+    return results
+end
+
+# Serial reference: one workspace reused across the whole batch; each snapshot self-advects.
+function _band_to_band_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, bands, nb;
+                              dealiasing, invariant, spectral, geometry)
+    FT  = real(eltype(first(velocity_hats)))
+    bws = BandTransferWorkspace(first(velocity_hats), ks, bands; geometry=geometry)
+    for i in eachindex(velocity_hats)
+        vh = velocity_hats[i]
+        T = zeros(FT, nb, nb); net = zeros(FT, nb)
+        results[i] = calculate_band_to_band_transfer!(T, net, bws, vh, ks;
+            dealiasing=dealiasing, invariant=invariant, spectral=spectral,
+            execution=ComputationalBackends.SerialBackend(), advecting_hat=vh)
+    end
+    return results
+end
+
+# Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace pool, serial inner).
+function _band_to_band_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the band-to-band batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_band_to_band_batch!(::ComputationalBackends.AbstractThreadedBackend, results, velocity_hats, ks, bands, nb; kwargs...) =
+    _band_to_band_batch_threaded!(results, velocity_hats, ks, bands, nb; kwargs...)
+
+# Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
+function _band_to_band_batch_distributed!(args...; kwargs...)
+    throw(ArgumentError("execution = DistributedBackend() for the band-to-band batch requires Distributed. " *
+                        "Run `using Distributed` to load the extension."))
+end
+_band_to_band_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, bands, nb; kwargs...) =
+    _band_to_band_batch_distributed!(results, velocity_hats, ks, bands, nb; kwargs...)
+
+# Any other execution backend has no batch hook — refuse rather than silently run serial.
+_band_to_band_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, bands, nb; kwargs...) =
+    throw(ArgumentError("calculate_band_to_band_transfer_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 # One-line show (the workspace holds a Workspaces.NonlinearTermWorkspace whose FFTW plan bundle can segfault
 # under the default field-dump show).

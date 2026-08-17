@@ -614,9 +614,27 @@ ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 # ---------------------------------------------------------------------------
 
 # Transform (spectral) backend TYPES come from the shared `SpectralBackends` package
-# (`SpectralBackends.DirectSumSpectralBackend`/`FFTSpectralBackend`/`NUFFTSpectralBackend`/
-# `FSHTSpectralBackend`/`NUFSHTSpectralBackend`, all `<: SpectralBackends.AbstractSpectralBackend`).
-# FIT adds the geometry classification + coefficient-input validation below.
+# (`SpectralBackends.DirectSumSpectralBackend`/`FFTSpectralBackend`/`FSHTSpectralBackend`/…, all
+# `<: SpectralBackends.AbstractSpectralBackend`). The scattered-Cartesian NUFFT transform has two peer
+# provider implementations, supplied by FIT's weakdep extensions and defined here as symmetric concrete
+# subtypes of the shared `AbstractNonUniformFastFourierTransformSpectralBackend` — neither is a default.
+# FIT also adds the geometry classification + coefficient-input validation below.
+
+"""
+    FINUFFTBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend
+
+Scattered-Cartesian NUFFT provided by FINUFFT.jl (the C library). Peer of [`NonuniformFFTsBackend`](@ref);
+`using FINUFFT` supplies the transform methods it dispatches to.
+"""
+struct FINUFFTBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend end
+
+"""
+    NonuniformFFTsBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend
+
+Scattered-Cartesian NUFFT provided by the pure-Julia NonuniformFFTs.jl. Peer of [`FINUFFTBackend`](@ref);
+`using NonuniformFFTs` supplies the transform methods it dispatches to.
+"""
+struct NonuniformFFTsBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend end
 
 # ---------------------------------------------------------------------------
 # Transform-backend geometry classification + validation
@@ -635,7 +653,7 @@ geometry), `:cartesian_uniform`, `:cartesian_scattered`, `:spherical_uniform`, `
 """
 spectral_geometry(::SpectralBackends.DirectSumSpectralBackend) = :any
 spectral_geometry(::SpectralBackends.FFTSpectralBackend)       = :cartesian_uniform
-spectral_geometry(::SpectralBackends.NUFFTSpectralBackend)     = :cartesian_scattered
+spectral_geometry(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = :cartesian_scattered
 spectral_geometry(::SpectralBackends.FSHTSpectralBackend)      = :spherical_uniform
 spectral_geometry(::SpectralBackends.NUFSHTSpectralBackend)    = :spherical_scattered
 
@@ -648,14 +666,14 @@ raises a clear geometry-mismatch error for the scattered/spherical backends dire
 right entry point.
 """
 require_coefficient_spectral(spectral::Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend}) = spectral
-require_coefficient_spectral(::SpectralBackends.NUFFTSpectralBackend) = throw(ArgumentError(
-    "NUFFTSpectralBackend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
+require_coefficient_spectral(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = throw(ArgumentError(
+    "A NUFFT backend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
     "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
-    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=NUFFTSpectralBackend())`."))
+    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=Types.FINUFFTBackend())`."))
 require_coefficient_spectral(::Union{SpectralBackends.FSHTSpectralBackend, SpectralBackends.NUFSHTSpectralBackend}) = throw(ArgumentError(
     "FSHTSpectralBackend and NUFSHTSpectralBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
     "on the sphere (regular grid → FSHTSpectralBackend, scattered points → NUFSHTSpectralBackend). The Cartesian flux " *
-    "diagnostics take FFTSpectralBackend (uniform grid) or NUFFTSpectralBackend (scattered, via the physical-space entry)."))
+    "diagnostics take FFTSpectralBackend (uniform grid) or a NUFFT backend (scattered, via the physical-space entry)."))
 
 # ---------------------------------------------------------------------------
 # Result containers

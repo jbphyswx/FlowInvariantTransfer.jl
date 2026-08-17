@@ -204,7 +204,7 @@ function _compute_nonlinear_term_direct!(
                 for d in 1:nd
                     xj    = FT(phys_I[d] - 1) / FT(ns[d])
                     kidx  = spec_I[d] - 1
-                    km    = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                    km    = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                     phase += FT(2π) * km * xj
                 end
                 val += û_j[spec_I] * exp(im * phase)
@@ -227,7 +227,7 @@ function _compute_nonlinear_term_direct!(
                     for d in 1:nd
                         xj   = FT(phys_I[d] - 1) / FT(ns[d])
                         kidx = spec_I[d] - 1
-                        km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                        km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                         phase += FT(2π) * km * xj
                     end
                     val += (im * kphys) * û_c[spec_I] * exp(im * phase)
@@ -259,7 +259,7 @@ function _compute_nonlinear_term_direct!(
                 for d in 1:nd
                     xj   = FT(phys_I[d] - 1) / FT(ns[d])
                     kidx = spec_I[d] - 1
-                    km   = kidx <= ns[d] ÷ 2 ? kidx : kidx - ns[d]
+                    km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
                     phase += FT(2π) * km * xj
                 end
                 val += ws.N_phys[phys_I, comp] * exp(-im * phase)

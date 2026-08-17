@@ -15,6 +15,7 @@ calculate_energy_transfer
 ```@docs
 calculate_spectral_flux
 calculate_spectral_flux!
+calculate_spectral_flux_batch
 calculate_scalar_flux
 ```
 
@@ -23,6 +24,7 @@ calculate_scalar_flux
 ```@docs
 calculate_shell_to_shell_transfer
 calculate_shell_to_shell_transfer!
+calculate_shell_to_shell_transfer_batch
 calculate_scalar_shell_to_shell_transfer
 ```
 
@@ -38,6 +40,7 @@ calculate_scalar_mode_to_mode_transfer
 ```@docs
 calculate_band_to_band_transfer
 calculate_band_to_band_transfer!
+calculate_band_to_band_transfer_batch
 ```
 
 ## Partial Fluxes (decomposition-resolved)
@@ -58,7 +61,25 @@ calculate_compressible_flux!
 
 ```@docs
 calculate_coarse_graining_flux
+calculate_coarse_graining_flux_batch
 nufft_coarse_graining_flux
+```
+
+## Scattered-Cartesian NUFFT
+
+Two peer providers back the scattered NUFFT transform — `FlowInvariantTransfer.Types.FINUFFTBackend`
+(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`),
+selected via the required `spectral` keyword. They drive the scattered coarse-graining flux and the
+scattered→uniform `to_spectral` reconstruction; the workspace forms preset the plan + buffers for
+allocation-light reuse.
+
+```@docs
+NUFFTCoarseGrainingWorkspace
+nufft_coarse_graining_flux!
+NUFFTToSpectralWorkspace
+to_spectral!
+FlowInvariantTransfer.Types.FINUFFTBackend
+FlowInvariantTransfer.Types.NonuniformFFTsBackend
 ```
 
 ## Spherical Spectral Transfer
@@ -224,9 +245,11 @@ FlowInvariantTransfer.Types.ParallelShells
 The transform-algorithm tags are provided by the shared
 [`SpectralBackends`](https://github.com/jbphyswx/SpectralBackends.jl) package (documented there). FIT
 selects the transform by the tag's geometry; the concrete types are `SpectralBackends.DirectSumSpectralBackend`,
-`SpectralBackends.FFTSpectralBackend`, `SpectralBackends.NUFFTSpectralBackend`,
-`SpectralBackends.FSHTSpectralBackend`, and `SpectralBackends.NUFSHTSpectralBackend` (short aliases of the
-canonical `FastFourierTransformSpectralBackend` etc.), all `<: SpectralBackends.AbstractSpectralBackend`.
+`SpectralBackends.FFTSpectralBackend`, `SpectralBackends.FSHTSpectralBackend`, and
+`SpectralBackends.NUFSHTSpectralBackend`, all `<: SpectralBackends.AbstractSpectralBackend`. The
+scattered-Cartesian NUFFT transform has two peer providers, defined by FIT as symmetric subtypes of
+`SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend`: `FlowInvariantTransfer.Types.FINUFFTBackend`
+(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`).
 
 ## Execution (Parallelism) Backends
 

@@ -13,6 +13,7 @@ using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using HelmholtzDecomposition: HelmholtzDecomposition
 using CairoMakie: CairoMakie
 using FINUFFT: FINUFFT
+using NonuniformFFTs: NonuniformFFTs
 using FlowFieldSpectra: FlowFieldSpectra
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using NUFSHT: NUFSHT
@@ -24,19 +25,22 @@ using JLArrays: JLArrays   # reference GPU-array backend: allowscalar(false) →
 
 # -----------------------------------------------------------------------
 Test.@testset "Utils — wavenumber_grid" begin
-    N = 8
     L = 2π
-    ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
-    Test.@test length(ks) == 2
-    Test.@test length(ks[1]) == N
-    # FFTW order: ks[1] should contain 0, 1, 2, 3, -4, -3, -2, -1 * (2π/L)
     dk = 2π / L
-    Test.@test isapprox(ks[1][1], 0.0)
-    Test.@test isapprox(ks[1][2], dk, atol=1e-14)
-    Test.@test isapprox(ks[1][N], -dk, atol=1e-14)
+    # Gate the WHOLE grid against FFTW's fftfreq (an independent reference) for BOTH parities. The
+    # even-N Nyquist mode is -N/2, not +N/2; the old test only checked indices 1, 2, N and silently
+    # skipped the Nyquist, letting a sign bug there break every signed-k derivative undetected.
+    for N in (8, 9)
+        ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+        Test.@test length(ks) == 2
+        ref = collect(FFTW.fftfreq(N, N)) .* dk
+        Test.@test isapprox(collect(ks[1]), ref; atol = 1e-14)
+        Test.@test isapprox(collect(ks[2]), ref; atol = 1e-14)
+    end
+    Test.@test isapprox(FIT.Utils.wavenumber_grid((8,), (L,))[1][5], -4 * dk; atol = 1e-14)  # Nyquist = -N/2
 
-    k_mag = FIT.Utils.wavenumber_magnitude_grid(ks)
-    Test.@test size(k_mag) == (N, N)
+    k_mag = FIT.Utils.wavenumber_magnitude_grid(FIT.Utils.wavenumber_grid((8, 8), (L, L)))
+    Test.@test size(k_mag) == (8, 8)
     Test.@test all(k_mag .>= 0)
     Test.@test isapprox(k_mag[1, 1], 0.0)
 end
@@ -831,7 +835,7 @@ Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" be
     Test.@test isapprox(ρ̂[:, :, 1], FFTW.fft(ρ) ./ N^2; atol = 1e-12)
 
     # Scattered / spherical transforms are a geometry mismatch here → clear error, not a silent misroute.
-    Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.NUFFTSpectralBackend())
+    Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.Types.FINUFFTBackend())
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.FSHTSpectralBackend())
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.NUFSHTSpectralBackend())
 end
@@ -1238,6 +1242,92 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
 end
 
 # -----------------------------------------------------------------------
+# Batch axis: the *_batch entries process many snapshots that share one grid, building the
+# snapshot-independent structure (shells / bands / FFT plans) ONCE and reusing one workspace per worker.
+# Gate the contract directly: batch(Serial) is bit-identical to the per-snapshot single call — correct
+# VALUES and correct input ORDER; Threaded / Distributed match the serial batch; an unsupported execution
+# backend refuses (never silently runs serial); an empty batch returns empty. The 2 workers added by the
+# parity testset above persist, but carry only `using FIT` — the distributed path needs FFTW/CGEF too.
+Test.@testset "Batch axis — spectral / shell / band / coarse-graining over snapshots" begin
+    Distributed.nprocs() == 1 && Distributed.addprocs(2)
+    Distributed.@everywhere using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+    Distributed.@everywhere using FFTW
+    Distributed.@everywhere using CoarseGrainingEnergyFluxes
+
+    Random.seed!(2024)
+    N = 12; L = 2π; nsnap = 4
+    ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+    kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
+    b     = FIT.Types.LinearBinning(2π / L)
+    bands = FIT.Types.SmoothBands([1.0, 2.0, 3.0]; logwidth = 0.5)
+    FTB = SpectralBackends.FFTSpectralBackend()
+    Ser = ComputationalBackends.SerialBackend()
+    Thr = ComputationalBackends.ThreadedBackend()
+    Dst = ComputationalBackends.DistributedBackend()
+    GPU = ComputationalBackends.GPUBackend(KA.CPU())               # a backend with no batch method → must refuse
+    vhats = map(1:nsnap) do _
+        ψh = FFTW.fft(randn(N, N)) ./ N^2
+        cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)            # divergence-free snapshot
+    end
+    xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs)
+    ufields = map(_ -> (randn(N, N), randn(N, N)), 1:nsnap)        # physical fields for coarse-graining
+    filt = FIT.Types.GaussianFilter(); ℓ = 0.5
+
+    # --- spectral flux ---
+    sf1 = [FIT.SpectralFlux.calculate_spectral_flux(vh, ks; binning = b, spectral = FTB) for vh in vhats]
+    sfS = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
+    sfT = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
+    sfD = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
+    Test.@test length(sfS) == nsnap
+    Test.@test maximum(abs, sf1[1].transfer_spectrum) > 0                       # genuine nonzero transfer
+    for i in 1:nsnap
+        Test.@test sfS[i].transfer_spectrum == sf1[i].transfer_spectrum         # serial batch == single, in order
+        Test.@test sfS[i].flux == sf1[i].flux
+        Test.@test isapprox(sfT[i].transfer_spectrum, sfS[i].transfer_spectrum; atol = 1e-12)
+        Test.@test isapprox(sfD[i].transfer_spectrum, sfS[i].transfer_spectrum; atol = 1e-12)
+    end
+    Test.@test_throws ArgumentError FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
+    Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, spectral = FTB))
+
+    # --- shell to shell ---
+    ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, spectral = FTB) for vh in vhats]
+    ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
+    ssT = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
+    ssD = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
+    for i in 1:nsnap
+        Test.@test ssS[i].transfer_matrix == ss1[i].transfer_matrix
+        Test.@test ssS[i].net_transfer == ss1[i].net_transfer
+        Test.@test isapprox(ssT[i].transfer_matrix, ssS[i].transfer_matrix; atol = 1e-12)
+        Test.@test isapprox(ssD[i].transfer_matrix, ssS[i].transfer_matrix; atol = 1e-12)
+    end
+
+    # --- band to band ---
+    bb1 = [FIT.BandTransfer.calculate_band_to_band_transfer(vh, ks; bands = bands, spectral = FTB) for vh in vhats]
+    bbS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Ser)
+    bbT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Thr)
+    bbD = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Dst)
+    for i in 1:nsnap
+        Test.@test bbS[i].transfer_matrix == bb1[i].transfer_matrix
+        Test.@test bbS[i].net_transfer == bb1[i].net_transfer
+        Test.@test isapprox(bbT[i].transfer_matrix, bbS[i].transfer_matrix; atol = 1e-12)
+        Test.@test isapprox(bbD[i].transfer_matrix, bbS[i].transfer_matrix; atol = 1e-12)
+    end
+
+    # --- coarse-graining (physical fields via CGEF) ---
+    cg1 = [FIT.CoarseGrainingFlux.calculate_coarse_graining_flux(uv, (xs, ys), ℓ, filt) for uv in ufields]
+    cgS = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux_batch(ufields, (xs, ys), ℓ, filt; execution = Ser)
+    cgT = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux_batch(ufields, (xs, ys), ℓ, filt; execution = Thr)
+    cgD = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux_batch(ufields, (xs, ys), ℓ, filt; execution = Dst)
+    for i in 1:nsnap
+        Test.@test cgS[i].flux_field == cg1[i].flux_field
+        Test.@test cgS[i].mean_flux == cg1[i].mean_flux
+        Test.@test isapprox(cgT[i].flux_field, cgS[i].flux_field; atol = 1e-12)
+        Test.@test isapprox(cgD[i].flux_field, cgS[i].flux_field; atol = 1e-12)
+    end
+    Test.@test_throws ArgumentError FIT.CoarseGrainingFlux.calculate_coarse_graining_flux_batch(ufields, (xs, ys), ℓ, filt; execution = GPU)
+end
+
+# -----------------------------------------------------------------------
 # W10 — FFTW *intra-transform* threads (orthogonal to ThreadedBackend, which
 # parallelises the outer shell loop). FFTW's own multi-threading is a global
 # setting; turning it on must not change any result. Validated single-machine.
@@ -1617,6 +1707,24 @@ Test.@testset "Compressible energy transfer" begin
 end
 
 # -----------------------------------------------------------------------
+# Workspace-reuse allocation must be measured inside a fixed-arity function (no captured Module locals);
+# an inline @allocated in a testset measures the closure/dynamic dispatch, not the call — it even reports
+# reuse > fresh (nonsense). These return (reuse, fresh) so the tests gate a real ratio.
+function _nufft_cg_reuse_fresh(ws, U, V, ℓ, filt, ms, X, Y, spectral, Ls)
+    FIT.nufft_coarse_graining_flux!(ws, (U, V), ℓ, filt, ms)
+    a_reuse = @allocated FIT.nufft_coarse_graining_flux!(ws, (U, V), ℓ, filt, ms)
+    FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = spectral, Ls = Ls)
+    a_fresh = @allocated FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = spectral, Ls = Ls)
+    return (a_reuse, a_fresh)
+end
+function _nufft_ts_reuse_fresh(ws, fields, coords, ms, Ls, spectral)
+    FIT.to_spectral!(ws, fields)
+    a_reuse = @allocated FIT.to_spectral!(ws, fields)
+    FIT.to_spectral(fields, coords, ms; spectral = spectral, Ls = Ls)
+    a_fresh = @allocated FIT.to_spectral(fields, coords, ms; spectral = spectral, Ls = Ls)
+    return (a_reuse, a_fresh)
+end
+
 # Extension smoke tests: exercise the previously-untested extensions with meaningful
 # numerical assertions, not @test true. CairoMakie (plot dispatch incl. the new TOD figure),
 # FINUFFT (scattered-Cartesian coarse-graining + the calculate_energy_transfer wiring),
@@ -1646,40 +1754,55 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         Test.@test_throws ArgumentError FIT.plot_energy_transfer(tod; mode=99)
     end
 
-    Test.@testset "FINUFFT scattered coarse-graining" begin
-        # Sample a smooth periodic velocity field at scattered points; the scattered coarse-graining
-        # flux must be finite and its calculate_energy_transfer wiring must match the direct call.
-        rng = Random.MersenneTwister(31)
-        Np = 400
-        xs = 2π .* rand(rng, Np); ys = 2π .* rand(rng, Np)
-        u  = @. sin(xs) * cos(ys); v = @. -cos(xs) * sin(ys)
-        ms = (16, 16); ℓ = 0.5
-        filt = FIT.Types.GaussianFilter()
-        direct = FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, filt, ms)
-        Test.@test direct isa FIT.Types.CoarseGrainingFluxResult
-        Test.@test all(isfinite, direct.flux_field)
-        Test.@test length(direct.flux_field) == Np
-        # Part D: unified calculate_energy_transfer entry for scattered CoarseGrainingFlux.
-        method = FIT.Types.CoarseGrainingFluxMethod(filt, ℓ)
-        wired = FIT.calculate_energy_transfer(method, (u, v), (xs, ys), ms)
-        Test.@test isapprox(wired.flux_field, direct.flux_field; rtol=1e-10)
+    Test.@testset "NUFFT scattered coarse-graining — both providers vs exact NDFT" begin
+        # Correctness gate against a brute-force EXACT NDFT (flux + stress τ̄ + strain S̄) — the
+        # independent ground truth for scattered spectral coarse-graining. Both providers (peers) run
+        # in-process via backend-type dispatch. The S̄ gate is the Nyquist-sign regression test: τ̄ is
+        # |k|-based (immune), so only a strain/derivative check catches a wrong Nyquist mode.
+        Random.seed!(3)
+        Np = 2000; ms = (20, 20)
+        X = 2π .* rand(Np); Y = 2π .* rand(Np)
+        U = @. sin(X) * cos(Y); V = @. -cos(X) * sin(Y)
+        ℓ = 0.8; filt = FIT.Types.GaussianFilter()
 
-        # In-place workspace form: matches the allocating call, diagnostics work, and a repeat
-        # call reuses the plans + every buffer — so it allocates only the tiny result struct
-        # (a genuine reduction, not the plan-reuse-only 1.06× it would be without buffer reuse).
-        ws = FIT.NUFFTCoarseGrainingWorkspace((xs, ys), ms)
-        ip = FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms)
-        Test.@test isapprox(ip.flux_field, direct.flux_field; rtol=1e-10)
-        ipd = FIT.nufft_coarse_graining_flux!(ws, (u, v), ℓ, filt, ms; return_diagnostics=true)
-        Test.@test ipd isa FIT.Types.CoarseGrainingFluxResultWithDiagnostics
-        Test.@test size(ipd.stress_tensor) == (Np, 2, 2)
-        # scale sweep reuses one workspace
-        for l in (0.3, 0.7)
-            sweep_alloc = FIT.nufft_coarse_graining_flux((u, v), (xs, ys), l, filt, ms)
-            sweep_ip = FIT.nufft_coarse_graining_flux!(ws, (u, v), l, filt, ms)
-            Test.@test isapprox(sweep_alloc.flux_field, sweep_ip.flux_field; rtol=1e-10)
+        Lx = 2π; Ly = 2π                       # true periodic domain (X, Y ∈ [0, 2π)); not the sample span
+        xt = (X .- minimum(X)) ./ Lx .* 2π; yt = (Y .- minimum(Y)) ./ Ly .* 2π
+        modeof(a, n) = 2a < n ? a : a - n
+        m1 = [modeof(a, ms[1]) for a in 0:ms[1]-1]; m2 = [modeof(b, ms[2]) for b in 0:ms[2]-1]
+        kpx = m1 .* (2π / Lx); kpy = m2 .* (2π / Ly)
+        A = eachindex(m1); Bx = eachindex(m2)
+        Gh = [FIT.Filters.filter_response(filt, sqrt(kpx[a]^2 + kpy[b]^2), ℓ) for a in A, b in Bx]
+        t1(w) = [sum(w[j] * cis(-(m1[a] * xt[j] + m2[b] * yt[j])) for j in 1:Np) for a in A, b in Bx]
+        t2(S) = [real(sum(S[a, b] * cis(+(m1[a] * xt[l] + m2[b] * yt[l])) for a in A, b in Bx)) for l in 1:Np]
+        invN = 1 / Np
+        ūs = Gh .* t1(U) .* invN; v̄s = Gh .* t1(V) .* invN
+        ū = t2(ūs); v̄ = t2(v̄s)
+        τxx = t2(Gh .* t1(U .* U) .* invN) .- ū .* ū
+        τyy = t2(Gh .* t1(V .* V) .* invN) .- v̄ .* v̄
+        Sxx = t2([im * kpx[a] * ūs[a, b] for a in A, b in Bx])
+        Syy = t2([im * kpy[b] * v̄s[a, b] for a in A, b in Bx])
+        Sxy = 0.5 .* (t2([im * kpy[b] * ūs[a, b] for a in A, b in Bx]) .+ t2([im * kpx[a] * v̄s[a, b] for a in A, b in Bx]))
+        τxy = t2(Gh .* t1(U .* V) .* invN) .- ū .* v̄
+        Πref = -(τxx .* Sxx .+ τyy .* Syy .+ 2 .* τxy .* Sxy)
+        relq(a, b) = sqrt(sum(abs2, a .- b) / sum(abs2, a))
+        method = FIT.Types.CoarseGrainingFluxMethod(filt, ℓ)
+
+        for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+            r = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = spectral, Ls = (Lx, Ly), return_diagnostics = true)
+            Test.@test relq(τxx, r.stress_tensor[:, 1, 1]) < 1e-6
+            Test.@test relq(τyy, r.stress_tensor[:, 2, 2]) < 1e-6
+            Test.@test relq(Sxx, r.strain_rate[:, 1, 1]) < 1e-6   # Nyquist-sign regression gate
+            Test.@test relq(Sxy, r.strain_rate[:, 1, 2]) < 1e-6
+            Test.@test relq(Πref, r.flux_field) < 1e-6
+            wired = FIT.calculate_energy_transfer(method, (U, V), (X, Y), ms; spectral = spectral, Ls = (Lx, Ly))
+            Test.@test isapprox(wired.flux_field, r.flux_field; rtol = 1e-8)
+            ws = FIT.NUFFTCoarseGrainingWorkspace((X, Y), ms; spectral = spectral, Ls = (Lx, Ly))
+            a_reuse, a_fresh = _nufft_cg_reuse_fresh(ws, U, V, ℓ, filt, ms, X, Y, spectral, (Lx, Ly))
+            # reuse (FINUFFT ~tens of B, NonuniformFFTs ~its per-exec KA floor) ≪ fresh (rebuilds the plan)
+            Test.@test a_reuse < a_fresh ÷ 10
         end
-        # (workspace-reuse allocation ratio asserted in test_allocs.jl)
+        # Ls is a required physical input (the domain the samples under-span), never guessed from the span.
+        Test.@test_throws UndefKeywordError FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = FIT.Types.FINUFFTBackend())
     end
 
     Test.@testset "NUFFT scattered → to_spectral (uniform reconstruction feeds the flux family)" begin
@@ -1691,7 +1814,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
 
         # Samples on a uniform grid → û == fft(u)/Nᵈ exactly (drop-in for the uniform diagnostics).
         û_sc, ks_sc = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                        spectral = SpectralBackends.NUFFTSpectralBackend(), Ls = (Ln, Ln))
+                                        spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
         û_man  = cat(FFTW.fft(ug), FFTW.fft(vg); dims = 3) ./ Nn^2
         ks_man = FIT.Utils.wavenumber_grid((Nn, Nn), (Ln, Ln))
         Test.@test isapprox(û_sc, û_man; atol = 1e-8)
@@ -1708,13 +1831,29 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         xr = rand(rng2, Np) .* Ln; yr = rand(rng2, Np) .* Ln
         kx0 = 2π / Ln * 2; ky0 = 2π / Ln * 3
         us = cos.(kx0 .* xr .+ ky0 .* yr)
-        ûs, kss = FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.NUFFTSpectralBackend(), Ls = (Ln, Ln))
+        ûs, kss = FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
         peak = argmax(abs.(ûs[:, :, 1]))
         Test.@test abs(abs(kss[1][peak[1]]) - kx0) < 1e-8
         Test.@test abs(abs(kss[2][peak[2]]) - ky0) < 1e-8
 
-        # 3-arg scattered form requires SpectralBackends.NUFFTSpectralBackend (a clear error, not a silent wrong path).
-        Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.FFTSpectralBackend())
+        # In-place workspace form reuses the plan + buffers across calls (both providers reconstruct
+        # û == fft(u)/Nᵈ on the uniform grid). Serial FINUFFT (C) is 0-alloc on repeat; NonuniformFFTs
+        # carries an inherent per-exec KA/library alloc floor, so its reuse is gated well below the fresh
+        # (plan-building) call rather than == 0.
+        for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+            wsts = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); spectral = spectral, ncomponents = 2, Ls = (Ln, Ln))
+            û_ip, _ = FIT.to_spectral!(wsts, (vec(ug), vec(vg)))
+            Test.@test isapprox(û_ip, û_man; atol = 1e-8)
+            a_reuse, a_fresh = _nufft_ts_reuse_fresh(wsts, (vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn), (Ln, Ln), spectral)
+            if spectral isa FIT.Types.FINUFFTBackend
+                Test.@test a_reuse == 0                                     # C plan + reused buffers → nothing on the Julia side
+            else
+                Test.@test a_reuse < a_fresh ÷ 4                            # plan + buffers reused; only NonuniformFFTs' per-exec floor remains
+            end
+        end
+
+        # 3-arg scattered form requires a NUFFT backend (Types.FINUFFTBackend) — a clear error, not a silent wrong path.
+        Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.FFTSpectralBackend(), Ls = (Ln, Ln))
     end
 
     Test.@testset "FlowFieldSpectra front-end" begin
@@ -1726,7 +1865,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
             (abs(kx[i, j]) <= 3 && abs(ky[i, j]) <= 3) || (ψbl[i, j] = 0)
         end
         ûbl = cat(im .* ky .* ψbl, -im .* kx .* ψbl; dims = 3)
-        xs = collect(range(0, 2π; length=N+1)[1:N])
+        xs = range(0, 2π; length=N+1)[1:N]   # uniform axis as a range → FlowGeometries infers its period
         # Physical field from the fft/N² coefficients is bfft(û) = Σ_k û e^{ik·x} (unnormalized
         # inverse); ifft(û) would give u/Nᵈ (a scaled field) and mis-scale the FFS comparison.
         uxp = real.(FFTW.bfft(ûbl[:, :, 1]))
@@ -1942,7 +2081,7 @@ Test.@testset "Backend matrix — transform axis (facade-proof)" begin
     ρ̂ = FFTW.fft(1.0 .+ 0.1 .* randn(N, N)) ./ N^2
     b = FIT.Types.LinearBinning(2π / L); bands = FIT.Types.SmoothBands([2.0, 4.0])
     DS = SpectralBackends.DirectSumSpectralBackend(); FTB = SpectralBackends.FFTSpectralBackend()
-    NU = SpectralBackends.NUFFTSpectralBackend(); SH = SpectralBackends.FSHTSpectralBackend(); NS = SpectralBackends.NUFSHTSpectralBackend()
+    NU = FIT.Types.FINUFFTBackend(); SH = SpectralBackends.FSHTSpectralBackend(); NS = SpectralBackends.NUFSHTSpectralBackend()
 
     # Cartesian Fourier-coefficient diagnostics: SUPPORTED = {DirectSum, FFT}; REJECTED = scattered/spherical.
     cart = (

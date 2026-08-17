@@ -426,4 +426,85 @@ function FIT.Compressible._compressible_distributed(
                                             rA.channels, rB.pressure_dilatation)
 end
 
+# ---------------------------------------------------------------------------
+# Distributed BATCH methods (snapshots are the outer parallel axis)
+# ---------------------------------------------------------------------------
+# Each overrides a core `_*_batch_distributed!` stub. Snapshots are partitioned into contiguous chunks
+# (one per worker), `pmap`'d in order; each worker builds its OWN workspace (the FFTW-plan workspace is
+# not serializable) and reuses it across its chunk with a serial inner transform. Results are reassembled
+# in input order and are bit-identical to the serial batch. (`velocity_hats` is captured whole by the
+# closure; a subset-only send is a later bandwidth optimization.)
+
+function FIT.SpectralFlux._spectral_flux_batch_distributed!(results, velocity_hats, ks, shell_idx;
+                                                            binning, dealiasing, invariant, spectral, geometry)
+    n = length(velocity_hats); û1 = first(velocity_hats); RT = real(eltype(û1))
+    centers = FIT.ShellBinning.shell_centers(binning, maximum(FIT.ShellBinning.shell_coordinate(geometry, ks)))
+    nw = max(1, Distributed.nworkers())
+    chunks = collect(Iterators.partition(1:n, max(1, cld(n, nw))))
+    chunk_results = Distributed.pmap(chunks) do chunk
+        ws = FIT.Workspaces.SpectralFluxWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing)
+        map(chunk) do i
+            res = FIT.Types.SpectralFluxResult(centers, similar(centers, RT, length(centers)), similar(centers, RT, length(centers)))
+            FIT.SpectralFlux.calculate_spectral_flux!(res, ws, velocity_hats[i], ks, shell_idx;
+                dealiasing = dealiasing, invariant = invariant, spectral = spectral, execution = ComputationalBackends.SerialBackend())
+            res
+        end
+    end
+    flat = reduce(vcat, chunk_results)
+    for i in 1:n; results[i] = flat[i]; end
+    return results
+end
+
+function FIT.ShellToShellTransfer._shell_to_shell_batch_distributed!(results, velocity_hats, ks, centers, edges, N_sh;
+                                                                     binning, dealiasing, verify_antisymmetry, invariant, spectral, geometry)
+    n = length(velocity_hats); û1 = first(velocity_hats); FT = real(eltype(û1))
+    nw = max(1, Distributed.nworkers())
+    chunks = collect(Iterators.partition(1:n, max(1, cld(n, nw))))
+    chunk_results = Distributed.pmap(chunks) do chunk
+        ws = FIT.Workspaces.ShellToShellWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing)
+        map(chunk) do i
+            vh = velocity_hats[i]
+            T_mat = Matrix{FT}(undef, N_sh, N_sh); net = Vector{FT}(undef, N_sh)
+            res = FIT.Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
+            ma = FIT.ShellToShellTransfer._calculate_shell_to_shell!(res, ws, vh, ks, ComputationalBackends.SerialBackend(), spectral;
+                dealiasing = dealiasing, verify_antisymmetry = verify_antisymmetry, invariant = invariant, advecting_hat = vh)
+            FIT.Types.ShellToShellResult(centers, edges, T_mat, net, ma)
+        end
+    end
+    flat = reduce(vcat, chunk_results)
+    for i in 1:n; results[i] = flat[i]; end
+    return results
+end
+
+function FIT.BandTransfer._band_to_band_batch_distributed!(results, velocity_hats, ks, bands, nb;
+                                                           dealiasing, invariant, spectral, geometry)
+    n = length(velocity_hats); û1 = first(velocity_hats); FT = real(eltype(û1))
+    nw = max(1, Distributed.nworkers())
+    chunks = collect(Iterators.partition(1:n, max(1, cld(n, nw))))
+    chunk_results = Distributed.pmap(chunks) do chunk
+        bws = FIT.BandTransfer.BandTransferWorkspace(û1, ks, bands; geometry = geometry)
+        map(chunk) do i
+            vh = velocity_hats[i]
+            T = zeros(FT, nb, nb); net = zeros(FT, nb)
+            FIT.BandTransfer.calculate_band_to_band_transfer!(T, net, bws, vh, ks;
+                dealiasing = dealiasing, invariant = invariant, spectral = spectral,
+                execution = ComputationalBackends.SerialBackend(), advecting_hat = vh)
+        end
+    end
+    flat = reduce(vcat, chunk_results)
+    for i in 1:n; results[i] = flat[i]; end
+    return results
+end
+
+function FIT.CoarseGrainingFlux._cg_flux_batch_distributed!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+    n = length(velocity_fields_batch)
+    nw = max(1, Distributed.nworkers())
+    chunks = collect(Iterators.partition(1:n, max(1, cld(n, nw))))
+    chunk_results = Distributed.pmap(chunks) do chunk
+        ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(velocity_fields_batch[first(chunk)], coords_vecs, ℓ, filter; kwargs...)
+        [deepcopy(FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, velocity_fields_batch[i])) for i in chunk]
+    end
+    return reduce(vcat, chunk_results)
+end
+
 end # module

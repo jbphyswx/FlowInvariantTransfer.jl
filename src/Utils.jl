@@ -54,7 +54,9 @@ function wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D}) where {D}
         ks = zeros(FT, N)
         for i in 1:N
             k_idx = i - 1
-            ks[i] = k_idx <= N ÷ 2 ? k_idx * dk : (k_idx - N) * dk
+            # fftfreq/FFTW ordering: even-N Nyquist is -N/2, not +N/2. `2·k_idx < N` gets the sign right
+            # for both parities — magnitude/|k| uses are immune, signed-k (derivative) uses are not.
+            ks[i] = 2 * k_idx < N ? k_idx * dk : (k_idx - N) * dk
         end
         return ks
     end
