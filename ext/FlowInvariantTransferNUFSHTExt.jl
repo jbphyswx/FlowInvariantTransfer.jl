@@ -258,10 +258,10 @@ function FIT.calculate_divergent_spherical_transfer!(
     @. ws.sym  = (ws.ap + ws.am) / 2
     @. ws.anti = (ws.ap - ws.am) / 2
 
-    # Unit-sphere vorticity/divergence coefficients via the eth ladder (row-broadcast, device-generic):
-    # ζ_lm = -i√(ℓ(ℓ+1)) sym,  δ_lm = +√(ℓ(ℓ+1)) anti; synthesise both at the points (spin-0).
-    @. ws.ζc = -im * ws.ladl * ws.sym
-    @. ws.δc =       ws.ladl * ws.anti
+    # Unit-sphere vorticity/divergence via the eth ladder (Goldberg convention, ð ₛY=+√((ℓ−s)(ℓ+s+1))ₛ₊₁Y):
+    # ζ_lm = +i√(ℓ(ℓ+1)) sym,  δ_lm = -√(ℓ(ℓ+1)) anti; synthesise both at the points (spin-0).
+    @. ws.ζc =  im * ws.ladl * ws.sym
+    @. ws.δc = -ws.ladl * ws.anti
     NUFSHT.nusht_type2_spin!(ws.ζv, ws.ζc, ws.plan0)
     NUFSHT.nusht_type2_spin!(ws.δv, ws.δc, ws.plan0)
 
@@ -269,10 +269,9 @@ function FIT.calculate_divergent_spherical_transfer!(
     @. ws.Kv = 0.5 * (u_θ^2 + u_φ^2)
     fill!(ws.Khat, zero(CT)); NUFSHT.nusht_solve_spin!(ws.Khat, ws.Kv, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
 
-    # ∇K = -synth_spin+1(√(ℓ(ℓ+1)) K̂)   (β = -1; reuse Khat to hold the ladder-scaled coefficients).
+    # ∇K = ð K = +√(ℓ(ℓ+1)) synth_spin+1(K̂)  (reuse Khat for the ladder-scaled coefficients).
     @. ws.Khat = ws.ladw * ws.Khat
     NUFSHT.nusht_type2_spin!(ws.gradK, ws.Khat, ws.planpw)
-    @. ws.gradK = -ws.gradK
 
     # Skew-symmetric energy-conserving advection A = ∇K + (iζ + ½δ) U₊; analyse (spin+1) at lwork.
     @. ws.Advv = ws.gradK + (im * ws.ζv + 0.5 * ws.δv) * ws.Up

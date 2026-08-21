@@ -199,6 +199,26 @@ end
 _shell_to_shell_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
     _shell_to_shell_batch_distributed!(results, velocity_hats, ks, centers, edges, N_sh; kwargs...)
 
+# GPU over the batch — loop the single-shot device kernel, reusing one device workspace (device inputs →
+# device buffers via `similar`). Requires the FFT backend (the DirectSum shell path is host scalar-indexed).
+function _shell_to_shell_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, centers, edges, N_sh;
+                                binning, dealiasing, verify_antisymmetry, invariant, spectral, geometry)
+    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
+        "calculate_shell_to_shell_transfer_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
+        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
+    FT = real(eltype(first(velocity_hats)))
+    ws = Workspaces.ShellToShellWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
+    for i in eachindex(velocity_hats)
+        vh = velocity_hats[i]
+        T_mat = Matrix{FT}(undef, N_sh, N_sh); net = Vector{FT}(undef, N_sh)
+        res  = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
+        max_asym = _calculate_shell_to_shell!(res, ws, vh, ks, gpu, spectral;
+            dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant, advecting_hat=vh)
+        results[i] = Types.ShellToShellResult(centers, edges, T_mat, net, max_asym)
+    end
+    return results
+end
+
 # Any other execution backend has no batch hook — refuse rather than silently run serial.
 _shell_to_shell_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
     throw(ArgumentError("calculate_shell_to_shell_transfer_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *

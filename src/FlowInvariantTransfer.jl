@@ -76,11 +76,12 @@ function mpi_batch_map(args...; kwargs...)
 end
 
 """
-    pencil_spectral_flux(u_phys, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant) -> (centers, transfer_spectrum, flux)
+    pencil_spectral_flux(u_phys, plan, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant, geometry, execution) -> (centers, transfer_spectrum, flux)
 
 Distributed spectral transfer/flux for a single grid split across MPI ranks along the **pencil
-axis**: `u_phys` is the physical-space velocity held as a `PencilArray` (each rank owns a pencil
-of the global grid). The pseudospectral nonlinear term is evaluated with a transpose-based
+axis**: `u_phys` is the physical-space velocity as an `NTuple{D, PencilArray}` (one component per
+entry; each rank owns a pencil of the global grid) and `plan` is a distributed FFT plan from
+[`build_pencil_plan`](@ref). The pseudospectral nonlinear term is evaluated with a transpose-based
 distributed FFT (PencilFFTs), the transfer density is shell-binned locally, and the per-shell
 spectrum is `MPI.Allreduce`d to a global result identical on every rank (matching the serial
 [`calculate_spectral_flux`](@ref) on the same field). Use this when one snapshot's grid is too
@@ -285,6 +286,15 @@ _to_spectral_workspace(spectral, args...; kwargs...) = throw(ArgumentError(
     "NUFFTToSpectralWorkspace with $(nameof(typeof(spectral))) requires its extension: `using FINUFFT` " *
     "(Types.FINUFFTBackend) or `using NonuniformFFTs` (Types.NonuniformFFTsBackend)."))
 
+# Host/device allocation strategy for the NonuniformFFTs `to_spectral` workspace, dispatched on the
+# execution backend. Host defaults are generic (no NonuniformFFTs / KernelAbstractions dependency); the
+# KernelAbstractions extension overrides `_nufft_new` / `_nufft_to_device` for a `GPUBackend` so the plan
+# is built on its KA backend and the point/data buffers are device-resident.
+_nufft_plan_backend_kw(::ComputationalBackends.AbstractExecutionBackend) = NamedTuple()
+_nufft_plan_backend_kw(gpu::ComputationalBackends.AbstractGPUBackend) = (; backend = gpu.backend)
+_nufft_new(::ComputationalBackends.AbstractExecutionBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} = Array{CT}(undef, dims...)
+_nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
+
 """
     to_spectral!(ws::NUFFTToSpectralWorkspace, velocity_fields) -> (velocity_hat, ks)
 
@@ -468,17 +478,21 @@ The reconstruction is the density-normalized adjoint (`û = type1(u)/N`, exact f
 uniform grid; the package's established scattered-Cartesian convention). `tol` sets the NUFFT
 tolerance. `Ls` (required) is the periodic domain size per dimension — it fixes the wavenumbers
 `k = 2πn/L`. The samples live in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` and under-span the period, so `L` cannot be inferred
-from them; samples on the uniform `L`-grid give `û = fft(u)/Nᵈ` exactly.
+from them; samples on the uniform `L`-grid give `û = fft(u)/Nᵈ` exactly. `execution` selects host
+(default) vs device-resident: a `ComputationalBackends.GPUBackend(dev)` (NonuniformFFTs provider, `dev`
+a KernelAbstractions backend) builds the plan and buffers on-device so the scattered → `velocity_hat`
+step runs on the device.
 """
 function to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
                      spectral::SpectralBackends.AbstractSpectralBackend, tol::Real = 1e-9,
-                     Ls::Tuple)
+                     Ls::Tuple,
+                     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
     spectral isa SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend || throw(ArgumentError(
         "the 3-argument to_spectral(fields, scatter_coords, ms; …) is the scattered-Cartesian NUFFT " *
         "entry — pass spectral = Types.FINUFFTBackend() or Types.NonuniformFFTsBackend(). For uniform-grid " *
         "data use to_spectral(fields, coords_vecs; spectral = SpectralBackends.FFTSpectralBackend())."))
     ws = NUFFTToSpectralWorkspace(scatter_coords, ms; spectral = spectral,
-                                  ncomponents = length(velocity_fields), tol = tol, Ls = Ls)
+                                  ncomponents = length(velocity_fields), tol = tol, Ls = Ls, execution = execution)
     return to_spectral!(ws, velocity_fields)
 end
 

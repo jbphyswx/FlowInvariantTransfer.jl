@@ -581,6 +581,13 @@ Test.@testset "Helical partial fluxes — 8 channels sum to the total energy flu
     chan_scale = maximum(sqrt(sum(abs2, c.transfer_spectrum)) for c in values(hp.channels))
     Test.@test chan_scale > 0
     Test.@test isapprox(hp.total.transfer_spectrum, sf.transfer_spectrum; atol = 1e-10 * chan_scale)
+
+    # Exported in-place wrapper reuses a NonlinearTermWorkspace and matches the allocating form.
+    wsh = FIT.Workspaces.NonlinearTermWorkspace(û, ks; dealiasing = FIT.Types.OrszagTwoThirds())
+    hp_ip = FIT.calculate_helical_partial_fluxes!(wsh, û, ks; binning = b, dealiasing = FIT.Types.OrszagTwoThirds(),
+        spectral = SpectralBackends.FFTSpectralBackend())
+    Test.@test length(hp_ip.channels) == 8
+    Test.@test isapprox(hp_ip.total.transfer_spectrum, hp.total.transfer_spectrum; atol = 1e-10 * chan_scale)
 end
 
 # -----------------------------------------------------------------------
@@ -1264,7 +1271,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     Ser = ComputationalBackends.SerialBackend()
     Thr = ComputationalBackends.ThreadedBackend()
     Dst = ComputationalBackends.DistributedBackend()
-    GPU = ComputationalBackends.GPUBackend(KA.CPU())               # a backend with no batch method → must refuse
+    GPU = ComputationalBackends.GPUBackend(KA.CPU())               # KA.CPU() → device path on host: CPU-parity check (CG has no device path → refuses)
     vhats = map(1:nsnap) do _
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)            # divergence-free snapshot
@@ -1278,6 +1285,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     sfS = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
     sfT = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
     sfD = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
+    sfG = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
     Test.@test length(sfS) == nsnap
     Test.@test maximum(abs, sf1[1].transfer_spectrum) > 0                       # genuine nonzero transfer
     for i in 1:nsnap
@@ -1285,8 +1293,10 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
         Test.@test sfS[i].flux == sf1[i].flux
         Test.@test isapprox(sfT[i].transfer_spectrum, sfS[i].transfer_spectrum; atol = 1e-12)
         Test.@test isapprox(sfD[i].transfer_spectrum, sfS[i].transfer_spectrum; atol = 1e-12)
+        Test.@test isapprox(sfG[i].transfer_spectrum, sfS[i].transfer_spectrum; atol = 1e-12)   # GPU device path (KA.CPU)
     end
-    Test.@test_throws ArgumentError FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
+    # GPU batch requires the FFT backend (DirectSum is a host-only reference).
+    Test.@test_throws ArgumentError FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = SpectralBackends.DirectSumSpectralBackend(), execution = GPU)
     Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, spectral = FTB))
 
     # --- shell to shell ---
@@ -1294,11 +1304,13 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
     ssT = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
     ssD = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
+    ssG = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
     for i in 1:nsnap
         Test.@test ssS[i].transfer_matrix == ss1[i].transfer_matrix
         Test.@test ssS[i].net_transfer == ss1[i].net_transfer
         Test.@test isapprox(ssT[i].transfer_matrix, ssS[i].transfer_matrix; atol = 1e-12)
         Test.@test isapprox(ssD[i].transfer_matrix, ssS[i].transfer_matrix; atol = 1e-12)
+        Test.@test isapprox(ssG[i].transfer_matrix, ssS[i].transfer_matrix; atol = 1e-12)   # GPU device path (KA.CPU)
     end
 
     # --- band to band ---
@@ -1306,11 +1318,13 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     bbS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Ser)
     bbT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Thr)
     bbD = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Dst)
+    bbG = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = GPU)
     for i in 1:nsnap
         Test.@test bbS[i].transfer_matrix == bb1[i].transfer_matrix
         Test.@test bbS[i].net_transfer == bb1[i].net_transfer
         Test.@test isapprox(bbT[i].transfer_matrix, bbS[i].transfer_matrix; atol = 1e-12)
         Test.@test isapprox(bbD[i].transfer_matrix, bbS[i].transfer_matrix; atol = 1e-12)
+        Test.@test isapprox(bbG[i].transfer_matrix, bbS[i].transfer_matrix; atol = 1e-12)   # GPU device path (KA.CPU)
     end
 
     # --- coarse-graining (physical fields via CGEF) ---
@@ -1851,6 +1865,17 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
                 Test.@test a_reuse < a_fresh ÷ 4                            # plan + buffers reused; only NonuniformFFTs' per-exec floor remains
             end
         end
+
+        # Device-resident path (NonuniformFFTs provider): a GPUBackend builds the PlanNUFFT on its KA
+        # backend with device points/buffers, so scattered → velocity_hat runs on-device. GPUBackend(KA.CPU())
+        # exercises that plumbing on the host (device-array kind = Array), CPU-parity-testable with no GPU.
+        û_host, _ = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
+                                    spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln))
+        û_dev, _  = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
+                                    spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln),
+                                    execution = ComputationalBackends.GPUBackend(KA.CPU()))
+        Test.@test isapprox(Array(û_dev), û_host; atol = 1e-10)   # device path == host path
+        Test.@test isapprox(Array(û_dev), û_man;  atol = 1e-8)    # …and == fft(u)/Nᵈ on the uniform grid
 
         # 3-arg scattered form requires a NUFFT backend (Types.FINUFFTBackend) — a clear error, not a silent wrong path.
         Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.FFTSpectralBackend(), Ls = (Ln, Ln))

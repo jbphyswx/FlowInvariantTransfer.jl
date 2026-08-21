@@ -200,8 +200,9 @@ function FIT._to_spectral_workspace(::FIT.Types.NonuniformFFTsBackend, scatter_c
                                     ncomponents::Int = length(scatter_coords), tol::Real = 1e-9,
                                     Ls::Tuple,
                                     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
-    # `execution` is accepted for API symmetry with the FINUFFT provider; NonuniformFFTs threads its
-    # transforms off `Threads.nthreads()` internally (no per-plan thread count), so it does not gate here.
+    # `execution` selects host (default) vs device-resident: a GPUBackend builds the plan on its KA
+    # backend with device points/buffers (the whole scattered → velocity_hat step runs on-device); any
+    # other backend stays host. NonuniformFFTs threads its own transforms off `Threads.nthreads()`.
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("NonuniformFFTs to_spectral supports 1D/2D/3D; got nd=$nd."))
@@ -223,14 +224,17 @@ function FIT._to_spectral_workspace(::FIT.Types.NonuniformFFTsBackend, scatter_c
         cmin = FT(minimum(scatter_coords[d]))
         (FT.(scatter_coords[d]) .- cmin) ./ Lused[d] .* (2 * FT(π))   # → [0, 2π)
     end
+    # Device-generic: for a GPUBackend the points and the plan's data buffers are moved/allocated onto the
+    # KA backend (helpers dispatch to the KernelAbstractions ext); for any other backend they stay host.
+    scaled_dev = map(x -> FIT._nufft_to_device(execution, x), scaled)
+    plan = NonuniformFFTs.PlanNUFFT(CT, ms; FIT._nufft_plan_backend_kw(execution)...,
+                                    fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms)))
+    NonuniformFFTs.set_points!(plan, scaled_dev)   # pure-Julia plan — GC'd, no finalizer needed
 
-    plan = NonuniformFFTs.PlanNUFFT(CT, ms; fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms)))
-    NonuniformFFTs.set_points!(plan, scaled)   # pure-Julia plan — GC'd, no finalizer needed
-
-    û    = Array{CT}(undef, ms..., ncomponents)
-    scat = Vector{CT}(undef, N)
-    spec = Array{CT}(undef, ms...)
-    return FIT.NUFFTToSpectralWorkspace(plan, scaled, ks, û, scat, spec, N, one(FT) / FT(N))
+    û    = FIT._nufft_new(execution, CT, ms..., ncomponents)
+    scat = FIT._nufft_new(execution, CT, N)
+    spec = FIT._nufft_new(execution, CT, ms...)
+    return FIT.NUFFTToSpectralWorkspace(plan, scaled_dev, ks, û, scat, spec, N, one(FT) / FT(N))
 end
 
 function FIT.to_spectral!(ws::FIT.NUFFTToSpectralWorkspace{<:NonuniformFFTs.PlanNUFFT}, velocity_fields::Tuple)

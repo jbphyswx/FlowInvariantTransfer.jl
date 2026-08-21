@@ -246,6 +246,24 @@ end
 _band_to_band_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, bands, nb; kwargs...) =
     _band_to_band_batch_distributed!(results, velocity_hats, ks, bands, nb; kwargs...)
 
+# GPU over the batch — loop the single-shot device kernel, reusing one device workspace (device inputs →
+# device buffers via `similar`). Requires the FFT backend (DirectSum is a host-only reference).
+function _band_to_band_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, bands, nb;
+                              dealiasing, invariant, spectral, geometry)
+    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
+        "calculate_band_to_band_transfer_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
+        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
+    FT  = real(eltype(first(velocity_hats)))
+    bws = BandTransferWorkspace(first(velocity_hats), ks, bands; geometry=geometry)
+    for i in eachindex(velocity_hats)
+        vh = velocity_hats[i]
+        T = zeros(FT, nb, nb); net = zeros(FT, nb)
+        results[i] = calculate_band_to_band_transfer!(T, net, bws, vh, ks;
+            dealiasing=dealiasing, invariant=invariant, spectral=spectral, execution=gpu, advecting_hat=vh)
+    end
+    return results
+end
+
 # Any other execution backend has no batch hook — refuse rather than silently run serial.
 _band_to_band_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, bands, nb; kwargs...) =
     throw(ArgumentError("calculate_band_to_band_transfer_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *

@@ -16,6 +16,14 @@ function _to_device(dev, A::AbstractArray)
     return d
 end
 
+# Device-resident buffers + point arrays for the NonuniformFFTs `to_spectral` workspace on a GPUBackend
+# (host defaults live in core FlowInvariantTransfer). `KA.allocate` gives an uninitialized device buffer
+# (all three scratch buffers are fully overwritten by `to_spectral!`); coordinate vectors are copied onto
+# the backend so they match the device-tagged `PlanNUFFT`.
+FIT._nufft_new(gpu::ComputationalBackends.AbstractGPUBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} =
+    KA.allocate(gpu.backend, CT, dims...)
+FIT._nufft_to_device(gpu::ComputationalBackends.AbstractGPUBackend, x::AbstractArray) = _to_device(gpu.backend, x)
+
 # ---------------------------------------------------------------------------
 # Device kernels (KernelAbstractions ≥ 0.9 API: launch then KA.synchronize).
 #

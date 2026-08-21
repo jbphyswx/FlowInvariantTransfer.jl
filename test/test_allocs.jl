@@ -74,6 +74,10 @@ function _alloc_partial!(ws, û, ks, b, decomp)
     FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
     return @allocated FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
 end
+function _alloc_helical!(ws, û, ks, b)
+    FIT.calculate_helical_partial_fluxes!(ws, û, ks; binning=b, spectral=SpectralBackends.FFTSpectralBackend())
+    return @allocated FIT.calculate_helical_partial_fluxes!(ws, û, ks; binning=b, spectral=SpectralBackends.FFTSpectralBackend())
+end
 
 # --- reuse-ratio barriers for plan-owning extension methods --------------------------------------
 # These transforms allocate internally (external C plans, or no in-place transform API, or a per-scale
@@ -227,6 +231,12 @@ Test.@testset "Allocations" begin
         fb = sizeof(û2)
         wsp = FIT.Workspaces.NonlinearTermWorkspace(û2, ks2)
         Test.@test _alloc_partial!(wsp, û2, ks2, b2, FIT.Types.HelmholtzDecomposition()) <= 15fb
+
+        # calculate_helical_partial_fluxes! (the exported 3D-only ! wrapper) likewise reuses ONE
+        # NonlinearTermWorkspace across its 8 channels; only the channel/total result vectors and the ±
+        # helical components remain (output-only, measured ≈ 6.7× the field).
+        wsh3 = FIT.Workspaces.NonlinearTermWorkspace(û3, ks3)
+        Test.@test _alloc_helical!(wsh3, û3, ks3, b2) <= 15 * sizeof(û3)
 
         # TOD serial loop: per-triad SVD scratch reused across triads; residual is the eigen!/qr! LAPACK
         # internals + the per-triad output-mode matrices stored in the result (both inherent).
