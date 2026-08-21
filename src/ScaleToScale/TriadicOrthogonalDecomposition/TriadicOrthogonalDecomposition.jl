@@ -41,11 +41,11 @@ end
 """
     _triadic_loop_distributed!(args...; kwargs...)
 
-Distributed triad loop. Stub for future Distributed extension.
+Distributed triad loop. Stub overridden by the Distributed extension.
 """
 function _triadic_loop_distributed!(args...; kwargs...)
     throw(ArgumentError(
-        "Distributed triadic decomposition is not yet implemented."))
+        "Distributed triadic decomposition requires Distributed. Run `using Distributed` to load the extension."))
 end
 
 # ---------------------------------------------------------------------------

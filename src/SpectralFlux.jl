@@ -241,6 +241,22 @@ end
 _spectral_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, shell_idx; kwargs...) =
     _spectral_flux_batch_distributed!(results, velocity_hats, ks, shell_idx; kwargs...)
 
+# GPU over the batch — loop the single-shot device kernel, reusing one device workspace (built from the
+# first snapshot via `similar`, so device inputs give device buffers). The batch is the outer axis; each
+# flux runs on-device. Requires the FFT backend (DirectSum is a host-only O(N²ᴰ) reference).
+function _spectral_flux_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, shell_idx;
+                               binning, dealiasing, invariant, spectral, geometry)
+    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
+        "calculate_spectral_flux_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
+        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
+    ws = Workspaces.SpectralFluxWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
+    for i in eachindex(velocity_hats)
+        calculate_spectral_flux!(results[i], ws, velocity_hats[i], ks, shell_idx;
+                                 dealiasing=dealiasing, invariant=invariant, spectral=spectral, execution=gpu)
+    end
+    return results
+end
+
 # Any other execution backend has no batch hook — refuse rather than silently run serial.
 _spectral_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, shell_idx; kwargs...) =
     throw(ArgumentError("calculate_spectral_flux_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
