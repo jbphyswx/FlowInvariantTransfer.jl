@@ -228,6 +228,32 @@ function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
     return kc
 end
 
+# Plan + buffers for `to_spectral`, dispatched on the execution backend so the provider stays the same
+# whether the transform runs on the host (this method) or an NVIDIA GPU (the cuFINUFFT extension). Host
+# build: a type-1 guru plan (points preset) + reused Julia buffers. iflag=−1 → e^{-ik·x} analysis (Julia
+# `fft` convention); modeord=1 → FFTW mode order, matching Utils.wavenumber_grid. SerialBackend()
+# (fft_nthreads = 1) keeps the exec off FFTW's Julia-thread callback → 0-alloc reuse (batch the outer axis
+# to parallelise); ThreadedBackend() threads one transform across `Threads.nthreads()` at the cost of
+# per-exec Task scratch. Returns (plan, coords, û, scat, spec).
+function FIT._finufft_ts_build(execution::ComputationalBackends.AbstractExecutionBackend, ms::Tuple, tol::Real,
+                               scaled::Tuple, ::Type{CT}, ncomponents::Int, N::Int) where {CT}
+    FT = real(CT)
+    fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
+    p1 = FINUFFT.finufft_makeplan(1, Int64[ms...], -1, 1, FT(tol); dtype = FT, modeord = 1, nthreads = fft_nthreads)
+    FINUFFT.finufft_setpts!(p1, scaled...)
+    finalizer(FINUFFT.finufft_destroy!, p1)   # FINUFFT.jl registers none; free the C plan when GC'd
+    û    = Array{CT}(undef, ms..., ncomponents)
+    scat = Vector{CT}(undef, N)
+    spec = Array{CT}(undef, ms...)
+    return (p1, scaled, û, scat, spec)
+end
+
+# A GPUBackend routes to the cuFINUFFT device build (FINUFFT + CUDA extension); without `using CUDA` that
+# override is absent, so fail loudly rather than silently building a host plan for a device request.
+FIT._finufft_ts_build(::ComputationalBackends.AbstractGPUBackend, ms::Tuple, tol::Real, scaled::Tuple,
+                      ::Type{CT}, ncomponents::Int, N::Int) where {CT} = throw(ArgumentError(
+    "device FINUFFT to_spectral needs the cuFINUFFT extension — load it with `using CUDA` (NVIDIA GPU only)"))
+
 # ---------------------------------------------------------------------------
 # Scattered-Cartesian physical → uniform Fourier coefficients (the Types.FINUFFTBackend `to_spectral`
 # path). The workspace holds a preset type-1 plan + reusable buffers; `to_spectral!` reuses them so a
@@ -239,7 +265,6 @@ function FIT._to_spectral_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::
                                     ncomponents::Int = length(scatter_coords), tol::Real = 1e-9,
                                     Ls::Tuple,
                                     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
-    fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
     nd == length(ms) || throw(ArgumentError("scatter_coords ($(nd)D) and ms ($(length(ms))D) must match"))
     1 <= nd <= 3 || throw(ArgumentError("FINUFFT supports 1D, 2D, 3D only; got nd=$nd."))
@@ -263,18 +288,8 @@ function FIT._to_spectral_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::
         cmin = FT(minimum(scatter_coords[d]))
         (FT.(scatter_coords[d]) .- cmin) ./ Lused[d] .* (2 * FT(π))
     end
-    # iflag=−1 → e^{-ik·x} analysis (Julia `fft` convention); modeord=1 → FFTW mode order, matching
-    # Utils.wavenumber_grid. execution = SerialBackend() (default, fft_nthreads = 1) keeps the exec off
-    # FFTW's Julia-thread callback → 0-alloc reuse (batch the outer axis to parallelise); ThreadedBackend()
-    # threads a single large transform across `Threads.nthreads()` at the cost of per-exec Task scratch.
-    p1 = FINUFFT.finufft_makeplan(1, Int64[ms...], -1, 1, FT(tol); dtype = FT, modeord = 1, nthreads = fft_nthreads)
-    FINUFFT.finufft_setpts!(p1, scaled...)
-    finalizer(FINUFFT.finufft_destroy!, p1)   # FINUFFT.jl registers none; free the C plan when GC'd
-
-    û    = Array{CT}(undef, ms..., ncomponents)
-    scat = Vector{CT}(undef, N)
-    spec = Array{CT}(undef, ms...)
-    return FIT.NUFFTToSpectralWorkspace(p1, scaled, ks, û, scat, spec, N, one(FT) / FT(N))
+    (plan, coords, û, scat, spec) = FIT._finufft_ts_build(execution, ms, tol, scaled, CT, ncomponents, N)
+    return FIT.NUFFTToSpectralWorkspace(plan, coords, ks, û, scat, spec, N, one(FT) / FT(N))
 end
 
 function FIT.to_spectral!(ws::FIT.NUFFTToSpectralWorkspace{<:FINUFFT.finufft_plan}, velocity_fields::Tuple)
