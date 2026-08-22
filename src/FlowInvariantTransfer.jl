@@ -244,6 +244,40 @@ function calculate_energy_transfer(method::Types.CoarseGrainingFluxMethod, veloc
     return nufft_coarse_graining_flux(velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
 end
 
+# Physical-space one-call entry for the spectral-flux / shell / mode family, covering BOTH scattered
+# (non-uniform) and uniform-grid Cartesian data. One method owns the 4-positional (…, coords, ms) form;
+# the transform step dispatches on the spectral backend (`_physical_energy_transfer`) so the two data
+# layouts route cleanly instead of colliding: a NUFFT provider reconstructs from scattered samples, any
+# other backend goes through the FlowFieldSpectra uniform-grid path. The 4-positional form disambiguates
+# from the uniform coefficient methods (…, velocity_hat, ks).
+const _SpectralFamilyMethod = Union{Types.SpectralFluxMethod, Types.ShellToShellTransferMethod, Types.ModeToModeTransferMethod}
+
+function calculate_energy_transfer(method::_SpectralFamilyMethod, velocity_fields::Tuple, coords::Tuple, ms::Tuple;
+                                   spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+                                   kwargs...)
+    return _physical_energy_transfer(spectral, method, velocity_fields, coords, ms; kwargs...)
+end
+
+# Scattered NUFFT branch (core; `to_spectral` dispatches to the loaded provider): reconstruct
+# `velocity_hat` on the scattered samples, then run the uniform diagnostic. `Ls` (required) is the
+# periodic domain size; `execution` drives both the reconstruction and the diagnostic.
+function _physical_energy_transfer(spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+                                   method::_SpectralFamilyMethod, velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
+                                   Ls::Tuple, tol::Real = 1e-9,
+                                   execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+                                   kwargs...)
+    velocity_hat, ks = to_spectral(velocity_fields, scatter_coords, ms; spectral = spectral, Ls = Ls, tol = tol, execution = execution)
+    return calculate_energy_transfer(method, velocity_hat, ks; execution = execution, kwargs...)
+end
+
+# Uniform-grid branch: the FlowFieldSpectra extension adds the concrete (more specific) method (physical
+# → spectral on a structured grid). This varargs catch-all is the fallback when it is not loaded — a
+# non-NUFFT backend then has no physical transform here. (A catch-all, not the FFS signature: an
+# extension may not overwrite a same-signature parent method during precompilation.)
+_physical_energy_transfer(spectral::SpectralBackends.AbstractSpectralBackend, args...; kwargs...) = throw(ArgumentError(
+    "uniform-grid physical → spectral transfer requires `using FlowFieldSpectra`; for scattered (non-uniform) " *
+    "Cartesian data pass a NUFFT backend (spectral = Types.FINUFFTBackend() / Types.NonuniformFFTsBackend()) with `Ls`."))
+
 """
     NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R}
 
@@ -295,6 +329,11 @@ _nufft_plan_backend_kw(gpu::ComputationalBackends.AbstractGPUBackend) = (; backe
 _nufft_new(::ComputationalBackends.AbstractExecutionBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} = Array{CT}(undef, dims...)
 _nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
 
+# FINUFFT `to_spectral` plan+buffer build, dispatched on the execution backend. The host method (FINUFFT
+# extension) and the NVIDIA-GPU cuFINUFFT method (FINUFFT + CUDA extension) both need FINUFFT symbols, so
+# only the generic function is owned here; both extensions add their methods to it.
+function _finufft_ts_build end
+
 """
     to_spectral!(ws::NUFFTToSpectralWorkspace, velocity_fields) -> (velocity_hat, ks)
 
@@ -327,6 +366,15 @@ Unified entry point for all energy transfer computations.
   Fourier coefficients; for coarse-graining, a tuple of D real physical-space arrays.
 - `coords_or_ks`: For spectral methods, a tuple of 1D wavenumber vectors; for
   coarse-graining, a tuple of 1D coordinate vectors.
+
+Physical-space Cartesian data uses the 4-positional form
+`calculate_energy_transfer(method, velocity_fields, coords, ms; spectral, …)`, which routes on the
+spectral backend: a NUFFT provider (`Types.FINUFFTBackend()` / `Types.NonuniformFFTsBackend()`, with `Ls`)
+reconstructs from **scattered** samples, while any other backend transforms **uniform-grid** data through
+FlowFieldSpectra (`using FlowFieldSpectra`; `coords` are the per-axis grid vectors). Coarse-graining has
+the same 4-positional scattered route. Spherical data uses
+`calculate_energy_transfer(SphericalTransferMethod(), ζ, (θ, φ); lmax, …)` (scattered, NUFSHT) or a
+regular colatitude–longitude grid (FastSphericalHarmonics).
 
 # Returns
 Method-specific result container: `SpectralFluxResult`, `CoarseGrainingFluxResult`,

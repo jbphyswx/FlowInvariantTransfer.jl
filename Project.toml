@@ -13,6 +13,7 @@ PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 SpectralBackends = "289ded02-b044-41b2-8b2d-71f2a47755d1"
 
 [weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 CoarseGrainingEnergyFluxes = "a8c2fbc6-778a-4d2b-8a8c-9c98efc7e8cf"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -43,6 +44,7 @@ FlowInvariantTransferCGEFExt = "CoarseGrainingEnergyFluxes"
 FlowInvariantTransferCairoMakieExt = "CairoMakie"
 FlowInvariantTransferDistributedExt = "Distributed"
 FlowInvariantTransferFFTWExt = "FFTW"
+FlowInvariantTransferFINUFFTCUDAExt = ["FINUFFT", "CUDA"]
 FlowInvariantTransferFINUFFTExt = "FINUFFT"
 FlowInvariantTransferFlowFieldSpectraExt = "FlowFieldSpectra"
 FlowInvariantTransferFSHExt = "FastSphericalHarmonics"
@@ -56,6 +58,7 @@ FlowInvariantTransferOhMyThreadsExt = "OhMyThreads"
 FlowInvariantTransferPencilFFTsExt = ["MPI", "PencilFFTs", "PencilArrays"]
 
 [compat]
+CUDA = "5, 6"
 CairoMakie = "0.15"
 CoarseGrainingEnergyFluxes = "0.1"
 ComputationalBackends = "0.1"

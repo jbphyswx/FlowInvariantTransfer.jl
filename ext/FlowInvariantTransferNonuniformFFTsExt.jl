@@ -27,9 +27,12 @@ end
 # KaiserBessel half-support honoring the requested `tol` (σ = 2 default ⇒ ≈1e-7 at m = 4; each extra
 # unit adds ~1.5 digits), capped so the oversampled grid fits the kernel — NonuniformFFTs requires
 # σ·N ≥ 2m, i.e. m ≤ minimum(ms) at σ = 2.
-function _kb_halfsupport(tol, ms::Tuple)
+function _kb_halfsupport(tol, ms::Tuple, ::Type{FT}) where {FT<:AbstractFloat}
+    # A tol below the element eps requests an unachievable half-support → NaN spreading (e.g. tol=1e-8 on
+    # Float32). Clamp to eps(FT); eps(Float64) is tiny, so this only bites the low-precision path.
+    teff = max(float(tol), eps(FT))
     hi = min(16, minimum(ms))
-    return clamp(ceil(Int, -log10(float(tol))) + 1, min(4, hi), hi)
+    return clamp(ceil(Int, -log10(teff)) + 1, min(4, hi), hi)
 end
 
 # Provider builder dispatched from `NUFFTCoarseGrainingWorkspace(scatter_coords, ms;
@@ -80,7 +83,7 @@ function FIT._nufft_cg_workspace(
     # NonuniformFFTs threads its transforms off `Threads.nthreads()` internally (there is no per-plan
     # thread count), so `execution` is accepted for API symmetry with the FINUFFT backend but does not
     # gate threading here — batch the outer axis (a scale sweep / snapshot series) to parallelise.
-    plan = NonuniformFFTs.PlanNUFFT(CT, ms; fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms)))
+    plan = NonuniformFFTs.PlanNUFFT(CT, ms; fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms, FT)))
     NonuniformFFTs.set_points!(plan, scaled_coords)
 
     return FIT.NUFFTCoarseGrainingWorkspace(
@@ -228,7 +231,7 @@ function FIT._to_spectral_workspace(::FIT.Types.NonuniformFFTsBackend, scatter_c
     # KA backend (helpers dispatch to the KernelAbstractions ext); for any other backend they stay host.
     scaled_dev = map(x -> FIT._nufft_to_device(execution, x), scaled)
     plan = NonuniformFFTs.PlanNUFFT(CT, ms; FIT._nufft_plan_backend_kw(execution)...,
-                                    fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms)))
+                                    fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms, FT)))
     NonuniformFFTs.set_points!(plan, scaled_dev)   # pure-Julia plan — GC'd, no finalizer needed
 
     û    = FIT._nufft_new(execution, CT, ms..., ncomponents)
