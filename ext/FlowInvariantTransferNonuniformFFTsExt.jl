@@ -9,12 +9,61 @@ using ComputationalBackends: ComputationalBackends
 # pure-Julia peer of the FINUFFT provider (`Types.NonuniformFFTsBackend` vs `Types.FINUFFTBackend`). The
 # API (workspace builders, one-shots, `to_spectral!`, `calculate_energy_transfer`) dispatches on the
 # backend type, so both providers coexist in one session; the in-place methods additionally dispatch on
-# the plan type (`PlanNUFFT`). NonuniformFFTs uses ONE `PlanNUFFT` for both directions (`exec_type1!`
-# nonuniform→uniform, `exec_type2!` uniform→nonuniform), stored in both `p1`/`p2` slots of the shared
-# `NUFFTCoarseGrainingWorkspace`. The plan is a plain Julia object (GC'd), so no finalizer is needed.
+# the plan type (`PlanNUFFT`). The velocity is real, so the analysis (`exec_type1!`, nonuniform→uniform)
+# runs through a real-input (r2c) plan and `_r2c_full!` expands its non-redundant half to the full
+# spectrum; the synthesis (`exec_type2!`, uniform→nonuniform) consumes a full complex spectrum and so uses
+# a complex plan (the `p1`/`p2` slots of `NUFFTCoarseGrainingWorkspace`; `to_spectral` is analysis-only and
+# needs just the real plan). Plans are plain Julia objects (GC'd), so no finalizer is needed.
 # ---------------------------------------------------------------------------
 
 @inline _page(A::AbstractArray, c::Int) = view(A, ntuple(_ -> Colon(), ndims(A) - 1)..., c)
+
+# Build the full fftfreq-ordered `(ms…)` complex mode array from the non-redundant half a real (r2c)
+# `PlanNUFFT` returns (`fk_half`: axis-1 modes `0…ms₁÷2` (rfftfreq), fftfreq on the rest), applying the
+# ×invN normalization. A real field's transform is exactly Hermitian, `C[k]=conj(C[-k])`:
+#   • axis-1 `k₁≥0`  → taken directly from `fk_half`.
+#   • `k₁<0`, no even axis d≥2 at its Nyquist → Hermitian mirror `conj(fk_half[-k])`.
+#   • `k₁<0` AND some even axis d≥2 at `k_d=-N_d/2` → the fold needs `C[-k₁,+N_d/2]`, and `+N_d/2` is not
+#     an output mode. For scattered points `+N_d/2 ≠ -N_d/2`, so no output row supplies it — but it IS an
+#     interior mode of the OVERSAMPLED spectrum the transform already computed (`plan.data.ûs`, size `Ñ`).
+#     Read it there and apply the same deconvolution (`normfactor / ∏ ĝ_k`) the non-oversampled copy uses.
+# Exact for even and odd sizes; scalar loop over the output grid (host / KA.CPU arrays).
+function _r2c_full!(full::AbstractArray, fk_half::AbstractArray, plan, ms::NTuple{D, Int}, invN) where {D}
+    us = plan.data.ûs[1]                                              # oversampled rfft-half spectrum
+    RT = real(eltype(full))
+    novs = ntuple(d -> d == 1 ? 2 * (size(us, 1) - 1) : size(us, d), D)   # oversampled full sizes Ñ
+    gk = ntuple(d -> NonuniformFFTs.fourier_coefficients(plan.kernels[d]), D)
+    normfactor = prod(ntuple(d -> 2 * RT(π) / novs[d], D))
+    hi = ntuple(d -> (ms[d] - 1) ÷ 2, D)
+    half = ntuple(d -> ms[d] ÷ 2, D)
+    kof(i, d) = (i - 1 <= hi[d]) ? (i - 1) : (i - 1 - ms[d])          # fftfreq integer at output index i
+    mir(i, d) = i == 1 ? 1 : ms[d] - i + 2                            # output index of -freq(i)
+    ovs(f, Ñ) = f >= 0 ? f + 1 : Ñ + f + 1                            # oversampled fftfreq index
+    gki(f, N) = f >= 0 ? f + 1 : N + f + 1                            # ĝ index, fftfreq (ĝ even ⇒ +N/2 ↦ −N/2 slot)
+    @inbounds for I in CartesianIndices(ms)
+        k1 = kof(I[1], 1)
+        if k1 >= 0
+            full[I] = fk_half[CartesianIndex(ntuple(d -> d == 1 ? k1 + 1 : Int(I[d]), D))] * invN
+            continue
+        end
+        evenNyq = false
+        for d in 2:D
+            (iseven(ms[d]) && kof(I[d], d) == -half[d]) && (evenNyq = true; break)
+        end
+        if !evenNyq
+            full[I] = conj(fk_half[CartesianIndex(ntuple(d -> d == 1 ? -k1 + 1 : mir(I[d], d), D))]) * invN
+        else
+            negk = ntuple(d -> -kof(I[d], d), D)
+            ovsI = CartesianIndex(ntuple(d -> ovs(negk[d], novs[d]), D))
+            β = normfactor / gk[1][negk[1] + 1]
+            for d in 2:D
+                β /= gk[d][gki(negk[d], ms[d])]
+            end
+            full[I] = conj(β * us[ovsI]) * invN
+        end
+    end
+    return full
+end
 
 _build_k_component(ks_1d, d::Int, ms::Tuple) = begin
     kc = zeros(eltype(ks_1d[d]), ms...)
@@ -66,6 +115,18 @@ function FIT._nufft_cg_workspace(
         (FT.(scatter_coords[d]) .- cmin) ./ Lf[d] .* (2 * FT(π))
     end
 
+    # Two plans on the same points: the velocity is real, so the ANALYSIS (type-1) runs through a real
+    # (r2c) plan — a real-to-complex FFT, ~2× faster, no real→complex widen — and `_r2c_full!` expands its
+    # non-redundant half into the exact full fftfreq spectrum. The SYNTHESIS (type-2) consumes that full
+    # complex spectrum (filtered field, gradients), so it uses a complex plan. Filter/gradient math stays
+    # on the full grid. NonuniformFFTs threads off `Threads.nthreads()` internally, so `execution` is
+    # accepted for API symmetry with FINUFFT but does not gate here — batch the outer axis to parallelise.
+    hs = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms, FT))
+    p1 = NonuniformFFTs.PlanNUFFT(FT, ms; fftshift = false, m = hs)   # real analysis (half-spectrum out)
+    p2 = NonuniformFFTs.PlanNUFFT(CT, ms; fftshift = false, m = hs)   # complex synthesis (full spectrum in)
+    NonuniformFFTs.set_points!(p1, scaled_coords)
+    NonuniformFFTs.set_points!(p2, scaled_coords)
+
     D  = nd
     Ĝ      = zeros(FT, ms...)
     û_filt = zeros(CT, ms..., D)
@@ -74,21 +135,15 @@ function FIT._nufft_cg_workspace(
     S̄      = zeros(FT, N, D, D)
     Π      = zeros(FT, N)
     spec   = zeros(CT, ms...)
-    scat_in  = zeros(CT, N)
-    scat_out = zeros(CT, N)
+    spec_half = zeros(CT, size(p1)...)           # r2c analysis output (expanded into `spec`)
+    scat_in  = zeros(FT, N)                      # real type-1 input (r2c analysis)
+    scat_out = zeros(CT, N)                      # complex type-2 output
     prod_r = zeros(FT, N)
     grad_j = zeros(FT, N)
 
-    # One complex-data plan (fftshift=false → FFTW mode ordering, matching Utils.wavenumber_grid + Ĝ).
-    # NonuniformFFTs threads its transforms off `Threads.nthreads()` internally (there is no per-plan
-    # thread count), so `execution` is accepted for API symmetry with the FINUFFT backend but does not
-    # gate threading here — batch the outer axis (a scale sweep / snapshot series) to parallelise.
-    plan = NonuniformFFTs.PlanNUFFT(CT, ms; fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms, FT)))
-    NonuniformFFTs.set_points!(plan, scaled_coords)
-
     return FIT.NUFFTCoarseGrainingWorkspace(
-        plan, plan, scaled_coords, k_mag, k_comp_grids, ks_1d, Ĝ, û_filt, u_filt,
-        τ, S̄, Π, spec, scat_in, scat_out, prod_r, grad_j, N, FT(tol))
+        p1, p2, scaled_coords, k_mag, k_comp_grids, ks_1d, Ĝ, û_filt, u_filt,
+        τ, S̄, Π, spec, spec_half, scat_in, scat_out, prod_r, grad_j, N, FT(tol))
 end
 
 """
@@ -117,20 +172,23 @@ function FIT.nufft_coarse_graining_flux!(
     length(velocity_fields[1]) == N || throw(DimensionMismatch(
         "velocity field length $(length(velocity_fields[1])) ≠ workspace points $N"))
     invN = one(FT) / FT(N)
-    p    = ws.p1                      # the single NonuniformFFTs plan (p1 === p2)
+    p1 = ws.p1                        # real (r2c) analysis plan
+    p2 = ws.p2                        # complex synthesis plan
 
     Ĝ = ws.Ĝ
     @inbounds for I in CartesianIndices(ws.k_mag)
         Ĝ[I] = FT(FIT.Filters.filter_response(filter, ws.k_mag[I], FT(ℓ)))
     end
 
-    # Filtered velocity at the points: û_filt = Ĝ·(type-1 u)/N, then type-2 back.
+    # Filtered velocity at the points: û_filt = Ĝ·(type-1 u)/N, then type-2 back. The type-1 runs on the
+    # real plan (r2c) and `_r2c_full!` expands its half-spectrum to the exact full fftfreq spectrum.
     for c in 1:D
         ws.scat_in .= velocity_fields[c]
-        NonuniformFFTs.exec_type1!(ws.spec, p, ws.scat_in)       # nonuniform → uniform
+        NonuniformFFTs.exec_type1!(ws.spec_half, p1, ws.scat_in)         # nonuniform → uniform (real, half-spectrum)
+        _r2c_full!(ws.spec, ws.spec_half, p1, ms, invN)                  # half → full complex modes (×1/N)
         ûfc = _page(ws.û_filt, c)
-        @. ûfc = Ĝ * ws.spec * invN
-        NonuniformFFTs.exec_type2!(ws.scat_out, p, ûfc)          # uniform → nonuniform
+        @. ûfc = Ĝ * ws.spec
+        NonuniformFFTs.exec_type2!(ws.scat_out, p2, ûfc)         # uniform → nonuniform
         @views @. ws.u_filt[:, c] = real(ws.scat_out)
     end
 
@@ -139,15 +197,16 @@ function FIT.nufft_coarse_graining_flux!(
     @inbounds for i in 1:D, j in i:D
         @. ws.prod_r = velocity_fields[i] * velocity_fields[j]
         ws.scat_in .= ws.prod_r
-        NonuniformFFTs.exec_type1!(ws.spec, p, ws.scat_in)
-        @. ws.spec = Ĝ * ws.spec * invN
-        NonuniformFFTs.exec_type2!(ws.scat_out, p, ws.spec)
+        NonuniformFFTs.exec_type1!(ws.spec_half, p1, ws.scat_in)
+        _r2c_full!(ws.spec, ws.spec_half, p1, ms, invN)
+        @. ws.spec = Ĝ * ws.spec
+        NonuniformFFTs.exec_type2!(ws.scat_out, p2, ws.spec)
         τij = view(ws.τ, :, i, j)
         @views @. τij = real(ws.scat_out) - ws.u_filt[:, i] * ws.u_filt[:, j]
 
         ûfi = _page(ws.û_filt, i)
         @. ws.spec = im * ws.k_comp_grids[j] * ûfi
-        NonuniformFFTs.exec_type2!(ws.scat_out, p, ws.spec)
+        NonuniformFFTs.exec_type2!(ws.scat_out, p2, ws.spec)
         @. ws.prod_r = real(ws.scat_out)                          # ∂ūᵢ/∂xⱼ
         S̄ij = view(ws.S̄, :, i, j)
         if i == j
@@ -155,7 +214,7 @@ function FIT.nufft_coarse_graining_flux!(
         else
             ûfj = _page(ws.û_filt, j)
             @. ws.spec = im * ws.k_comp_grids[i] * ûfj
-            NonuniformFFTs.exec_type2!(ws.scat_out, p, ws.spec)
+            NonuniformFFTs.exec_type2!(ws.scat_out, p2, ws.spec)
             @. ws.grad_j = real(ws.scat_out)                      # ∂ūⱼ/∂xᵢ
             @. S̄ij = FT(0.5) * (ws.prod_r + ws.grad_j)
         end
@@ -230,13 +289,16 @@ function FIT._to_spectral_workspace(::FIT.Types.NonuniformFFTsBackend, scatter_c
     # Device-generic: for a GPUBackend the points and the plan's data buffers are moved/allocated onto the
     # KA backend (helpers dispatch to the KernelAbstractions ext); for any other backend they stay host.
     scaled_dev = map(x -> FIT._nufft_to_device(execution, x), scaled)
-    plan = NonuniformFFTs.PlanNUFFT(CT, ms; FIT._nufft_plan_backend_kw(execution)...,
+    # Real (r2c) plan for the real velocity field: the FFTW real-to-complex transform is ~2× faster and
+    # halves memory vs a complex plan, returning the non-redundant half spectrum (first axis ms₁÷2+1).
+    plan = NonuniformFFTs.PlanNUFFT(FT, ms; FIT._nufft_plan_backend_kw(execution)...,
                                     fftshift = false, m = NonuniformFFTs.HalfSupport(_kb_halfsupport(tol, ms, FT)))
     NonuniformFFTs.set_points!(plan, scaled_dev)   # pure-Julia plan — GC'd, no finalizer needed
 
-    û    = FIT._nufft_new(execution, CT, ms..., ncomponents)
-    scat = FIT._nufft_new(execution, CT, N)
-    spec = FIT._nufft_new(execution, CT, ms...)
+    mh   = size(plan)                                          # half-spectrum dims (first axis halved)
+    û    = FIT._nufft_new(execution, CT, ms..., ncomponents)   # full complex modes (Hermitian-mirrored output)
+    scat = FIT._nufft_new(execution, FT, N)                    # real type-1 input
+    spec = FIT._nufft_new(execution, CT, mh...)                # half complex modes (r2c type-1 output)
     return FIT.NUFFTToSpectralWorkspace(plan, scaled_dev, ks, û, scat, spec, N, one(FT) / FT(N))
 end
 
@@ -244,12 +306,12 @@ function FIT.to_spectral!(ws::FIT.NUFFTToSpectralWorkspace{<:NonuniformFFTs.Plan
     D = size(ws.û, ndims(ws.û))
     length(velocity_fields) == D || throw(DimensionMismatch(
         "to_spectral! got $(length(velocity_fields)) fields; workspace was built for $D components"))
+    ms = size(ws.û)[1:end-1]                                       # full mode dims (drop the component axis)
     @inbounds for c in 1:D
         length(velocity_fields[c]) == ws.npoints || throw(DimensionMismatch("field length ≠ workspace points $(ws.npoints)"))
-        ws.scat .= velocity_fields[c]
-        NonuniformFFTs.exec_type1!(ws.spec, ws.plan, ws.scat)     # nonuniform → uniform, e^{-ikx}, reused buffers
-        ûc = _page(ws.û, c)
-        @. ûc = ws.spec * ws.invN                                 # density-normalized adjoint (fft convention)
+        ws.scat .= velocity_fields[c]                             # real input
+        NonuniformFFTs.exec_type1!(ws.spec, ws.plan, ws.scat)     # nonuniform → uniform half-spectrum, e^{-ikx}
+        _r2c_full!(_page(ws.û, c), ws.spec, ws.plan, ms, ws.invN) # half → full complex modes (×1/N, Hermitian)
     end
     return (ws.û, ws.ks)
 end

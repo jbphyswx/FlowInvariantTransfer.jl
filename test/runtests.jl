@@ -1820,6 +1820,30 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
             # other, so gate the claim that holds for both.
             Test.@test a_reuse < a_fresh
         end
+        # Odd mode counts exercise the other branch of the real-input (r2c) analysis: an odd axis has no
+        # Nyquist mode, an even one needs the oversampled-spectrum read. Both must hit the same reference.
+        let mso = (21, 21)
+            m1o = [modeof(a, mso[1]) for a in 0:mso[1]-1]; m2o = [modeof(b, mso[2]) for b in 0:mso[2]-1]
+            kxo = m1o .* (2π / Lx); kyo = m2o .* (2π / Ly)
+            Ao = eachindex(m1o); Bo = eachindex(m2o)
+            Go = [FIT.Filters.filter_response(filt, sqrt(kxo[a]^2 + kyo[b]^2), ℓ) for a in Ao, b in Bo]
+            t1o(w) = [sum(w[j] * cis(-(m1o[a] * xt[j] + m2o[b] * yt[j])) for j in 1:Np) for a in Ao, b in Bo]
+            t2o(S) = [real(sum(S[a, b] * cis(+(m1o[a] * xt[l] + m2o[b] * yt[l])) for a in Ao, b in Bo)) for l in 1:Np]
+            ūso = Go .* t1o(U) .* invN; v̄so = Go .* t1o(V) .* invN
+            ūo = t2o(ūso); v̄o = t2o(v̄so)
+            τxxo = t2o(Go .* t1o(U .* U) .* invN) .- ūo .* ūo
+            τyyo = t2o(Go .* t1o(V .* V) .* invN) .- v̄o .* v̄o
+            τxyo = t2o(Go .* t1o(U .* V) .* invN) .- ūo .* v̄o
+            Sxxo = t2o([im * kxo[a] * ūso[a, b] for a in Ao, b in Bo])
+            Syyo = t2o([im * kyo[b] * v̄so[a, b] for a in Ao, b in Bo])
+            Sxyo = 0.5 .* (t2o([im * kyo[b] * ūso[a, b] for a in Ao, b in Bo]) .+ t2o([im * kxo[a] * v̄so[a, b] for a in Ao, b in Bo]))
+            Πo = -(τxxo .* Sxxo .+ τyyo .* Syyo .+ 2 .* τxyo .* Sxyo)
+            for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+                ro = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, mso; spectral = spectral, Ls = (Lx, Ly), return_diagnostics = true)
+                Test.@test relq(Sxxo, ro.strain_rate[:, 1, 1]) < 1e-6
+                Test.@test relq(Πo, ro.flux_field) < 1e-6
+            end
+        end
         # Ls is a required physical input (the domain the samples under-span), never guessed from the span.
         Test.@test_throws UndefKeywordError FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = FIT.Types.FINUFFTBackend())
     end
@@ -1892,6 +1916,21 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
 
         # 3-arg scattered form requires a NUFFT backend (Types.FINUFFTBackend) — a clear error, not a silent wrong path.
         Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.FFTSpectralBackend(), Ls = (Ln, Ln))
+
+        # The NonuniformFFTs provider transforms the real velocity through a real-input (r2c) plan and
+        # expands the non-redundant half to the full spectrum. On an even axis d ≥ 2 the Hermitian fold
+        # needs mode +N_d/2, which is not an output mode (for scattered points +N_d/2 ≠ −N_d/2), so it is
+        # read from the oversampled spectrum the transform already computed. Gate that against the complex
+        # (FINUFFT) path over even / odd / mixed mode counts — an even axis is the case that breaks first.
+        rngr = Random.MersenneTwister(5)
+        Nr = 3000
+        xr2 = Ln .* rand(rngr, Nr); yr2 = Ln .* rand(rngr, Nr)
+        ur2 = @. sin(3 * xr2) * cos(2 * yr2) + 0.25 * cos(7 * xr2)
+        for msr in ((20, 20), (21, 21), (20, 21), (21, 20))
+            û_r2c, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln))
+            û_cpx, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
+            Test.@test sqrt(sum(abs2, û_r2c .- û_cpx) / sum(abs2, û_cpx)) < 1e-7
+        end
     end
 
     Test.@testset "cuFINUFFT device to_spectral (FINUFFT provider)" begin

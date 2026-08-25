@@ -82,7 +82,7 @@ function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tup
 
     return FIT.NUFFTCoarseGrainingWorkspace(
         p1, p2, scaled_coords, k_mag, k_comp_grids, ks_1d, Ĝ, û_filt, u_filt,
-        τ, S̄, Π, spec, scat_in, scat_out, prod_r, grad_j, N, FT(tol))
+        τ, S̄, Π, spec, spec, scat_in, scat_out, prod_r, grad_j, N, FT(tol))   # complex analysis: type-1 writes `spec` directly
 end
 
 """

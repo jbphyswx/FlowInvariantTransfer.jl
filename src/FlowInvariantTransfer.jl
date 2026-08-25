@@ -190,7 +190,7 @@ NonuniformFFTs plans are pure Julia and need neither. `show` is a one-liner (nev
 plan). Each array/plan field is its own type parameter, so nothing is hardcoded to `Vector`/`Array{T}`
 and the core names no provider type.
 """
-struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SD, UM, TA, CV, RV, R<:Real}
+struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SH, SD, UM, TA, CI, CV, RV, R<:Real}
     p1::P1              # type-1 (nonuniform → uniform) plan, points set
     p2::P2              # type-2 (uniform → nonuniform) plan, points set
     scaled_coords::SC   # coordinates rescaled to the provider's periodic cell
@@ -204,7 +204,9 @@ struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SD, UM, TA, CV, 
     S̄::TA               # (N, D, D) strain rate
     Π::RV               # (N,) flux (the result wraps this)
     spec::SA            # (ms…) complex spectral scratch (exec output / filtered product / gradient)
-    scat_in::CV         # (N,) complex type-1 input scratch
+    spec_half::SH       # type-1 output scratch: the analysis plan's mode array (a real-data plan returns
+                        # the non-redundant half, expanded into `spec`; a complex plan writes `spec` directly)
+    scat_in::CI         # (N,) type-1 input scratch (real for a real-data analysis plan, else complex)
     scat_out::CV        # (N,) complex type-2 output scratch
     prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
     grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
