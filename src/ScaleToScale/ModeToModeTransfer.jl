@@ -1,6 +1,7 @@
 module ModeToModeTransfer
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -53,13 +54,13 @@ function calculate_mode_to_mode_transfer(
     ks;
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     max_scales::Int = 1024,
     force::Bool = false,
     advecting_hat = velocity_hat,
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
     FT = real(eltype(velocity_hat))
@@ -96,11 +97,11 @@ function calculate_mode_to_mode_transfer!(
     ks;
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     _mode_to_mode_loop!(Types.resolve_execution(execution), result, ws, û_p, velocity_hat, ks;
         invariant=invariant, dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
     return result
@@ -110,24 +111,87 @@ end
 # `S[·, p]`, so the loop is embarrassingly parallel (near-linear scaling): the threaded/distributed/GPU
 # backends override the named stubs (extensions), each thread/rank using its OWN single-threaded
 # workspace (no nested FFT threads). `net[k] = Σ_p S[k,p]` is a `+`-reduction of per-worker partials.
+"""
+    _mode_to_mode_giver!(ws, velocity_hat, ks, p, ph, truncate, spectral) -> ws.N̂
+
+`𝒩̂_p = (u·∇)f_p` for the single-mode giver `p`, written into `ws.N̂`.
+
+The giver holds one Fourier mode, so its gradient is known in closed form and needs no transform:
+with `A_c = f̂_c(p)` and `w(k) = Σ_j k_j(p) u_j(x)` (built from the cached `ws.u_phys`),
+
+    ∂_j f_c(x) = Re[i k_j(p) A_c e^{ip·x}]   ⇒   𝒩_c(x) = Re[i A_c e^{ip·x}] · w(x),
+
+since every `k_j(p)` is a real scalar and factors out of the sum over `j`. `ph` holds the per-axis
+factors of `e^{ip·x}`, so the plane wave is a product of `nd` length-`n_d` vectors. One forward
+transform per component remains; the `nd` inverse transforms of the advecting velocity are hoisted
+into the caller and the `M·nd` gradient transforms are gone.
+"""
+function _mode_to_mode_giver!(ws, velocity_hat, ks, p, ph, truncate::Bool, spectral)
+    nd = length(ks)
+    ns = SpectralLayout.full_size(ks)
+    M  = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat))
+    # Per-axis phase factors of e^{ip·x}. `wgt` is the giver slot's Hermitian weight: on a half layout
+    # the stored mode carries its own amplitude and its mirror's.
+    for d in 1:nd
+        pd = SpectralLayout.axis_index_wavenumber(ks[d], p[d])
+        @inbounds for i in 1:ns[d]
+            ph[d][i] = cis(2 * FT(π) * pd * FT(i - 1) / FT(ns[d]))
+        end
+    end
+    wgt = FT(SpectralLayout.hermitian_weight(ks, p))
+    # w(x) = Σ_j k_j(p) u_j(x)
+    fill!(ws.g_phys, zero(FT))
+    for j in 1:nd
+        kj = FT(SpectralLayout.derivative_wavenumber(ks[j], p[j]))
+        kj == 0 && continue
+        ws.g_phys .+= kj .* selectdim(ws.u_phys, nd + 1, j)
+    end
+    for c in 1:M
+        A = velocity_hat[p, c] * wgt
+        Nc = selectdim(ws.N_phys, nd + 1, c)
+        _fill_plane_wave!(Nc, A, ph, ws.g_phys, ns)
+    end
+    return NonlinearTerm.nlt_forward!(ws, ks, spectral; truncate = truncate)
+end
+
+# Nc[I] = Re[i·A·∏_d ph[d][I_d]] · w[I]
+function _fill_plane_wave!(Nc, A, ph, w, ns::NTuple{nd,Int}) where {nd}
+    iA = im * A
+    @inbounds for I in CartesianIndices(ns)
+        e = ph[1][I[1]]
+        for d in 2:nd
+            e *= ph[d][I[d]]
+        end
+        Nc[I] = real(iA * e) * w[I]
+    end
+    return Nc
+end
+
 function _mode_to_mode_loop!(::ComputationalBackends.SerialBackend, result, ws, û_p, velocity_hat, ks;
                              invariant, dealiasing, spectral, advecting_hat)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    M  = size(velocity_hat, nd + 1)   # components of the giver/carried primary field
+    ms = SpectralLayout.spectral_size(ks)
     S   = result.transfer
     net = result.net_transfer
     fill!(net, zero(eltype(net)))
     colons = ntuple(_ -> Colon(), nd)
-    @inbounds for p in CartesianIndices(ns)
-        # Isolate giver scale p of the primary field, advected by the full velocity:
-        # 𝒩̂_p = (u·∇)f_p (f = u for energy; f = θ for a passive scalar).
-        fill!(û_p, zero(eltype(û_p)))
-        for c in 1:M
-            û_p[p, c] = velocity_hat[p, c]
+    truncate = !(dealiasing isa Types.NoDealiasing)
+    dealiasing isa Types.PaddedThreeHalves && throw(ArgumentError(
+        "mode-to-mode transfer supports NoDealiasing and OrszagTwoThirds; the exact 3/2-padded " *
+        "nonlinear term has no single-mode form."))
+    # The advecting velocity is the same for every giver, so it is synthesised once for the loop.
+    NonlinearTerm.nlt_synth_advecting!(ws, advecting_hat, ks, spectral; truncate = truncate)
+    ph = ws.phase
+    @inbounds for p in CartesianIndices(ms)
+        Sp = view(S, colons..., p)
+        # A giver the dealiasing rule discards contributes nothing: its isolated field is zero, so
+        # 𝒩̂_p and the whole column are zero.
+        if truncate && NonlinearTerm._is_dealiased(ks, p)
+            fill!(Sp, zero(eltype(Sp)))
+            continue
         end
-        NonlinearTerm.compute_nonlinear_term!(ws, û_p, ks; dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
-        Sp = view(S, colons..., p)                                   # write S(·|p) in place
+        _mode_to_mode_giver!(ws, velocity_hat, ks, p, ph, truncate, spectral)
         Invariants.transfer_density!(Sp, invariant, velocity_hat, ws.N̂, ks)     # validates invariant/dimension
         net .+= Sp
     end

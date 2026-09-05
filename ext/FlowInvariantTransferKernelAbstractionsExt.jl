@@ -16,6 +16,11 @@ function _to_device(dev, A::AbstractArray)
     return d
 end
 
+# `A` itself when it already lives on `dev`, a fresh device copy otherwise. The shell-index grid and the
+# band masks are constants of a workspace: one built on the field's own array kind passes straight
+# through, so the full-grid host→device copy happens at construction and a repeat call pays nothing.
+_on_device(dev, A::AbstractArray) = KA.get_backend(A) === dev ? A : _to_device(dev, A)
+
 # Device-resident buffers + point arrays for the NonuniformFFTs `to_spectral` workspace on a GPUBackend
 # (host defaults live in core FlowInvariantTransfer). `KA.allocate` gives an uninitialized device buffer
 # (all three scratch buffers are fully overwritten by `to_spectral!`); coordinate vectors are copied onto
@@ -23,6 +28,22 @@ end
 FIT._nufft_new(gpu::ComputationalBackends.AbstractGPUBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} =
     KA.allocate(gpu.backend, CT, dims...)
 FIT._nufft_to_device(gpu::ComputationalBackends.AbstractGPUBackend, x::AbstractArray) = _to_device(gpu.backend, x)
+
+# Device method of the real-NUFFT Hermitian expansion (core holds the per-mode rule and the host loop).
+# Every output mode is independent, so one kernel over the output grid covers the whole expansion with no
+# scalar indexing, keeping a device-resident `to_spectral!` valid under `allowscalar(false)`.
+@kernel function r2c_expand_kernel!(full, @Const(fk_half), @Const(us), gk, ms, novs, normfactor, invN)
+    I = @index(Global, Cartesian)
+    full[I] = FIT._r2c_value(I, fk_half, us, gk, ms, novs, normfactor, invN)
+end
+
+function FIT._r2c_expand!(gpu::ComputationalBackends.AbstractGPUBackend, full, fk_half, us, gk,
+                          ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
+    dev = gpu.backend
+    r2c_expand_kernel!(dev)(full, fk_half, us, gk, ms, novs, normfactor, invN; ndrange = ms)
+    KA.synchronize(dev)
+    return full
+end
 
 # ---------------------------------------------------------------------------
 # Device kernels (KernelAbstractions ≥ 0.9 API: launch then KA.synchronize).
@@ -76,6 +97,16 @@ end
     t[I] = real(conj(ωx) * Nωx + conj(ωy) * Nωy + conj(ωz) * Nωz)
 end
 
+# Giver isolation: û_p carries `velocity_hat` at the single mode `p` and zero everywhere else. One pass
+# over the mode grid, so the O(Nᴰ) giver loop holds no per-giver mask buffer.
+@kernel function one_hot_kernel!(out, @Const(field), p, C)
+    I = @index(Global, Cartesian)
+    keep = I == p
+    for c in 1:C
+        out[I, c] = keep ? field[I, c] : zero(eltype(out))
+    end
+end
+
 # Mode→shell scatter-add: T_spec[shell_idx[I]] += density[I], summed over all modes I in one pass.
 # Atomic because many modes map to the same shell. O(Nᴰ) (vs the O(N_sh·Nᴰ) per-shell broadcast+sum),
 # writes straight into the device T_spec vector — no host temporary, no scalar indexing.
@@ -97,7 +128,7 @@ function FIT.ShellBinning.shell_scatter_add!(T_spec, density, shell_idx, gpu_bac
     d   = parent(density)
     T_dev = KA.allocate(dev, eltype(T_spec), length(T_spec))
     fill!(T_dev, zero(eltype(T_spec)))
-    shell_idx_dev = _to_device(dev, parent(shell_idx))
+    shell_idx_dev = _on_device(dev, parent(shell_idx))
     shell_scatter_add_kernel!(dev)(T_dev, d, shell_idx_dev; ndrange = size(d))
     KA.synchronize(dev)
     copyto!(T_spec, T_dev)
@@ -161,7 +192,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_gpu!(
     end
 
     # Device-resident shell index (see `_to_device`) so shell masks broadcast against device fields.
-    shell_idx_dev = _to_device(dev, ws.shell_idx)
+    shell_idx_dev = _on_device(dev, ws.shell_idx)
     col_dev = KA.allocate(dev, FT, N_sh)   # per-mediator shell sums (device); scatter-add target
 
     for m in 1:N_sh
@@ -237,7 +268,7 @@ function FIT.SpectralFlux._spectral_flux_gpu!(
         copyto!(a, collect(FT, ks[d]))
         a
     end
-    shell_idx_dev = _to_device(dev, shell_idx)
+    shell_idx_dev = _on_device(dev, shell_idx)
 
     # 1. Per-mode transfer density (KE/helicity/enstrophy) via the device kernel.
     _launch_transfer_density!(dev, ws.transfer_density, velocity_hat, N̂, ks, invariant, D, ns, ks_dev)
@@ -247,7 +278,7 @@ function FIT.SpectralFlux._spectral_flux_gpu!(
     shell_scatter_add_kernel!(dev)(ws.T_spec, ws.transfer_density, shell_idx_dev; ndrange = ns)
     KA.synchronize(dev)
 
-    # 3. Cumulative flux Π = +cumsum(T) via the shared host-summary finalizer (see THEORY.md §0.5).
+    # 3. Cumulative flux Π = +cumsum(T) via the shared host-summary finalizer.
     return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
@@ -271,7 +302,7 @@ function FIT.BandTransfer._band_to_band_gpu!(
     ks_dev = ntuple(nd) do d
         a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
     end
-    W_dev = [_to_device(dev, bws.W[n]) for n in 1:nb]   # host masks → device (see _to_device)
+    W_dev = [_on_device(dev, bws.W[n]) for n in 1:nb]
     fill!(T, zero(FT))
     for m in 1:nb
         bws.f_m .= reshape(W_dev[m], ns..., 1) .* velocity_hat
@@ -280,7 +311,7 @@ function FIT.BandTransfer._band_to_band_gpu!(
         _launch_transfer_density!(dev, bws.d, velocity_hat, bws.nlt.N̂, ks, invariant, D, ns, ks_dev)
         KA.synchronize(dev)
         for n in 1:nb
-            T[n, m] = sum(W_dev[n] .* bws.d)   # device reduction of the fused broadcast (no host temp)
+            T[n, m] = mapreduce(*, +, W_dev[n], bws.d)   # one device pass, no full-grid product buffer
         end
     end
     return T
@@ -289,10 +320,10 @@ end
 # ---------------------------------------------------------------------------
 # Mode-to-mode transfer S(k|p) on a KA backend
 # ---------------------------------------------------------------------------
-# Overrides the core `_mode_to_mode_gpu!` stub. Each giver mode p is isolated with a one-hot mask built
-# by a device broadcast (a device grid of linear indices compared to p's linear index — NOT scalar
-# `û_p[p,c] = …`), its nonlinear term rides the (GPU-)FFT spectral backend, and S(·|p) is written by the
-# device transfer-density kernel into the p-th column of the result tensor. `net` accumulates on-device.
+# Overrides the core `_mode_to_mode_gpu!` stub. Each giver mode p is isolated by `one_hot_kernel!` (a
+# device pass comparing the mode index against p, so no scalar `û_p[p,c] = …`), its nonlinear term rides
+# the (GPU-)FFT spectral backend, and S(·|p) is written by the device transfer-density kernel into the
+# p-th column of the result tensor. `net` accumulates on-device.
 function FIT.ModeToModeTransfer._mode_to_mode_gpu!(
     result, ws, û_p, velocity_hat, ks, gpu_backend::ComputationalBackends.GPUBackend;
     invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
@@ -308,11 +339,9 @@ function FIT.ModeToModeTransfer._mode_to_mode_gpu!(
         a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
     end
     colons = ntuple(_ -> Colon(), nd)
-    lin = _to_device(dev, reshape(collect(1:prod(ns)), ns))   # linear-index grid for the one-hot mask
-    linidx = LinearIndices(ns)
     for p in CartesianIndices(ns)
-        plin = linidx[p]
-        û_p .= velocity_hat .* reshape(lin .== plin, ns..., 1)   # isolate giver mode p (device broadcast)
+        one_hot_kernel!(dev)(û_p, velocity_hat, p, M; ndrange = ns)   # isolate giver mode p
+        KA.synchronize(dev)
         FIT.NonlinearTerm.compute_nonlinear_term!(ws, û_p, ks;
             dealiasing = dealiasing, spectral = spectral, advecting_hat = advecting_hat)
         Sp = view(S, colons..., p)
@@ -342,7 +371,7 @@ function FIT.SpectralFlux._partial_fluxes_gpu!(
     ks_dev = ntuple(nd) do d
         a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
     end
-    sidx_dev = _to_device(dev, sidx)
+    sidx_dev = _on_device(dev, sidx)
     d = similar(velocity_hat, FT, ns...)         # per-mode transfer density (device)
     Tspec = KA.allocate(dev, FT, Nsh)            # shell sums (device), reused per channel
     for sp in names, sq in names

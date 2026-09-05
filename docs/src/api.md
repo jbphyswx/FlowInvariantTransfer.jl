@@ -10,6 +10,18 @@ CurrentModule = FlowInvariantTransfer
 calculate_energy_transfer
 ```
 
+## Physical → Spectral (uniform Cartesian grid)
+
+The diagnostics take Fourier coefficients, so gridded physical data is transformed here once. A real
+field takes the half (`rfft`) layout by default — the non-redundant `k₁ ≥ 0` coefficients, with `ks[1]`
+an `rfftfreq` axis — which every diagnostic consumes directly; pass `real_layout = false` for the full
+complex spectrum. Build the workspace once to reuse the plans and buffers across snapshots.
+
+```@docs
+to_spectral
+ToSpectralWorkspace
+```
+
 ## Spectral Flux
 
 ```@docs

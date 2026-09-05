@@ -31,6 +31,45 @@ function resolve_execution(::ComputationalBackends.AutoBackend)
 end
 
 # ---------------------------------------------------------------------------
+# Spectral-backend resolution (FIT-owned, mirroring `resolve_execution`)
+# ---------------------------------------------------------------------------
+"""
+    resolve_spectral(spectral) -> AbstractSpectralBackend
+
+Concrete transform backends pass through. [`SpectralBackends.AutoSpectralBackend`](@ref) — the
+default of every Cartesian coefficient diagnostic — resolves to the FFT backend when the FFTW
+extension is loaded, and otherwise to the dependency-free direct sum with a one-time warning naming
+the cost: the FFT path is `O(Nᴰ log N)` and the direct sum `O(N²ᴰ)`, which on a 128² grid is
+milliseconds against minutes.
+
+Defined on FIT's own function — NOT as a method on anything in `SpectralBackends` — so it commits no
+type piracy and never collides with another consumer's policy.
+"""
+resolve_spectral(spectral::SpectralBackends.AbstractSpectralBackend) = spectral
+function resolve_spectral(::SpectralBackends.AbstractAutoSpectralBackend)
+    if _fft_backend_available()
+        return SpectralBackends.FFTSpectralBackend()
+    end
+    @warn("No FFT backend loaded: falling back to the O(N^2D) direct-sum reference, which is " *
+          "practical only on tiny grids. Run `using FFTW` for the O(N^D log N) path.", maxlog = 1)
+    return SpectralBackends.DirectSumSpectralBackend()
+end
+
+"""
+    _FFT_BACKEND_LOADED
+
+Set to `true` by the FFTW extension's `__init__`. [`resolve_spectral`](@ref) reads it to answer the
+`Auto` tag, which the `!` entry points do on every call: a `Ref` load allocates nothing, where asking
+the loading machinery costs a dictionary lookup each time.
+
+An extension signals through this flag. A method whose signature the parent already carries is an
+overwrite, and an extension that overwrites a parent method fails to precompile.
+"""
+const _FFT_BACKEND_LOADED = Ref(false)
+
+_fft_backend_available() = _FFT_BACKEND_LOADED[]
+
+# ---------------------------------------------------------------------------
 # Method hierarchy
 # ---------------------------------------------------------------------------
 
@@ -145,7 +184,7 @@ cross-scale transfer is computed by this same path (pass the field as the "scala
 
 # References
 - Obukhov (1949); Corrsin (1951); Batchelor (1959); QG: Charney (1971);
-  stratified APE: Lindborg (2006). See THEORY.md §0.5.
+  stratified APE: Lindborg (2006).
 """
 struct PassiveScalar <: AbstractInvariant end
 
@@ -347,7 +386,7 @@ transfers are
 
     T_E(l) = -Σ_m Re{ψ̂*_lm Â_lm},   T_Z(l) = Σ_m Re{ζ̂*_lm Â_lm},
 
-both conserving (Σ_l T = 0). See THEORY.md §"Spherical spectral transfer".
+both conserving (Σ_l T = 0).
 
 Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (an
 `AbstractMatrix` vorticity field) routes to the FastSphericalHarmonics extension; scattered points
@@ -379,7 +418,7 @@ Writing the advection in Lamb (rotational) form `(u·∇)u = ∇(½|u|²) + ζ (
 split by the toroidal (rotational) / spheroidal (divergent) parts of `û` into `T = T_rot + T_div`.
 Total KE is advectively conserved: `Σ_l T(l) ≈ 0` (the rotational and divergent channels are not
 individually conserved — they exchange energy). The Lamb form needs only spin-0/spin-1 transforms
-(no spin-2). See THEORY.md §"Divergent spherical spectral transfer" (Augier–Lindborg 2013;
+(no spin-2). Augier–Lindborg 2013;
 Burgess–Erler–Shepherd 2013).
 
 Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (two
@@ -665,7 +704,9 @@ uniform-Cartesian Fourier field). Returns `spectral` for the DirectSum reference
 raises a clear geometry-mismatch error for the scattered/spherical backends directing the caller to the
 right entry point.
 """
-require_coefficient_spectral(spectral::Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend}) = spectral
+require_coefficient_spectral(spectral::Union{SpectralBackends.AbstractAutoSpectralBackend,
+                                             SpectralBackends.DirectSumSpectralBackend,
+                                             SpectralBackends.FFTSpectralBackend}) = spectral
 require_coefficient_spectral(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = throw(ArgumentError(
     "A NUFFT backend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
     "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
@@ -688,7 +729,7 @@ Result of a spectral energy flux computation.
 - `k_shells::KS`: Representative wavenumber for each shell (midpoint of bin edges).
 - `transfer_spectrum::V`: T(k) — energy transfer rate per shell.
 - `flux::V`: Π(K) = +cumsum(T(k)) — cumulative energy flux (Π>0 forward/down-scale cascade,
-  Π<0 inverse; Alexakis–Biferale 2018, THEORY.md §0.5).
+  Π<0 inverse; Alexakis–Biferale 2018).
 
 Parametric with no element-type bound (works with Float32/Float64/Dual/Unitful, etc.). `k_shells`
 (host-side shell wavenumbers) is parametrised separately from the `transfer_spectrum`/`flux` data so
@@ -756,7 +797,7 @@ end
     CompressibleFluxResult{KS, TS, FL, CH, PD}
 
 Result of a compressible kinetic-energy spectral-transfer computation (Singh–Tiwari–Sharma–Verma
-2025; see THEORY.md §0.5). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
+2025). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
 diagnostics it needs the density field and — for the KE↔internal-energy exchange — the pressure.
 
 # Fields

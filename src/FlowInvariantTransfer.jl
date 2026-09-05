@@ -9,6 +9,7 @@ using SpectralBackends: SpectralBackends
 # ---------------------------------------------------------------------------
 
 include("Types.jl")
+include("SpectralLayout.jl")
 include("Utils.jl")
 include("Invariants.jl")
 include("Decomposition.jl")
@@ -96,9 +97,11 @@ end
 """
     build_pencil_plan(ns, comm=MPI.COMM_WORLD; T=Float64) -> PencilFFTPlan
 
-Convenience constructor for the distributed complex-to-complex FFT plan used by
-[`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux), with an auto-balanced MPI process grid. Requires
-`using MPI, PencilFFTs, PencilArrays`.
+Convenience constructor for the distributed FFT plan used by
+[`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux), with an auto-balanced MPI
+process grid. The velocity is real, so axis 1 is a real-to-complex transform and each rank's spectral
+pencil holds the non-redundant `k₁ ≥ 0` half: pass the matching wavenumber tuple,
+`Utils.wavenumber_grid(ns, Ls; real = true)`. Requires `using MPI, PencilFFTs, PencilArrays`.
 """
 function build_pencil_plan(args...; kwargs...)
     throw(ArgumentError("build_pencil_plan requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
@@ -190,26 +193,29 @@ NonuniformFFTs plans are pure Julia and need neither. `show` is a one-liner (nev
 plan). Each array/plan field is its own type parameter, so nothing is hardcoded to `Vector`/`Array{T}`
 and the core names no provider type.
 """
-struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SA, SH, SD, UM, TA, CI, CV, RV, R<:Real}
+struct NUFFTCoarseGrainingWorkspace{P1, P2, SC, KM, KC, K1, SD, UM, TA, SA, SH, CI, CV, RV, R<:Real}
     p1::P1              # type-1 (nonuniform → uniform) plan, points set
-    p2::P2              # type-2 (uniform → nonuniform) plan, points set
+    p2::P2              # type-2 (uniform → nonuniform) plan, points set. A real-data provider runs
+                        # both directions through ONE plan (r2c out, c2r back) and stores it twice.
     scaled_coords::SC   # coordinates rescaled to the provider's periodic cell
-    k_mag::KM           # |k| grid
-    k_comp_grids::KC    # per-dimension kⱼ grids
+    k_mag::KM           # |k| over the coefficient grid
+    k_comp_grids::KC    # per-axis kⱼ arrays, reshaped to broadcast along their own axis
     ks_1d::K1           # per-axis wavenumber vectors
     Ĝ::KM               # filter weights Ĝ(k) (recomputed per ℓ into this buffer)
     û_filt::SD          # (ms…, D) filtered spectral velocity (page c = component c)
     u_filt::UM          # (N, D) filtered velocity at the scattered points (real)
-    τ::TA               # (N, D, D) SFS stress — doubles as the Π-contraction buffer
-    S̄::TA               # (N, D, D) strain rate
+    τ::TA               # (N, D, D) SFS stress, or `nothing` when the workspace excludes diagnostics
+    S̄::TA               # (N, D, D) strain rate, or `nothing`
     Π::RV               # (N,) flux (the result wraps this)
     spec::SA            # (ms…) complex spectral scratch (exec output / filtered product / gradient)
-    spec_half::SH       # type-1 output scratch: the analysis plan's mode array (a real-data plan returns
-                        # the non-redundant half, expanded into `spec`; a complex plan writes `spec` directly)
+    spec_half::SH       # analysis-plan mode array: a real-data plan returns the non-redundant half,
+                        # expanded into `spec`; a complex plan writes `spec` directly and aliases it
     scat_in::CI         # (N,) type-1 input scratch (real for a real-data analysis plan, else complex)
-    scat_out::CV        # (N,) complex type-2 output scratch
+    scat_out::CV        # (N,) type-2 output scratch (real for a c2r synthesis plan, else complex)
     prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
     grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
+    tau_ij::RV          # (N,) stress component being contracted
+    s_ij::RV            # (N,) strain component being contracted
     npoints::Int        # number of scattered points (type-1 normalization)
     tol::R
 end
@@ -254,10 +260,10 @@ end
 # from the uniform coefficient methods (…, velocity_hat, ks).
 const _SpectralFamilyMethod = Union{Types.SpectralFluxMethod, Types.ShellToShellTransferMethod, Types.ModeToModeTransferMethod}
 
-function calculate_energy_transfer(method::_SpectralFamilyMethod, velocity_fields::Tuple, coords::Tuple, ms::Tuple;
-                                   spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+function calculate_energy_transfer(method::_SpectralFamilyMethod, velocity_fields::Tuple, domain, ms::Tuple;
+                                   spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
                                    kwargs...)
-    return _physical_energy_transfer(spectral, method, velocity_fields, coords, ms; kwargs...)
+    return _physical_energy_transfer(spectral, method, velocity_fields, domain, ms; kwargs...)
 end
 
 # Scattered NUFFT branch (core; `to_spectral` dispatches to the loaded provider): reconstruct
@@ -291,7 +297,7 @@ to `Array{T}` and the core names no provider type. FINUFFT's C plan (which FINUF
 finalizer for) is freed by a finalizer the extension attaches to the plan object itself, so the workspace
 needs no finalizer and no mutability; NonuniformFFTs plans are pure Julia and need neither.
 """
-struct NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R<:Real}
+struct NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R<:Real, EX}
     plan::P              # provider type-1 (nonuniform → uniform) plan, points set
     scaled_coords::SC    # coordinates rescaled to the provider's periodic cell
     ks::KS               # per-axis uniform wavenumber vectors (returned with û)
@@ -300,6 +306,7 @@ struct NUFFTToSpectralWorkspace{P, SC, KS, UH, CV, SP, R<:Real}
     spec::SP             # (ms…) complex type-1 output scratch
     npoints::Int         # number of scattered points (type-1 normalization)
     invN::R
+    execution::EX        # backend the buffers live on; selects the host/device Hermitian expansion
 end
 Base.show(io::IO, ::NUFFTToSpectralWorkspace) = print(io, "NUFFTToSpectralWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::NUFFTToSpectralWorkspace) = show(io, w)
@@ -331,6 +338,54 @@ _nufft_plan_backend_kw(gpu::ComputationalBackends.AbstractGPUBackend) = (; backe
 _nufft_new(::ComputationalBackends.AbstractExecutionBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} = Array{CT}(undef, dims...)
 _nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
 
+# One mode of the Hermitian expansion of a real-data NUFFT type-1 half spectrum onto the full fftfreq
+# grid. `fk_half` holds axis-1 modes `0…ms₁÷2` (rfftfreq) with fftfreq on the rest; `us` is the plan's
+# oversampled half spectrum (sizes `novs`) and `gk[d]` its kernel Fourier coefficients.
+#
+#   k₁ ≥ 0                → straight from `fk_half`.
+#   k₁ < 0                → Hermitian mirror `conj(fk_half[-k])`.
+#   k₁ < 0 and some even
+#   axis d ≥ 2 at −N_d/2  → the fold needs `C[-k₁, +N_d/2]`, which is not an output mode. At scattered
+#                           points `+N_d/2 ≠ −N_d/2`, so no output row supplies it; it is an interior
+#                           mode of `us`, read there and deconvolved by `normfactor / ∏ ĝ`.
+#
+# Exact for even and odd sizes. Written per-mode so the host loop and the device kernel share it.
+@inline function _r2c_value(I, fk_half, us, gk, ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
+    # fftfreq integer at each output index, then the mode's own index in the mirrored grid.
+    kk = ntuple(d -> (Int(I[d]) - 1 <= (ms[d] - 1) ÷ 2) ? (Int(I[d]) - 1) : (Int(I[d]) - 1 - ms[d]), D)
+    k1 = kk[1]
+    if k1 >= 0
+        return fk_half[CartesianIndex(ntuple(d -> d == 1 ? k1 + 1 : Int(I[d]), D))] * invN
+    end
+    even_nyquist = false
+    for d in 2:D
+        (iseven(ms[d]) && kk[d] == -(ms[d] ÷ 2)) && (even_nyquist = true)
+    end
+    if !even_nyquist
+        # output index of −freq(I[d])
+        return conj(fk_half[CartesianIndex(ntuple(d -> d == 1 ? -k1 + 1 :
+                                                  (Int(I[d]) == 1 ? 1 : ms[d] - Int(I[d]) + 2), D))]) * invN
+    end
+    negk = ntuple(d -> -kk[d], D)
+    ovsI = CartesianIndex(ntuple(d -> negk[d] >= 0 ? negk[d] + 1 : novs[d] + negk[d] + 1, D))
+    β = normfactor / gk[1][negk[1] + 1]
+    for d in 2:D
+        β /= gk[d][negk[d] >= 0 ? negk[d] + 1 : ms[d] + negk[d] + 1] # ĝ is even ⇒ +N/2 lands in the −N/2 slot
+    end
+    return conj(β * us[ovsI]) * invN
+end
+
+# Hermitian expansion over the whole output grid, dispatched on the execution backend: this host method
+# is a scalar loop, and the KernelAbstractions extension adds the device method. Both take arrays and
+# plain numbers only, so neither carries a NUFFT provider type.
+function _r2c_expand!(::ComputationalBackends.AbstractExecutionBackend, full, fk_half, us, gk,
+                      ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
+    @inbounds for I in CartesianIndices(ms)
+        full[I] = _r2c_value(I, fk_half, us, gk, ms, novs, normfactor, invN)
+    end
+    return full
+end
+
 # FINUFFT `to_spectral` plan+buffer build, dispatched on the execution backend. The host method (FINUFFT
 # extension) and the NVIDIA-GPU cuFINUFFT method (FINUFFT + CUDA extension) both need FINUFFT symbols, so
 # only the generic function is owned here; both extensions add their methods to it.
@@ -348,6 +403,7 @@ function to_spectral!(args...; kwargs...)
 end
 
 export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, NUFFTCoarseGrainingWorkspace
+export ToSpectralWorkspace
 export NUFFTToSpectralWorkspace, to_spectral!
 
 # ---------------------------------------------------------------------------
@@ -467,7 +523,7 @@ NUFFT path (`spectral = Types.FINUFFTBackend()` or `Types.NonuniformFFTsBackend(
 by [`calculate_spherical_transfer`](@ref) — see [`spectral_geometry`](@ref).
 
 # Keyword Arguments
-- `spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.FFTSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
+- `spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
   `using FFTW` (cuFFT is used automatically for device-array inputs); `SpectralBackends.DirectSumSpectralBackend()` is the
   dependency-free `O(N²ᴰ)` reference (tiny grids only).
 
@@ -485,9 +541,41 @@ using FlowInvariantTransfer, FFTW
 Pass a scalar (density / pressure / passive scalar) as a 1-tuple: `ρ̂, _ = to_spectral((ρ,), coords)`.
 """
 function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
-                     spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.FFTSpectralBackend())
+                     spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+                     real_layout::Bool = eltype(velocity_fields[1]) <: Real)
+    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; spectral = spectral, real_layout = real_layout)
+    return to_spectral!(ws, velocity_fields)
+end
+
+"""
+    ToSpectralWorkspace{TF, RA, CA, KS}
+
+Reusable transform + buffers for the uniform-grid [`to_spectral!`](@ref): the analysis plans, the
+real `(ns…, D)` staging array the components are gathered into, and the `(ms…, D)` coefficient output
+the result aliases. Build once for a grid and reuse across snapshots — the plans and both buffers are
+then built once for the whole series.
+"""
+struct ToSpectralWorkspace{TF, RA, CA, KS}
+    tf::TF
+    field_phys::RA       # (ns..., D) real staging
+    û::CA                # (ms..., D) coefficients (the result aliases this)
+    ks::KS
+end
+Base.show(io::IO, ::ToSpectralWorkspace) = print(io, "ToSpectralWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", w::ToSpectralWorkspace) = show(io, w)
+
+"""
+    ToSpectralWorkspace(velocity_fields, coords_vecs; spectral, real_layout=true)
+
+Build the reusable uniform-grid analysis workspace. `real_layout = true` (the default for real input
+fields) stores the non-redundant half spectrum; see [`to_spectral`](@ref).
+"""
+function ToSpectralWorkspace(velocity_fields::Tuple, coords_vecs::Tuple;
+                             spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+                             real_layout::Bool = eltype(velocity_fields[1]) <: Real)
     D = length(velocity_fields)
     D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
+    spectral = Types.resolve_spectral(spectral)
     spectral isa Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend} || throw(ArgumentError(
         "to_spectral transforms uniform-grid Cartesian data (spectral = SpectralBackends.FFTSpectralBackend() or the SpectralBackends.DirectSumSpectralBackend " *
         "reference). For scattered Cartesian data use the NUFFT physical entry (Types.FINUFFTBackend / Types.NonuniformFFTsBackend); for spherical data use " *
@@ -495,18 +583,40 @@ function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
     ns = Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
     Utils.validate_uniform_grid(coords_vecs)
     Ls = Utils.domain_size_from_coords(coords_vecs)
-    ks = Utils.wavenumber_grid(ns, Ls)
-    CT = complex(float(real(eltype(velocity_fields[1]))))
-    field_phys = similar(velocity_fields[1], CT, ns..., D)
-    colons = ntuple(_ -> Colon(), length(ns))
-    for c in 1:D
-        view(field_phys, colons..., c) .= complex.(velocity_fields[c])
-    end
-    # Reuse the shared analysis transform context (û = fft(u)/Nᵈ): DirectSum in core, FFT in the FFTW
-    # ext, cuFFT for device arrays. Errors clearly (no silent downgrade) if SpectralBackends.FFTSpectralBackend is requested
-    # without FFTW loaded.
+    ks = Utils.wavenumber_grid(ns, Ls; real = real_layout)
+    ms = SpectralLayout.spectral_size(ks)
+    FT = float(real(eltype(velocity_fields[1])))
+    # The half layout IS the statement that the physical field is real, so it accepts only real input.
+    # The full layout carries whatever the input is, and stages in that element type.
+    real_layout && !(eltype(velocity_fields[1]) <: Real) && throw(ArgumentError(
+        "the half spectral layout stores the non-redundant half of a REAL field's transform, and these " *
+        "fields are $(eltype(velocity_fields[1])); pass `real_layout = false` for the full spectrum."))
+    field_phys = similar(velocity_fields[1], real_layout ? FT : float(eltype(velocity_fields[1])), ns..., D)
+    û = similar(velocity_fields[1], Complex{FT}, ms..., D)
+    # The shared analysis transform context (û = fft(u)/Nᵈ): DirectSum in core, FFT in the FFTW ext,
+    # cuFFT for device arrays.
+    # Errors clearly (no silent downgrade) if the FFT backend is requested without FFTW loaded.
     tf = Compressible._resolve_tf(spectral, field_phys, ks, ns)
-    return (tf.dft(field_phys), ks)
+    return ToSpectralWorkspace(tf, field_phys, û, ks)
+end
+
+"""
+    to_spectral!(ws::ToSpectralWorkspace, velocity_fields) -> (velocity_hat, ks)
+
+In-place uniform-grid analysis reusing `ws` — no plan rebuild, no per-call buffers. The returned
+`velocity_hat` aliases `ws.û` and a later call overwrites it.
+"""
+function to_spectral!(ws::ToSpectralWorkspace, velocity_fields::Tuple)
+    D = size(ws.û, ndims(ws.û))
+    length(velocity_fields) == D || throw(DimensionMismatch(
+        "to_spectral! got $(length(velocity_fields)) fields; workspace was built for $D components"))
+    nd = ndims(ws.field_phys) - 1
+    colons = ntuple(_ -> Colon(), nd)
+    for c in 1:D
+        view(ws.field_phys, colons..., c) .= velocity_fields[c]
+    end
+    ws.tf.dft!(ws.û, ws.field_phys)
+    return (ws.û, ws.ks)
 end
 
 """
@@ -560,10 +670,16 @@ PrecompileTools.@setup_workload begin
     û[2, 1, 1] = 0.5    # single mode u
     û[1, 2, 2] = 0.5    # single mode v
 
+    # Precompilation runs without the FFTW extension loaded, so the backend is named explicitly: this
+    # is the one available here, and naming it keeps `resolve_spectral`'s fallback warning out of the
+    # precompile output.
+    ds = SpectralBackends.DirectSumSpectralBackend()
+
     PrecompileTools.@compile_workload begin
-        _ = calculate_spectral_flux(û, ks; binning=Types.LinearBinning(2π/L), dealiasing=Types.NoDealiasing())
-        _ = calculate_shell_to_shell_transfer(û, ks;
-                binning=Types.LinearBinning(2π/L), dealiasing=Types.NoDealiasing(), verify_antisymmetry=false)
+        _ = calculate_spectral_flux(û, ks; binning=Types.LinearBinning(2π/L),
+                dealiasing=Types.NoDealiasing(), spectral=ds)
+        _ = calculate_shell_to_shell_transfer(û, ks; binning=Types.LinearBinning(2π/L),
+                dealiasing=Types.NoDealiasing(), verify_antisymmetry=false, spectral=ds)
         _ = Utils.wavenumber_grid((N,N), (L,L))
         _ = Utils.dealiasing_mask((N,N))
     end

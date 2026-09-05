@@ -7,7 +7,7 @@ using ComputationalBackends: ComputationalBackends
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer at SCATTERED points on the sphere, via NUFSHT
 # (non-uniform spherical-harmonic transforms). Same 2D-barotropic formulation as the FSH regular-grid
-# path (THEORY.md §"Spherical spectral transfer"; core reduction: FlowInvariantTransfer.Spherical),
+# path (core reduction: FlowInvariantTransfer.Spherical),
 # but analysis/synthesis are FINUFFT-backed scattered transforms.
 #
 # NUFSHT's spin-weighted harmonics are the standard convention ₛYℓm = √((2ℓ+1)/4π) d^ℓ_{m,-s}(θ) e^{imφ}
@@ -93,6 +93,22 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
         degcol, Pr, Tcol, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
 end
 
+# `nusht_solve_spin!` returns `(C, iterations, residual, converged)`. The least-squares fit at scattered
+# points is the one step whose accuracy is not set by a tolerance the caller can see afterwards: the
+# threaded NUFFT spreading underneath it is not bitwise reproducible, and an unconverged solve
+# amplifies that by roughly `cond(A)²`, so two identical calls can disagree far above `rtol`. Reporting
+# the residual is what separates "this answer is at rtol" from "this answer is noise".
+function _solve_checked!(C, f, plan, what::String; rtol, maxiter)
+    _, iters, residual, converged = NUFSHT.nusht_solve_spin!(C, f, plan; rtol = rtol, maxiter = maxiter)
+    converged || @warn(
+        "scattered spherical least-squares solve did not reach `rtol` — the result is accurate only to " *
+        "the residual below, and repeat calls need not agree more closely than that. Raise `maxiter` " *
+        "or `rtol`, or add points.",
+        component = what, iterations = iters, residual = residual, rtol = rtol, maxiter = maxiter,
+        maxlog = 1)
+    return C
+end
+
 function FIT.Spherical.calculate_spherical_transfer!(
     ws::FIT.Spherical.ScatteredSphericalTransferWorkspace,
     vorticity::AbstractVector{<:Real},
@@ -107,7 +123,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
     # Analyse ζ → spin-0 coefficients (CG solve reuses ws.ζ_lm, points preset in plan0).
     ws.ζdata .= vorticity
     fill!(ws.ζ_lm, zero(CT))
-    NUFSHT.nusht_solve_spin!(ws.ζ_lm, ws.ζdata, ws.plan0; rtol = ws.rtol, maxiter = ws.maxiter)
+    _solve_checked!(ws.ζ_lm, ws.ζdata, ws.plan0, "vorticity"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # ψ = ∇⁻²ζ and the eth ladder → spin-1 gradient coefficients, as row-broadcasts over the
     # (degree = row, m = column) coefficient matrices — device-generic, no scalar indexing. ℓ(ℓ+1) is a
@@ -127,7 +143,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
 
     # Analyse A at degree lwork (dealiased).
     fill!(ws.A_lw, zero(CT))
-    NUFSHT.nusht_solve_spin!(ws.A_lw, ws.Jc, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
+    _solve_checked!(ws.A_lw, ws.Jc, ws.plan0w, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # Per-degree transfer = sum over m (matrix columns). A_lw (degree lwork) aligns to the lmax layout by a
     # contiguous column slice (m offset lwork−lmax); |m|>ℓ corners are 0 (ζ/ψ/A = 0), so the full row-sum
@@ -253,8 +269,8 @@ function FIT.calculate_divergent_spherical_transfer!(
     # Spin ±1 coefficients of U₊ = u_θ + i u_φ and U₋ = u_θ − i u_φ; rotational/divergent split.
     @. ws.Up = u_θ + im * u_φ
     @. ws.Um = u_θ - im * u_φ
-    fill!(ws.ap, zero(CT)); NUFSHT.nusht_solve_spin!(ws.ap, ws.Up, ws.planp; rtol = ws.rtol, maxiter = ws.maxiter)
-    fill!(ws.am, zero(CT)); NUFSHT.nusht_solve_spin!(ws.am, ws.Um, ws.planm; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.ap, zero(CT)); _solve_checked!(ws.ap, ws.Up, ws.planp, "velocity spin+1"; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.am, zero(CT)); _solve_checked!(ws.am, ws.Um, ws.planm, "velocity spin−1"; rtol = ws.rtol, maxiter = ws.maxiter)
     @. ws.sym  = (ws.ap + ws.am) / 2
     @. ws.anti = (ws.ap - ws.am) / 2
 
@@ -267,7 +283,7 @@ function FIT.calculate_divergent_spherical_transfer!(
 
     # K = ½|u|² (real, held complex); analyse at the dealiased degree lwork.
     @. ws.Kv = 0.5 * (u_θ^2 + u_φ^2)
-    fill!(ws.Khat, zero(CT)); NUFSHT.nusht_solve_spin!(ws.Khat, ws.Kv, ws.plan0w; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.Khat, zero(CT)); _solve_checked!(ws.Khat, ws.Kv, ws.plan0w, "kinetic energy"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # ∇K = ð K = +√(ℓ(ℓ+1)) synth_spin+1(K̂)  (reuse Khat for the ladder-scaled coefficients).
     @. ws.Khat = ws.ladw * ws.Khat
@@ -275,7 +291,7 @@ function FIT.calculate_divergent_spherical_transfer!(
 
     # Skew-symmetric energy-conserving advection A = ∇K + (iζ + ½δ) U₊; analyse (spin+1) at lwork.
     @. ws.Advv = ws.gradK + (im * ws.ζv + 0.5 * ws.δv) * ws.Up
-    fill!(ws.Adv_lm, zero(CT)); NUFSHT.nusht_solve_spin!(ws.Adv_lm, ws.Advv, ws.planpw; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.Adv_lm, zero(CT)); _solve_checked!(ws.Adv_lm, ws.Advv, ws.planpw, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # Per-degree channel reduction T_rot = Σ_m Re{sym* Â}, T_div = Σ_m Re{anti* Â} (single 1/a factor).
     # A_lm (degree lwork) aligns to the lmax layout by a centred column slice; |m|>ℓ corners are 0.

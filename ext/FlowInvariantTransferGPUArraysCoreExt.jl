@@ -24,19 +24,17 @@ ComputationalBackends.is_gpu_array(::GPUArraysCore.AbstractGPUArray) = true
 # Dealias keep-mask (mode kept iff |k_d| < n_d÷3 for all d), device-resident. Built from per-dimension
 # keep vectors (host Int test) moved to the device and broadcast-AND'd into the (ns) grid.
 function _dealias_keep(proto, ns::NTuple{nd,Int}) where {nd}
-    keep = nothing
-    for d in 1:nd
+    vs = ntuple(nd) do d
         n = ns[d]
         kv = Bool[(i0 = i - 1; kabs = i0 <= n ÷ 2 ? i0 : n - i0; kabs < n ÷ 3) for i in 1:n]
         vd = similar(proto, Bool, n); copyto!(vd, kv)
-        vr = reshape(vd, ntuple(j -> j == d ? n : 1, nd))
-        keep = d == 1 ? (vr .& true) : (keep .& vr)
+        reshape(vd, ntuple(j -> j == d ? n : 1, nd))
     end
-    return keep
+    return (&).(vs...)   # one fused pass over the grid, one `(ns)` Bool result
 end
 
 # dst = src, zeroing the Orszag 2/3 discard band (|k| ≥ n_d÷3) when `trunc`.
-function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src, ns::NTuple{nd,Int}, nd_::Int, trunc::Bool) where {nd}
+function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src, ks, ns::NTuple{nd,Int}, trunc::Bool) where {nd}
     if trunc
         keep = _dealias_keep(dst, ns)
         dst .= reshape(keep, ns..., 1) .* src
@@ -49,34 +47,46 @@ end
 # Helmholtz split (rot ⊥ k, comp ∥ k) via broadcasts with a guarded 1/k² (0 at the DC mode → comp=0).
 function FIT.Compressible._helmholtz_split!(rot::GPUArraysCore.AbstractGPUArray, comp, field_hat, ks, ns::NTuple{nd,Int}) where {nd}
     FT = real(eltype(field_hat)); colons = ntuple(_ -> Colon(), nd)
+    # `derivative_wavenumber` per axis, matching the host method: the Nyquist component of an even
+    # axis contributes nothing to the grid divergence the split is built from.
     kg = ntuple(nd) do d
-        v = similar(rot, FT, ns[d]); copyto!(v, collect(FT, ks[d]))
+        h = FT[FIT.SpectralLayout.derivative_wavenumber(ks[d], i) for i in 1:ns[d]]
+        v = similar(rot, FT, ns[d]); copyto!(v, h)
         reshape(v, ntuple(i -> i == d ? ns[d] : 1, nd))
     end
     k2 = similar(rot, FT, ns); fill!(k2, zero(FT))
     for d in 1:nd; k2 .+= kg[d] .^ 2; end
-    invk2 = ifelse.(k2 .> 0, inv.(k2), zero(FT))
     kdotu = similar(rot, ns); fill!(kdotu, zero(eltype(kdotu)))   # Σ_c k_c·field_c (complex, ns)
     for c in 1:nd
         kdotu .+= kg[c] .* view(field_hat, colons..., c)
     end
+    # Each component's compressive part is written straight into `comp` and read back for `rot`, so the
+    # guarded 1/k² (0 at the DC mode → comp = 0) fuses in and no `(ns)` temporary is formed.
     for c in 1:nd
-        cc = (kdotu .* invk2) .* kg[c]                           # compressive component c (∥ k)
-        view(comp, colons..., c) .= cc
-        view(rot,  colons..., c) .= view(field_hat, colons..., c) .- cc
+        cc = view(comp, colons..., c)
+        cc .= kdotu .* ifelse.(k2 .> 0, inv.(k2), zero(FT)) .* kg[c]
+        view(rot, colons..., c) .= view(field_hat, colons..., c) .- cc
     end
     return nothing
 end
 
 # Shell-bin a per-mode density into shell sums (device reductions → host vector); the keep-mask excludes
 # the 2/3 band when `dealias`. Mode → shell 0 (unassigned) is excluded since `n` runs 1:N_sh.
-function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
-    sidx_d = similar(td, Int, ns); copyto!(sidx_d, sidx)
-    keep = dealias ? _dealias_keep(td, ns) : nothing
+function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ks, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
+    sidx_d = sidx isa GPUArraysCore.AbstractGPUArray ? sidx : copyto!(similar(td, Int, ns), sidx)
     T = Vector{FT}(undef, N_sh)
-    for n in 1:N_sh
-        m = keep === nothing ? (sidx_d .== n) : ((sidx_d .== n) .& keep)
-        T[n] = sum(td .* m)
+    # Each shell sum is one fused device reduction over the mode grid: the membership test and the
+    # dealias predicate are evaluated per mode inside the reduction, so no `(ns)` mask or product is
+    # materialized for any of the `N_sh` shells.
+    if dealias
+        keep = _dealias_keep(td, ns)
+        for n in 1:N_sh
+            T[n] = mapreduce((s, t, k) -> (s == n) & k ? t : zero(FT), +, sidx_d, td, keep; init = zero(FT))
+        end
+    else
+        for n in 1:N_sh
+            T[n] = mapreduce((s, t) -> s == n ? t : zero(FT), +, sidx_d, td; init = zero(FT))
+        end
     end
     return T
 end
@@ -90,17 +100,17 @@ end
 # lacks a native one). Verified device-generic on JLArrays under allowscalar(false).
 # ---------------------------------------------------------------------------
 
-# Whole-block temporal DFT for a device-array segment: one matmul with the DFT matrix + fftshift (the host
-# method is a per-column loop). `spectral=SpectralBackends.FFTSpectralBackend` on a device array would need a batched cuFFT (not
-# wired) — error clearly and direct to DirectSum. `_` args match the host signature (per-column scratch,
-# unused here). Runs on any GPUArraysCore.AbstractGPUArray (device-resident) and on JLArrays under allowscalar(false).
+# Whole-block temporal DFT for a device-array segment on the direct-sum reference path: one matmul with
+# the DFT matrix + fftshift, where the host method is a per-column scalar loop. With a plan present the
+# transform is the batched one from the FFTW extension, whose `plan_rfft`/`plan_fft` are the AbstractFFTs
+# generics and so plan on the array's own library (cuFFT) — one code path for host and device. `_` args
+# match the host signature (per-column scratch, unused here). Runs on any
+# GPUArraysCore.AbstractGPUArray and on JLArrays under allowscalar(false).
 function FIT.TriadicOrthogonalDecomposition._tod_dft_block!(
     Q_blk, segment::GPUArraysCore.AbstractGPUArray, seg_before_mean, window, win_weight, nDFT, shift, blk_mean,
-    backend, _plan, _dft_col, _windowed, _shifted)
-    backend isa SpectralBackends.FFTSpectralBackend && throw(ArgumentError(
-        "device-array triadic_orthogonal_decomposition uses the DirectSum whole-block temporal DFT " *
-        "(matmul); spectral=SpectralBackends.FFTSpectralBackend() on a device array needs a batched cuFFT (not wired) — pass " *
-        "spectral=SpectralBackends.DirectSumSpectralBackend()."))
+    backend, plan, _dft_col, _windowed, _shifted)
+    plan === nothing || return FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
+        Q_blk, segment, seg_before_mean, window, win_weight, nDFT, shift, blk_mean, plan)
     CT = eltype(Q_blk); RT = real(CT)
     win = window isa GPUArraysCore.AbstractGPUArray ? window : copyto!(similar(segment, RT, length(window)), window)
     wnd = segment .* win .* (win_weight / nDFT)                            # (nDFT × nx)
@@ -162,15 +172,21 @@ function FIT.TriadicOrthogonalDecomposition._triadic_svd_serial!(
     Y = sc.Y; LA.mul!(Y, F.R, Xw)
     M = sc.Mmat; LA.mul!(M, Y, Y')
     eigh = LA.eigen!(LA.Hermitian(Matrix(M)))                   # tiny r×r Hermitian eig on the host
-    λh = real.(eigh.values); permh = sortperm(λh; rev = true)
-    λ = max.(λh[permh], zero(RT)); sqrt_λ = sqrt.(λ)
+    λ = sc.λ; sqrt_λ = sc.sqrt_λ; permh = sc.perm
+    @inbounds for i in eachindex(λ)
+        λ[i] = real(eigh.values[i])
+    end
+    sortperm!(permh, λ; rev = true)
+    @inbounds for j in eachindex(sqrt_λ)
+        sqrt_λ[j] = sqrt(max(λ[permh[j]], zero(RT)))
+    end
     nz = count(>(eps(RT) * 100), sqrt_λ)
     if nz == 0
-        return view(sc.Ubuf, :, 1:0), sqrt_λ[1:0], view(sc.Vbuf, :, 1:0)
+        return view(sc.Ubuf, :, 1:0), view(sqrt_λ, 1:0), view(sc.Vbuf, :, 1:0)
     end
     copyto!(sc.Uperm, eigh.vectors[:, permh])                   # descending-λ eigenvectors → device
     U_trunc = view(sc.Uperm, :, 1:nz)
-    s = sqrt_λ[1:nz]
+    s = view(sqrt_λ, 1:nz)
     Vv = view(sc.Vbuf, :, 1:nz); LA.mul!(Vv, Y', U_trunc)       # V = Yᴴ·U
     Uv = view(sc.Ubuf, :, 1:nz); LA.mul!(Uv, Qmat, U_trunc)     # U = Q·U
     invs = copyto!(similar(Q_hat_n, CT, 1, nz), reshape(CT.(inv.(s)), 1, nz))

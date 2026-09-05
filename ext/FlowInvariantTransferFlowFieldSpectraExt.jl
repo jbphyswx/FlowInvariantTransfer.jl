@@ -16,13 +16,37 @@ using ComputationalBackends: ComputationalBackends
 # them on the way out. The axes build an all-periodic Cartesian `FlowGeometries.Grids.StructuredGrid`:
 # pass each axis as a uniform range so its period is inferred (`n·Δ`); a stretched or plain-vector axis
 # needs `domain_size` (its per-direction period). The direct-sum transform is exact on uniform axes.
+const _FFSMethod = Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod,
+                         FIT.Types.ModeToModeTransferMethod}
+
+# `FFS.calculate_spectrum` is declared on `FlowGeometries.Grids.AbstractGrid` and selects its transform
+# from the grid, so a grid passed here reaches whichever one its geometry and sampling admit.
 function FIT._physical_energy_transfer(
     spectral::SpectralBackends.AbstractSpectralBackend,
-    method::Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod, FIT.Types.ModeToModeTransferMethod},
+    method::_FFSMethod,
+    velocity_fields::Tuple,
+    grid::FFS.FlowGeometries.Grids.AbstractGrid,
+    ms::Tuple;
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+    kwargs...
+)
+    nd = length(ms)
+    coeffs, ks = FFS.calculate_spectrum(grid, velocity_fields, ms; transform = spectral, execution = execution)
+    shifts = ntuple(d -> d <= nd ? -(size(coeffs, d) ÷ 2) : 0, ndims(coeffs))
+    coeffs_ff = circshift(coeffs, shifts)
+    ks_ff = ntuple(d -> circshift(collect(ks[d]), -(length(ks[d]) ÷ 2)), nd)
+    return FIT.calculate_energy_transfer(method, coeffs_ff, ks_ff; kwargs...)
+end
+
+# Coordinate-vector convenience: an all-periodic Cartesian grid over those axes. Pass each axis as a
+# uniform range and its period is inferred (`n·Δ`); a stretched or plain-vector axis needs
+# `domain_size`, its per-direction period.
+function FIT._physical_energy_transfer(
+    spectral::SpectralBackends.AbstractSpectralBackend,
+    method::_FFSMethod,
     velocity_fields::Tuple,
     coords_vecs::Tuple,
     ms::Tuple;
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     domain_size = nothing,
     kwargs...
 )
@@ -31,11 +55,7 @@ function FIT._physical_energy_transfer(
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
     grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...;
                                                    topology = ntuple(_ -> true, nd), period = domain_size)
-    coeffs, ks = FFS.calculate_spectrum(grid, velocity_fields, ms; transform = spectral, execution = execution)
-    shifts = ntuple(d -> d <= nd ? -(size(coeffs, d) ÷ 2) : 0, ndims(coeffs))
-    coeffs_ff = circshift(coeffs, shifts)
-    ks_ff = ntuple(d -> circshift(collect(ks[d]), -(length(ks[d]) ÷ 2)), nd)
-    return FIT.calculate_energy_transfer(method, coeffs_ff, ks_ff; kwargs...)
+    return FIT._physical_energy_transfer(spectral, method, velocity_fields, grid, ms; kwargs...)
 end
 
 end # module

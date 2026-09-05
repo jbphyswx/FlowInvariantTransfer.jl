@@ -79,9 +79,9 @@ struct CoarseGrainingFluxWorkspace{G, W, P, D, DP, FP}
 end
 
 function CoarseGrainingFluxWorkspace(
-    velocity_fields::Tuple, coords_vecs::Tuple, ℓ::Real, filter::Types.AbstractFilter; kwargs...,
+    velocity_fields::Tuple, geometry, ℓ::Real, filter::Types.AbstractFilter; kwargs...,
 )
-    return _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; kwargs...)
+    return _cg_flux_workspace(velocity_fields, geometry, ℓ, filter; kwargs...)
 end
 
 # ---------------------------------------------------------------------------
@@ -121,39 +121,42 @@ result = calculate_coarse_graining_flux((u, v), (x, y), ℓ, GaussianFilter())
 """
 function calculate_coarse_graining_flux(
     velocity_fields::Tuple,
-    coords_vecs::Tuple,
+    geometry,
     ℓ::Real,
     filter::Types.AbstractFilter;
     decomposition::Types.AbstractFieldDecomposition = Types.NoDecomposition(),
     kwargs...,
 )
-    decomposed = Decomposition.decompose_field(decomposition, velocity_fields, coords_vecs; kwargs...)
+    decomposition isa Types.NoDecomposition || geometry isa Tuple || throw(ArgumentError(
+        "a field decomposition is built from the coordinate vectors, so it needs the `coords_vecs` form; " *
+        "on a grid, decompose upstream and pass the component fields."))
+    decomposed = Decomposition.decompose_field(decomposition, velocity_fields, geometry; kwargs...)
     return _calculate_coarse_graining_flux_decomposed(
-        decomposed, velocity_fields, coords_vecs, ℓ, filter; kwargs...
+        decomposed, velocity_fields, geometry, ℓ, filter; kwargs...
     )
 end
 
 function _calculate_coarse_graining_flux_decomposed(
     decomp_fields::Tuple,
     velocity_fields::Tuple,
-    coords_vecs::Tuple,
+    geometry,
     ℓ::Real,
     filter::Types.AbstractFilter;
     kwargs...,
 )
-    return _cg_flux_cgef(decomp_fields, coords_vecs, ℓ, filter; kwargs...)
+    return _cg_flux_cgef(decomp_fields, geometry, ℓ, filter; kwargs...)
 end
 
 function _calculate_coarse_graining_flux_decomposed(
     decomposed::NamedTuple,
     velocity_fields::Tuple,
-    coords_vecs::Tuple,
+    geometry,
     ℓ::Real,
     filter::Types.AbstractFilter;
     kwargs...,
 )
     return map(decomposed) do fields
-        return _cg_flux_cgef(fields, coords_vecs, ℓ, filter; kwargs...)
+        return _cg_flux_cgef(fields, geometry, ℓ, filter; kwargs...)
     end
 end
 
@@ -194,20 +197,20 @@ flux field. Only `NoDecomposition` is supported; `kwargs` (`mask`, `return_diagn
 """
 function calculate_coarse_graining_flux_batch(
     velocity_fields_batch,
-    coords_vecs::Tuple,
+    geometry,
     ℓ::Real,
     filter::Types.AbstractFilter;
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
 )
     length(velocity_fields_batch) == 0 && return []
-    return _cg_flux_batch!(Types.resolve_execution(execution), velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+    return _cg_flux_batch!(Types.resolve_execution(execution), velocity_fields_batch, geometry, ℓ, filter; kwargs...)
 end
 
 # Serial reference: one workspace reused across the batch; each result gets an independent copy (the
 # workspace overwrites its output buffer on every snapshot, so the results must not alias it).
-function _cg_flux_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
-    ws = CoarseGrainingFluxWorkspace(first(velocity_fields_batch), coords_vecs, ℓ, filter; kwargs...)
+function _cg_flux_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_fields_batch, geometry, ℓ, filter; kwargs...)
+    ws = CoarseGrainingFluxWorkspace(first(velocity_fields_batch), geometry, ℓ, filter; kwargs...)
     return [deepcopy(calculate_coarse_graining_flux!(ws, vf)) for vf in velocity_fields_batch]
 end
 
@@ -216,19 +219,19 @@ function _cg_flux_batch_threaded!(args...; kwargs...)
     throw(ArgumentError("execution = ThreadedBackend() for the coarse-graining batch requires OhMyThreads. " *
                         "Run `using OhMyThreads` to load the extension."))
 end
-_cg_flux_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
-    _cg_flux_batch_threaded!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+_cg_flux_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_fields_batch, geometry, ℓ, filter; kwargs...) =
+    _cg_flux_batch_threaded!(velocity_fields_batch, geometry, ℓ, filter; kwargs...)
 
 # Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
 function _cg_flux_batch_distributed!(args...; kwargs...)
     throw(ArgumentError("execution = DistributedBackend() for the coarse-graining batch requires Distributed. " *
                         "Run `using Distributed` to load the extension."))
 end
-_cg_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
-    _cg_flux_batch_distributed!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
+_cg_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, velocity_fields_batch, geometry, ℓ, filter; kwargs...) =
+    _cg_flux_batch_distributed!(velocity_fields_batch, geometry, ℓ, filter; kwargs...)
 
 # Any other execution backend has no batch hook — refuse rather than silently run serial.
-_cg_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...) =
+_cg_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_fields_batch, geometry, ℓ, filter; kwargs...) =
     throw(ArgumentError("calculate_coarse_graining_flux_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
                         "got execution = $(typeof(be))."))
 

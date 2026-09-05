@@ -84,12 +84,12 @@ function calculate_shell_to_shell_transfer(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     ws      = Workspaces.ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
     edges   = ShellBinning.shell_edges(binning, maximum(k_mag))
@@ -120,11 +120,11 @@ function calculate_shell_to_shell_transfer!(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     _calculate_shell_to_shell!(result, ws, velocity_hat, ks, Types.resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
         advecting_hat=advecting_hat)
@@ -149,11 +149,11 @@ function calculate_shell_to_shell_transfer_batch(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     n = length(velocity_hats)
     n == 0 && return Types.ShellToShellResult[]
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
@@ -313,6 +313,7 @@ function _calculate_shell_to_shell_direct!(
     N_sh  = size(result.transfer_matrix, 1)
 
     fill!(result.transfer_matrix, zero(FT))
+    col = ws.net_transfer            # length-N_sh scratch, rewritten per mediator then copied out
 
     for m in 1:N_sh
         # Build û_m: velocity restricted to shell m — reuse ws.û_m
@@ -332,17 +333,12 @@ function _calculate_shell_to_shell_direct!(
                                 advecting_hat=advecting_hat)
         N̂_m = ws.nonlinear.N̂
 
-        # Write per-mode transfer density into ws.transfer_density
-        Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂_m, ks)
-
-        # Accumulate A(n,m) = Σ_{k∈S_n} Re{û*·N̂_m} for all receiver shells n
-        for n in 1:N_sh
-            s = zero(FT)
-            for I in CartesianIndices(ns)
-                ws.shell_idx[I] == n || continue
-                s += ws.transfer_density[I]
-            end
-            result.transfer_matrix[n, m] = s
+        # A(n,m) = Σ_{k∈S_n} Re{û*·N̂_m} for every receiver shell n, in ONE pass over the modes:
+        # each mode contributes to exactly the shell it belongs to. Scanning the grid once per
+        # receiver shell instead costs N_sh passes for the same result.
+        Invariants.transfer_density_scatter!(col, invariant, velocity_hat, N̂_m, ks, ws.shell_idx)
+        @inbounds for n in 1:N_sh
+            result.transfer_matrix[n, m] = col[n]
         end
     end
 

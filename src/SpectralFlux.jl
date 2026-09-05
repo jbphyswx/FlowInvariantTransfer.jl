@@ -1,6 +1,7 @@
 module SpectralFlux
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -65,12 +66,12 @@ function calculate_spectral_flux(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     decomposition::Types.AbstractFieldDecomposition = Types.NoDecomposition(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     # DirectSum uses scalar-indexed direct sums (host-only); reject a device array up front, before the
     # workspace/FFT-plan build would fail with an opaque "JLArray to Ptr" (FFTW plan on a device array).
     (spectral isa SpectralBackends.DirectSumSpectralBackend && ComputationalBackends.is_gpu_array(velocity_hat)) &&
@@ -165,7 +166,7 @@ function calculate_spectral_flux!(
     shell_idx::AbstractArray{Int};
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
@@ -193,11 +194,11 @@ function calculate_spectral_flux_batch(
     binning::Types.AbstractShellBinning = _default_binning(ks),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     n = length(velocity_hats)
     n == 0 && return Types.SpectralFluxResult[]
     û1        = first(velocity_hats)
@@ -281,26 +282,15 @@ function _calculate_spectral_flux_with_N̂!(
     ::ComputationalBackends.SerialBackend;
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
 )
-    nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
-    FT = real(eltype(velocity_hat))
-
-    # Write per-mode transfer density into ws.transfer_density
-    Invariants.transfer_density!(ws.transfer_density, invariant, velocity_hat, N̂, ks)
-
-    fill!(ws.T_spec, zero(FT))
-    for I in CartesianIndices(ns)
-        n = shell_idx[I]
-        n == 0 && continue
-        ws.T_spec[n] += ws.transfer_density[I]
-    end
-
+    # Density and shell scatter in one pass: the density grid is written, read and discarded within
+    # this call, so it never needs to exist.
+    Invariants.transfer_density_scatter!(ws.T_spec, invariant, velocity_hat, N̂, ks, shell_idx)
     return _finalize_spectral_flux!(result, ws)
 end
 
 # Shared tail: copy T(k) out and accumulate the cumulative flux Π(K). Called by every backend once
 # `ws.T_spec` holds the shell transfer spectrum, so the flux convention lives in exactly one place.
-# Flux convention (Alexakis & Biferale 2018, Eqs. 12–17; see THEORY.md §0.5):
+# Flux convention (Alexakis & Biferale 2018, Eqs. 12–17):
 #   T(k) = Re{û*·N̂} is the net energy *loss* from shell k, and
 #   Π(K) = +Σ_{k≤K} T(k)  ⇒  Π>0 forward (down-scale) cascade, Π<0 inverse.
 # (Earlier code negated this, returning −Π — i.e. forward cascades read as negative.)
@@ -357,7 +347,7 @@ function calculate_scalar_flux(
     ks;
     binning::Types.AbstractShellBinning = _default_binning(ks),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
@@ -412,8 +402,7 @@ end
     calculate_partial_fluxes!(ws::NonlinearTermWorkspace, velocity_hat, ks; kwargs...)
 
 In-place partial-flux computation reusing a caller-provided `ws` across **all** decomposition-channel
-pairs — the allocating version previously built a fresh nonlinear-term workspace for every `(sp,sq)`
-pair (profiled waste). The channel `SpectralFluxResult`s and their total are the (inherent) output.
+pairs. The channel `SpectralFluxResult`s and their total are the (inherent) output.
 """
 function calculate_partial_fluxes!(
     ws::Workspaces.NonlinearTermWorkspace,
@@ -422,11 +411,11 @@ function calculate_partial_fluxes!(
     decomposition::Types.AbstractFieldDecomposition = Types.HelicalDecomposition(),
     binning::Types.AbstractShellBinning = _default_binning(ks),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     comps = Decomposition.decompose_field(decomposition, velocity_hat, ks)
     comps isa NamedTuple || throw(ArgumentError(
         "calculate_partial_fluxes needs a decomposition that splits u into ≥2 named components " *
@@ -452,11 +441,12 @@ function calculate_partial_fluxes!(
 end
 
 # Bin a transfer density into shells → a channel SpectralFluxResult (part of the inherent output).
-function _partial_binflux(td, sidx, centers, Nsh)
+function _partial_binflux(td, sidx, ks, centers, Nsh)
     FT = eltype(td)
     T = zeros(FT, Nsh)
     @inbounds for I in CartesianIndices(td)
-        n = sidx[I]; n == 0 && continue; T[n] += td[I]
+        n = sidx[I]; n == 0 && continue
+        T[n] += SpectralLayout.hermitian_weight(ks, I) * td[I]
     end
     return Types.SpectralFluxResult(centers, T, cumsum(T))
 end
@@ -471,7 +461,7 @@ function _partial_fluxes_fill!(::ComputationalBackends.SerialBackend, channels, 
         NonlinearTerm.compute_nonlinear_term!(ws, comps[sq], ks; advecting_hat=comps[sp], dealiasing=dealiasing, spectral=spectral)
         for sk in names
             Invariants.transfer_density!(td, Types.KineticEnergy(), comps[sk], ws.N̂, ks)
-            channels[(sk, sp, sq)] = _partial_binflux(td, sidx, centers, Nsh)
+            channels[(sk, sp, sq)] = _partial_binflux(td, sidx, ks, centers, Nsh)
         end
     end
     return channels

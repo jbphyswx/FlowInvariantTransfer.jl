@@ -28,6 +28,7 @@ using ComputationalBackends: ComputationalBackends
 # exec) — the right choice when the outer batch axis is parallelised one-worker-per-item.
 # `ThreadedBackend()` threads a single (or under-saturated) transform across `Threads.nthreads()` cores.
 function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tuple, ms::Tuple; Ls::Tuple, tol::Real = 1e-8,
+                                 return_diagnostics::Bool = false,
                                  execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
     fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     nd = length(scatter_coords)
@@ -42,8 +43,10 @@ function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tup
 
     Lf = ntuple(d -> FT(Ls[d]), nd)              # periodic domain per dimension (k = 2πn/L)
     ks_1d = FIT.Utils.wavenumber_grid(ms, Lf)    # fftfreq/FFTW ordering, matching the modeord=1 plans below
-    k_mag = FIT.Utils.wavenumber_magnitude_grid(ks_1d)
-    k_comp_grids = ntuple(d -> _build_k_component_nufft(ks_1d, d, ms), nd)
+    k_mag = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks_1d)
+    # Per-axis kⱼ reshaped to broadcast along its own axis: `Σ_d m_d` numbers where a dense grid per
+    # component holds `nd·prod(ms)`.
+    k_comp_grids = FIT.SpectralLayout.wavenumber_arrays(zeros(FT, 0), FT, ks_1d)
 
     # Coordinates mapped to [-π, π) at the *physical* scale x ↦ 2π(x−xₘᵢₙ)/L − π. `xₘᵢₙ` is a pure phase
     # reference (the type-1→type-2 round-trip cancels it and Πℓ is shift-invariant); `L` sets the scale,
@@ -57,14 +60,14 @@ function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tup
     Ĝ      = zeros(FT, ms...)
     û_filt = zeros(CT, ms..., D)
     u_filt = zeros(FT, N, D)
-    τ      = zeros(FT, N, D, D)
-    S̄      = zeros(FT, N, D, D)
+    τ      = return_diagnostics ? zeros(FT, N, D, D) : nothing
+    S̄      = return_diagnostics ? zeros(FT, N, D, D) : nothing
     Π      = zeros(FT, N)
     spec   = zeros(CT, ms...)
     scat_in  = zeros(CT, N)
     scat_out = zeros(CT, N)
-    prod_r = zeros(FT, N)
-    grad_j = zeros(FT, N)
+    prod_r = zeros(FT, N); grad_j = zeros(FT, N)
+    tau_ij = zeros(FT, N); s_ij = zeros(FT, N)
 
     nmodes = Int64[ms...]
     # type-1 is the ANALYSIS transform, so it must use e^{-ikx} (iflag = -1) to match the fft/DFT
@@ -82,7 +85,7 @@ function FIT._nufft_cg_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::Tup
 
     return FIT.NUFFTCoarseGrainingWorkspace(
         p1, p2, scaled_coords, k_mag, k_comp_grids, ks_1d, Ĝ, û_filt, u_filt,
-        τ, S̄, Π, spec, spec, scat_in, scat_out, prod_r, grad_j, N, FT(tol))   # complex analysis: type-1 writes `spec` directly
+        τ, S̄, Π, spec, spec, scat_in, scat_out, prod_r, grad_j, tau_ij, s_ij, N, FT(tol))
 end
 
 """
@@ -113,6 +116,9 @@ function FIT.nufft_coarse_graining_flux!(
     FT = eltype(ws.Π)
     length(velocity_fields[1]) == N || throw(DimensionMismatch(
         "velocity field length $(length(velocity_fields[1])) ≠ workspace points $N"))
+    return_diagnostics && ws.τ === nothing && throw(ArgumentError(
+        "this NUFFTCoarseGrainingWorkspace was built with return_diagnostics = false; rebuild it " *
+        "with return_diagnostics = true to get τ̄ᵢⱼ and S̄ᵢⱼ."))
     invN = one(FT) / FT(N)
 
     # Filter weights Ĝ(k) for this scale.
@@ -133,6 +139,7 @@ function FIT.nufft_coarse_graining_flux!(
 
     # Stress τ̄ᵢⱼ, strain S̄ᵢⱼ, and the flux contraction Π = −Σ factor·τ·S̄, streamed pair-by-pair.
     fill!(ws.Π, 0)
+    τij = ws.tau_ij; S̄ij = ws.s_ij
     @inbounds for i in 1:D, j in i:D
         # Filtered product [uᵢuⱼ]̄ at the points.
         @. ws.prod_r = velocity_fields[i] * velocity_fields[j]
@@ -140,7 +147,6 @@ function FIT.nufft_coarse_graining_flux!(
         FINUFFT.finufft_exec!(ws.p1, ws.scat_in, ws.spec)
         @. ws.spec = Ĝ * ws.spec * invN
         FINUFFT.finufft_exec!(ws.p2, ws.spec, ws.scat_out)
-        τij = view(ws.τ, :, i, j)
         @views @. τij = real(ws.scat_out) - ws.u_filt[:, i] * ws.u_filt[:, j]
 
         # Strain: ∂ūᵢ/∂xⱼ = type-2(i·kⱼ·û_filt_i).  (page views hoisted out of `@.`, which would
@@ -149,7 +155,6 @@ function FIT.nufft_coarse_graining_flux!(
         @. ws.spec = im * ws.k_comp_grids[j] * ûfi
         FINUFFT.finufft_exec!(ws.p2, ws.spec, ws.scat_out)
         @. ws.prod_r = real(ws.scat_out)                          # ∂ūᵢ/∂xⱼ (reuse prod_r)
-        S̄ij = view(ws.S̄, :, i, j)
         if i == j
             S̄ij .= ws.prod_r
         else
@@ -162,9 +167,13 @@ function FIT.nufft_coarse_graining_flux!(
 
         factor = i == j ? FT(1) : FT(2)
         @. ws.Π -= factor * τij * S̄ij
-        if i != j                                                  # mirror the symmetric entries
-            @views ws.τ[:, j, i] .= τij
-            @views ws.S̄[:, j, i] .= S̄ij
+        if ws.τ !== nothing
+            @views ws.τ[:, i, j] .= τij
+            @views ws.S̄[:, i, j] .= S̄ij
+            if i != j                                              # mirror the symmetric entries
+                @views ws.τ[:, j, i] .= τij
+                @views ws.S̄[:, j, i] .= S̄ij
+            end
         end
     end
     mean_Π = FT(sum(ws.Π) / N)
@@ -211,7 +220,8 @@ function FIT._nufft_coarse_graining_flux(
     tol::Real = 1e-8,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    ws = FIT._nufft_cg_workspace(FIT.Types.FINUFFTBackend(), scatter_coords, ms; Ls = Ls, tol = tol, execution = execution)
+    ws = FIT._nufft_cg_workspace(FIT.Types.FINUFFTBackend(), scatter_coords, ms;
+                                 Ls = Ls, tol = tol, return_diagnostics = return_diagnostics, execution = execution)
     return FIT.nufft_coarse_graining_flux!(
         ws, velocity_fields, ℓ, filter, ms; return_diagnostics = return_diagnostics)
 end
@@ -219,14 +229,6 @@ end
 # ---------------------------------------------------------------------------
 # NUFFT helpers
 # ---------------------------------------------------------------------------
-
-function _build_k_component_nufft(ks_1d, d::Int, ms::Tuple)
-    kc = zeros(eltype(ks_1d[d]), ms...)
-    for I in CartesianIndices(ms)
-        kc[I] = ks_1d[d][I[d]]
-    end
-    return kc
-end
 
 # Plan + buffers for `to_spectral`, dispatched on the execution backend so the provider stays the same
 # whether the transform runs on the host (this method) or an NVIDIA GPU (the cuFINUFFT extension). Host
@@ -289,7 +291,7 @@ function FIT._to_spectral_workspace(::FIT.Types.FINUFFTBackend, scatter_coords::
         (FT.(scatter_coords[d]) .- cmin) ./ Lused[d] .* (2 * FT(π))
     end
     (plan, coords, û, scat, spec) = FIT._finufft_ts_build(execution, ms, tol, scaled, CT, ncomponents, N)
-    return FIT.NUFFTToSpectralWorkspace(plan, coords, ks, û, scat, spec, N, one(FT) / FT(N))
+    return FIT.NUFFTToSpectralWorkspace(plan, coords, ks, û, scat, spec, N, one(FT) / FT(N), execution)
 end
 
 function FIT.to_spectral!(ws::FIT.NUFFTToSpectralWorkspace{<:FINUFFT.finufft_plan}, velocity_fields::Tuple)

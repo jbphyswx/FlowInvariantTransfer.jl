@@ -1,9 +1,10 @@
 module ShellBinning
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ComputationalBackends: ComputationalBackends
 
-export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate, max_shell_coordinate
 
 # ---------------------------------------------------------------------------
 # Shell coordinate — the per-mode scalar the shells partition (set by geometry)
@@ -19,9 +20,7 @@ all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
 function shell_coordinate(g::Types.ShellMagnitude, ks)
     nd   = length(ks)
     ns   = ntuple(d -> length(ks[d]), nd)
-    dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
-    all(d -> 1 <= d <= nd, dims) || throw(ArgumentError(
-        "ShellMagnitude dims=$(g.dims) out of range for nd=$nd spatial dimensions."))
+    dims = _shell_dims(g, nd)
     FT  = float(eltype(ks[1]))
     out = Array{FT}(undef, ns...)
     @inbounds for I in CartesianIndices(ns)
@@ -33,6 +32,32 @@ function shell_coordinate(g::Types.ShellMagnitude, ks)
         out[I] = sqrt(s)
     end
     return out
+end
+
+function _shell_dims(g::Types.ShellMagnitude, nd::Int)
+    dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
+    all(d -> 1 <= d <= nd, dims) || throw(ArgumentError(
+        "ShellMagnitude dims=$(g.dims) out of range for nd=$nd spatial dimensions."))
+    return dims
+end
+
+"""
+    max_shell_coordinate(geometry, ks) -> Real
+
+`maximum(shell_coordinate(geometry, ks))` without building the grid. The axes are independent, so
+the maximum of `√(Σ_d k_d²)` over a tensor grid is `√(Σ_d max_d k_d²)` — `O(nd)` where materialising
+the magnitude grid to take its maximum is `O(Nᴰ)`. Equal on the full and half layouts, so shell edges
+built from it do not depend on how the field is stored.
+"""
+function max_shell_coordinate(g::Types.ShellMagnitude, ks)
+    nd = length(ks)
+    FT = float(eltype(ks[1]))
+    s = zero(FT)
+    for d in _shell_dims(g, nd)
+        kd = FT(SpectralLayout.max_abs(ks[d]))
+        s += kd * kd
+    end
+    return sqrt(s)
 end
 
 # ---------------------------------------------------------------------------
@@ -125,16 +150,15 @@ representation used by every transfer accumulation kernel.
 """
 function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
     idx  = similar(k_mag, Int)
-    fill!(idx, 0)
     N_sh = length(edges) - 1
-    for I in CartesianIndices(k_mag)
-        k = k_mag[I]
-        for n in 1:N_sh
-            if edges[n] <= k < edges[n+1]
-                idx[I] = n
-                break
-            end
-        end
+    # `searchsortedlast` on sorted edges returns the last `n` with `edges[n] ≤ k`, which IS the
+    # half-open bin `[edges[n], edges[n+1])`: `k ≥ edges[end]` gives `N_sh+1` and `k < edges[1]` gives
+    # `0`, both of which fall outside `1:N_sh` and mean "no shell". Base specialises this to a closed
+    # form when `edges` is a range, so a uniform binning costs O(1) per mode and an arbitrary one
+    # O(log N_sh) — where a scan over the edges costs O(N_sh).
+    @inbounds for I in CartesianIndices(k_mag)
+        n = searchsortedlast(edges, k_mag[I])
+        idx[I] = (1 <= n <= N_sh) ? n : 0
     end
     return idx
 end

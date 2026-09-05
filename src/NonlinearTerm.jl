@@ -1,6 +1,7 @@
 module NonlinearTerm
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ..Workspaces: Workspaces
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
@@ -66,7 +67,7 @@ function compute_nonlinear_term(
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     advecting_hat = velocity_hat,
 )
     ws = Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing)
@@ -87,7 +88,7 @@ function compute_nonlinear_term!(
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     advecting_hat = velocity_hat,
 )
     # DirectSum builds the nonlinear term with scalar-indexed direct sums (a host O(N²ᴰ) reference); it
@@ -95,6 +96,7 @@ function compute_nonlinear_term!(
     # error directing to the device path rather than a cryptic scalar-indexing crash. `ComputationalBackends.is_gpu_array`
     # (the `AbstractGPUArray` trait) — NOT `!(x isa Array)`, which would misflag host non-`Array` types
     # (FixedSizeArray/StaticArray/SubArray/…); `ComputationalBackends.GPUBackend(KA.CPU())`'s host-`Array` proxy stays on the path.
+    spectral = Types.resolve_spectral(spectral)
     if spectral isa SpectralBackends.DirectSumSpectralBackend && ComputationalBackends.is_gpu_array(velocity_hat)
         throw(ArgumentError(
             "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot run on " *
@@ -135,20 +137,101 @@ _compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.FFTSpectralBac
 # retained band |k|<N/3 contaminated. We therefore (a) skip dealiased input modes when
 # building u and ∇u, and (b) still zero the output above the cutoff for a clean N̂.
 
-"""
-    _is_dealiased(I, ns, nd) -> Bool
+# ---------------------------------------------------------------------------
+# Individual legs of the nonlinear term.
+#
+# `𝒩 = Σ_j u_j ∂_j f` factors into: synthesise the advecting velocity, accumulate the advection,
+# transform forward. A caller whose advected field is ONE Fourier mode (mode-to-mode's giver) knows
+# `∂_j f` analytically — it is a plane wave — and needs only the first and third legs. The advecting
+# velocity is the same for every giver, so it is synthesised once for the whole loop.
+# ---------------------------------------------------------------------------
 
-`true` if Fourier mode `I` lies in the 2/3-rule discard zone (|k_d| ≥ N_d/3 along any
-dimension `d`), in FFTW index order.
+_nlt_synth_advecting_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+_nlt_forward_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+
 """
-@inline function _is_dealiased(I::CartesianIndex, ns, nd::Int)
-    @inbounds for d in 1:nd
-        idx0  = I[d] - 1
-        k_abs = idx0 <= ns[d] ÷ 2 ? idx0 : ns[d] - idx0
-        k_abs >= ns[d] ÷ 3 && return true
+    nlt_synth_advecting!(ws, advecting_hat, ks, spectral; truncate=true) -> ws.u_phys
+
+Physical advecting velocity `u_j(x) = Σ_k û_j e^{ik·x}` into `ws.u_phys` — the first leg of the
+nonlinear term on its own, for drivers that hold the advecting field fixed across an outer loop.
+"""
+nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.FFTSpectralBackend; truncate::Bool = true) =
+    _nlt_synth_advecting_fft!(ws, advecting_hat, ks, truncate)
+
+function nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.DirectSumSpectralBackend;
+                              truncate::Bool = true)
+    nd = length(ks); ns = SpectralLayout.full_size(ks)
+    for j in 1:nd
+        û_j = selectdim(advecting_hat, nd + 1, j)
+        for phys_I in CartesianIndices(ns)
+            ws.u_phys[phys_I, j] = _direct_synth(û_j, ks, phys_I, truncate, I -> true)
+        end
     end
-    return false
+    return ws.u_phys
 end
+
+"""
+    nlt_forward!(ws, ks, spectral; truncate=true) -> ws.N̂
+
+`𝒩̂ = DFT(ws.N_phys)/Nᵈ`, zeroed above the dealiasing cutoff — the last leg on its own.
+"""
+nlt_forward!(ws, ks, ::SpectralBackends.FFTSpectralBackend; truncate::Bool = true) =
+    _nlt_forward_fft!(ws, ks, truncate)
+
+function nlt_forward!(ws, ks, ::SpectralBackends.DirectSumSpectralBackend; truncate::Bool = true)
+    nd = length(ks)
+    ns = SpectralLayout.full_size(ks); ms = SpectralLayout.spectral_size(ks)
+    M  = size(ws.N̂, nd + 1); FT = real(eltype(ws.N̂))
+    Np = prod(ns)
+    for comp in 1:M
+        N̂_c = selectdim(ws.N̂, nd + 1, comp)
+        Nc  = selectdim(ws.N_phys, nd + 1, comp)
+        for spec_I in CartesianIndices(ms)
+            if truncate && _is_dealiased(ks, spec_I)
+                N̂_c[spec_I] = zero(eltype(ws.N̂))
+                continue
+            end
+            val = zero(complex(FT))
+            @inbounds for phys_I in CartesianIndices(ns)
+                phase = zero(FT)
+                for d in 1:nd
+                    phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                             FT(phys_I[d] - 1) / FT(ns[d])
+                end
+                val += Nc[phys_I] * exp(-im * phase)
+            end
+            N̂_c[spec_I] = val / FT(Np)
+        end
+    end
+    return ws.N̂
+end
+
+# Synthesis of one component at one physical point, with `kfac` multiplying each mode's coefficient.
+@inline function _direct_synth(û_c, ks, phys_I, truncate::Bool, kfac)
+    nd = length(ks); ns = SpectralLayout.full_size(ks); ms = SpectralLayout.spectral_size(ks)
+    FT = real(eltype(û_c))
+    val = zero(complex(FT))
+    @inbounds for spec_I in CartesianIndices(ms)
+        truncate && _is_dealiased(ks, spec_I) && continue
+        phase = zero(FT)
+        for d in 1:nd
+            phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                     FT(phys_I[d] - 1) / FT(ns[d])
+        end
+        val += SpectralLayout.hermitian_weight(ks, spec_I) * kfac(spec_I) * û_c[spec_I] * exp(im * phase)
+    end
+    return real(val)
+end
+
+"""
+    _is_dealiased(ks, I) -> Bool
+
+`true` if Fourier mode `I` lies in the 2/3-rule discard zone (|k_d| ≥ N_d/3 along any dimension `d`).
+Reads the wavenumber from `ks`, so it holds for both spectral layouts.
+"""
+@inline _is_dealiased(ks::Tuple, I::CartesianIndex) = SpectralLayout.is_dealiased(ks, I)
 
 # ---------------------------------------------------------------------------
 # Direct-sum reference implementation
@@ -180,101 +263,78 @@ function _compute_nonlinear_term_direct!(
     advecting_hat = velocity_hat,
 )
     nd  = length(ks)
-    ns  = size(velocity_hat)[1:nd]
+    ns  = SpectralLayout.full_size(ks)        # physical grid
+    ms  = SpectralLayout.spectral_size(ks)    # coefficient grid
     M   = size(velocity_hat, nd+1)   # advected-field components (D for momentum, 1 for scalar)
     FT  = real(eltype(velocity_hat))
     Np  = prod(ns)
     phys_idxs = CartesianIndices(ns)
+    spec_idxs = CartesianIndices(ms)
 
-    fill!(ws.N̂, zero(eltype(ws.N̂)))
-
-    # u_phys  shape: (ns..., nd)   — advecting velocity, spatial directions only
-    # grad_phys shape: (ns..., M, nd)
-    # N_phys  shape: (ns..., M)
-    # Index via (phys_I..., comp) or (phys_I..., comp, grad_d)
+    # Synthesis over the stored coefficients. On the full layout every mode is stored and the weight
+    # is 1; on the half layout the unstored conjugate mode contributes the conjugate term, which is
+    # exactly the Hermitian weight (1 on the self-paired k₁ = 0 / Nyquist planes, 2 elsewhere) — so
+    # `real(Σ_stored w·û·e^{ikx})` equals `Σ_full û·e^{ikx}` in both cases.
+    @inline function _synth(f, phys_I)
+        val = zero(complex(FT))
+        @inbounds for spec_I in spec_idxs
+            truncate && _is_dealiased(ks, spec_I) && continue      # truncate input
+            phase = zero(FT)
+            for d in 1:nd
+                phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                         FT(phys_I[d] - 1) / FT(ns[d])
+            end
+            val += SpectralLayout.hermitian_weight(ks, spec_I) * f(spec_I) * exp(im * phase)
+        end
+        return real(val)
+    end
 
     # --- (advecting) uⱼ(x_p) = IDFT(û_adv), j = 1:nd (only the advecting directions) ---
+    # Synthesis is unnormalized (physical u = Σ_k û e^{ik·x}); û already carries the 1/Nᵈ.
     for j in 1:nd
         û_j = selectdim(advecting_hat, nd+1, j)
         for phys_I in phys_idxs
-            val = zero(complex(FT))
-            for spec_I in CartesianIndices(ns)
-                truncate && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
-                phase = zero(FT)
-                for d in 1:nd
-                    xj    = FT(phys_I[d] - 1) / FT(ns[d])
-                    kidx  = spec_I[d] - 1
-                    km    = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
-                    phase += FT(2π) * km * xj
-                end
-                val += û_j[spec_I] * exp(im * phase)
-            end
-            # IDFT synthesis is unnormalized (physical u = Σ_k û e^{ik·x}); û already carries the 1/Nᵈ.
-            ws.u_phys[phys_I, j] = real(val)
+            ws.u_phys[phys_I, j] = _synth(I -> û_j[I], phys_I)
         end
     end
 
-    # --- ∂fᵢ/∂xⱼ(x_p) = IDFT(i·kⱼ·f̂ᵢ),  i = 1:M advected components ---
+    # --- 𝒩ᵢ = Σⱼ uⱼ ∂fᵢ/∂xⱼ, streaming one gradient at a time through ws.g_phys ---
     for comp in 1:M
         û_c = selectdim(velocity_hat, nd+1, comp)
+        Nc  = selectdim(ws.N_phys, nd+1, comp)
+        fill!(Nc, zero(FT))
         for grad_d in 1:nd
+            # `derivative_wavenumber`, matching the FFT engine: the grid derivative along `grad_d`
+            # vanishes at that axis's Nyquist mode.
             for phys_I in phys_idxs
-                val = zero(complex(FT))
-                for spec_I in CartesianIndices(ns)
-                    truncate && _is_dealiased(spec_I, ns, nd) && continue  # truncate input
-                    kphys = ks[grad_d][spec_I[grad_d]]
-                    phase = zero(FT)
-                    for d in 1:nd
-                        xj   = FT(phys_I[d] - 1) / FT(ns[d])
-                        kidx = spec_I[d] - 1
-                        km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
-                        phase += FT(2π) * km * xj
-                    end
-                    val += (im * kphys) * û_c[spec_I] * exp(im * phase)
-                end
-                # IDFT synthesis is unnormalized (∂f = Σ_k i k f̂ e^{ik·x}); û already carries the 1/Nᵈ.
-                ws.grad_phys[phys_I, comp, grad_d] = real(val)
+                ws.g_phys[phys_I] = _synth(
+                    I -> (im * FT(SpectralLayout.derivative_wavenumber(ks[grad_d], I[grad_d]))) * û_c[I],
+                    phys_I)
             end
+            uj = selectdim(ws.u_phys, nd+1, grad_d)
+            Nc .+= uj .* ws.g_phys
         end
     end
 
-    # --- 𝒩ᵢ(x_p) = Σⱼ u_j · ∂fᵢ/∂xⱼ ---
-    for comp in 1:M
-        for phys_I in phys_idxs
-            s = zero(FT)
-            for j in 1:nd
-                s += ws.u_phys[phys_I, j] * ws.grad_phys[phys_I, comp, j]
-            end
-            ws.N_phys[phys_I, comp] = s
-        end
-    end
-
-    # --- 𝒩̂ᵢ(k) = DFT(𝒩ᵢ) ---
+    # --- 𝒩̂ᵢ(k) = DFT(𝒩ᵢ), zeroed above the 2/3 cutoff ---
     for comp in 1:M
         N̂_c = selectdim(ws.N̂, nd+1, comp)
-        for spec_I in CartesianIndices(ns)
+        Nc  = selectdim(ws.N_phys, nd+1, comp)
+        for spec_I in spec_idxs
+            if truncate && _is_dealiased(ks, spec_I)
+                N̂_c[spec_I] = zero(eltype(ws.N̂))
+                continue
+            end
             val = zero(complex(FT))
-            for phys_I in phys_idxs
+            @inbounds for phys_I in phys_idxs
                 phase = zero(FT)
                 for d in 1:nd
-                    xj   = FT(phys_I[d] - 1) / FT(ns[d])
-                    kidx = spec_I[d] - 1
-                    km   = 2 * kidx < ns[d] ? kidx : kidx - ns[d]
-                    phase += FT(2π) * km * xj
+                    phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                             FT(phys_I[d] - 1) / FT(ns[d])
                 end
-                val += ws.N_phys[phys_I, comp] * exp(-im * phase)
+                val += Nc[phys_I] * exp(-im * phase)
             end
             N̂_c[spec_I] = val / FT(Np)
-        end
-    end
-
-    # --- zero output above the 2/3 cutoff (inputs already truncated above) ---
-    if truncate
-        for I in CartesianIndices(ns)
-            _is_dealiased(I, ns, nd) || continue
-            for comp in 1:M
-                ws.N̂[I, comp] = zero(eltype(ws.N̂))
-            end
         end
     end
 

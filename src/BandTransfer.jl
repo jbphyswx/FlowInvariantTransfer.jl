@@ -1,6 +1,7 @@
 module BandTransfer
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -84,11 +85,11 @@ function calculate_band_to_band_transfer!(
     T, net, bws::BandTransferWorkspace, velocity_hat, ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
     # Fill the transfer matrix (one nonlinear term per band m → column T[·,m]), dispatched on execution.
@@ -125,7 +126,7 @@ function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::Band
         for n in 1:nb
             s = zero(FT)
             for I in CartesianIndices(ns)
-                s += W[n][I] * d[I]
+                s += SpectralLayout.hermitian_weight(ks, I) * W[n][I] * d[I]
             end
             T[n, m] = s
         end
@@ -165,12 +166,12 @@ function calculate_band_to_band_transfer(
     bands::Types.SmoothBands,
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     FT = real(eltype(velocity_hat))
     nb = length(bands.centers)
     bws = BandTransferWorkspace(velocity_hat, ks, bands; geometry=geometry)
@@ -198,11 +199,11 @@ function calculate_band_to_band_transfer_batch(
     bands::Types.SmoothBands,
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     n       = length(velocity_hats)
     FT      = real(eltype(first(velocity_hats)))
     nb      = length(bands.centers)

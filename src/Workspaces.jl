@@ -2,6 +2,7 @@ module Workspaces
 
 using ..Types: Types
 using ..ShellBinning: ShellBinning
+using ..SpectralLayout: SpectralLayout
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
@@ -27,25 +28,35 @@ Preallocated buffers for the generalized pseudospectral nonlinear term
 components and the advected field `f` has `M` components. For the momentum term `f = u`
 (`M = D`); for passive-scalar / vector-potential advection `f = θ`/`a` (`M = 1`).
 
+Physical-space buffers are sized `ns`, the grid the field lives on; the spectral buffer is sized
+`ms`, the shape of the coefficient array. The two differ on the half (real-field) layout, where
+`ms₁ = ns₁÷2+1` — see [`SpectralLayout`](@ref).
+
 # Fields
-- `u_phys::RA`:    `(ns..., nd)` real physical-space advecting velocity (rank `nd+1`); only the
+- `u_phys::RA`:  `(ns..., nd)` real physical-space advecting velocity (rank `nd+1`); only the
   `nd` spatial directions of the velocity participate in `(u·∇)`, so this never depends on `D`.
-- `grad_phys::GA`: `(ns..., M, nd)` real physical-space gradients ∂f_i/∂x_j (rank `nd+2`).
-- `N_phys::RA`:    `(ns..., M)` real physical-space nonlinear term (rank `nd+1`).
-- `N̂::CA`:         `(ns..., M)` complex spectral output buffer (rank `nd+1`).
-- `plans::P`:      FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
+- `g_phys::GA`:  `(ns...)` real physical-space gradient `∂f_i/∂x_j` for the direction pair being
+  accumulated (rank `nd`); each `(i,j)` is transformed, multiplied into `N_phys` and discarded, so
+  one buffer serves all `M·nd` pairs.
+- `N_phys::RA`:  `(ns..., M)` real physical-space nonlinear term (rank `nd+1`).
+- `N̂::CA`:       `(ms..., M)` complex spectral output buffer (rank `nd+1`).
+- `phase::PH`:   `nd` complex vectors, `phase[d]` of length `ns[d]`, holding the per-axis factors of a
+  single mode's plane wave `e^{ip·x}`. Written by the mode-to-mode giver, which evaluates that mode's
+  gradient in closed form; `Σ_d n_d` numbers against the `(ns…)` grids above.
+- `plans::P`:    FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
 
 Parametric on the concrete array types `CA` (complex), `RA` (real, rank `nd+1`), `GA`
-(real gradient buffer, rank `nd+2`), and the plan-bundle type `P` — no element-type bounds,
-and each field is concretely typed (`grad_phys` has a separate parameter because its rank
-differs from the others; `u_phys` and `N_phys` share `RA` — same rank/eltype, possibly
-different trailing extent).
+(real gradient buffer, rank `nd`), and the plan-bundle type `P` — no element-type bounds, and each
+field is concretely typed (`g_phys` has a separate parameter because its rank differs from the
+others; `u_phys` and `N_phys` share `RA` — same rank/eltype, possibly different trailing extent).
 """
-struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray, P}
+struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray,
+                              PH<:AbstractVector, P}
     u_phys::RA
-    grad_phys::GA
+    g_phys::GA
     N_phys::RA
     N̂::CA
+    phase::PH
     plans::P
 end
 
@@ -53,7 +64,7 @@ end
     NonlinearTermWorkspace(advected_hat, ks)
 
 Construct a `NonlinearTermWorkspace` sized for advecting an `M`-component field `advected_hat`
-(shape `(ns..., M)`) by a velocity, on wavenumber tuple `ks` (length `nd`). The advecting
+(shape `(ms..., M)`) by a velocity, on wavenumber tuple `ks` (length `nd`). The advecting
 velocity needs only its `nd` spatial components, so `u_phys` is `(ns..., nd)` regardless of how
 many components the velocity carries. For the momentum self-advection term pass the velocity
 itself (`M = D`). When FFTW is loaded, `plans` is populated with pre-planned transforms; pass the
@@ -64,18 +75,24 @@ function NonlinearTermWorkspace(advected_hat, ks; dealiasing::Types.AbstractDeal
                                 fft_nthreads::Int = 1)
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
-    ns  = size(advected_hat)[1:nd]
+    ns  = SpectralLayout.full_size(ks)            # physical grid
+    ms  = SpectralLayout.spectral_size(ks)        # coefficient grid
     M   = size(advected_hat, nd + 1)              # advected-field component count
+    size(advected_hat)[1:nd] == ms || throw(DimensionMismatch(
+        "field spatial size $(size(advected_hat)[1:nd]) does not match the wavenumber grid $ms."))
     # `similar` propagates the array kind (CPU Array, CuArray, …) — GPU-generic.
-    u_phys    = similar(advected_hat, FT, ns..., nd)    # advecting velocity, spatial dirs only
-    grad_phys = similar(advected_hat, FT, ns..., M, nd)
-    N_phys    = similar(advected_hat, FT, ns..., M)
-    N̂         = similar(advected_hat, ns..., M)         # keeps complex eltype
+    u_phys = similar(advected_hat, FT, ns..., nd)      # advecting velocity, spatial dirs only
+    g_phys = similar(advected_hat, FT, ns...)          # one streamed gradient ∂f_i/∂x_j
+    N_phys = similar(advected_hat, FT, ns..., M)
+    N̂      = similar(advected_hat, ms..., M)           # keeps complex eltype
+    # Per-axis plane-wave factors for the single-mode giver. A `Vector` of vectors, so `phase[d]` with
+    # a runtime `d` stays inferred; every element has the same concrete type.
+    phase  = [similar(advected_hat, ns[d]) for d in 1:nd]
     # `fft_nthreads` bakes FFTW's per-transform thread count into the plans: 1 for the loop-heavy /
     # serial paths (the outer loop provides the parallelism, 0-alloc), and `Threads.nthreads()` for a
     # single-field method (spectral flux) whose only parallel axis IS the transform.
-    plans     = _make_fft_plans(advected_hat, ks, dealiasing, fft_nthreads)
-    return NonlinearTermWorkspace(u_phys, grad_phys, N_phys, N̂, plans)
+    plans  = _make_fft_plans(advected_hat, ks, dealiasing, fft_nthreads)
+    return NonlinearTermWorkspace(u_phys, g_phys, N_phys, N̂, phase, plans)
 end
 
 # ---------------------------------------------------------------------------
@@ -109,11 +126,10 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
                                geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
                                fft_nthreads::Int = 1)
-    k_mag  = ShellBinning.shell_coordinate(geometry, ks)
-    edges  = ShellBinning.shell_edges(binning, maximum(k_mag))
+    edges  = ShellBinning.shell_edges(binning, ShellBinning.max_shell_coordinate(geometry, ks))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
-    ns     = size(velocity_hat)[1:length(ks)]
+    ns     = SpectralLayout.spectral_size(ks)
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing, fft_nthreads=fft_nthreads),
         similar(velocity_hat, FT, N_sh),     # T_spec
@@ -162,10 +178,13 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds())
     FT        = real(eltype(velocity_hat))
     k_mag     = ShellBinning.shell_coordinate(geometry, ks)
-    edges     = ShellBinning.shell_edges(binning, maximum(k_mag))
+    edges     = ShellBinning.shell_edges(binning, ShellBinning.max_shell_coordinate(geometry, ks))
     N_sh      = length(edges) - 1
-    shell_idx = ShellBinning.assign_shells(k_mag, edges)
-    ns        = size(velocity_hat)[1:length(ks)]
+    ns        = SpectralLayout.spectral_size(ks)
+    # On the field's own array kind: the shell index is a constant of the workspace, so a device-resident
+    # field carries a device-resident index grid and the reduction kernels read it directly.
+    shell_idx = similar(velocity_hat, Int, ns...)
+    copyto!(shell_idx, ShellBinning.assign_shells(k_mag, edges))
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
         similar(velocity_hat),                   # û_m

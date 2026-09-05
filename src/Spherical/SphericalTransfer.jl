@@ -45,7 +45,7 @@ end
 # The transform machinery (analysis/synthesis, eth gradients) lives in the extensions:
 # FastSphericalHarmonics for regular colatitude–longitude grids; NUFSHT for scattered points.
 # Both share the reduction below by flattening their coefficients to per-mode arrays.
-# (Augier–Lindborg 2013; Boer 1983; see THEORY.md §"Spherical spectral transfer".)
+# (Augier–Lindborg 2013; Boer 1983.)
 # ---------------------------------------------------------------------------
 
 """
@@ -258,7 +258,16 @@ therefore just carries the reused [`DivergentSphericalTransferResult`](@ref) and
 parameters. Fields are typed via parameters so the core names no extension type. Requires
 `using FastSphericalHarmonics`.
 """
-struct DivergentSphericalTransferWorkspace{RES, R}
+struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC}
+    uθw::RW          # (lwork) velocity components on the work grid
+    uφw::RW
+    ζw::RW           # (lwork) vorticity / divergence on the work grid
+    δw::RW
+    K::RW            # (lwork) kinetic energy ½|u|²
+    Adv::CW          # (lwork) complex spin+1 advection A = ∇K + (iζ + ½δ)U₊
+    Cw1::CW          # (lwork) spin+1 embed target
+    Cw0::RW          # (lwork) spin-0 embed target
+    χc::RC           # (lmax) velocity-potential coefficients χ = ∇⁻²δ
     result::RES      # reused Types.DivergentSphericalTransferResult
     radius::R
     lmax::Int
