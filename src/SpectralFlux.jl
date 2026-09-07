@@ -11,7 +11,7 @@ using ..Utils: Utils
 using ..NonlinearTerm: NonlinearTerm
 using ..Workspaces: Workspaces
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_partial_fluxes_batch, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -397,6 +397,39 @@ function calculate_partial_fluxes(velocity_hat, ks; kwargs...)
     ws = Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
     return calculate_partial_fluxes!(ws, velocity_hat, ks; kwargs...)
 end
+
+"""
+    calculate_partial_fluxes_batch(velocity_hats, ks; execution, kwargs...) -> Vector
+
+Decomposition-channel fluxes for a batch of snapshots sharing one grid. One nonlinear-term workspace is
+reused across a worker's snapshots (the same workspace the single-snapshot form builds once and threads
+through all `n³` channel pairs). `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads
+over snapshots with a serial inner transform. Results are in input order.
+"""
+function calculate_partial_fluxes_batch(
+    velocity_hats, ks;
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    kwargs...,
+)
+    length(velocity_hats) == 0 && return NamedTuple[]
+    return _partial_fluxes_batch!(Types.resolve_execution(execution), velocity_hats, ks; kwargs...)
+end
+
+function _partial_fluxes_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_hats, ks; kwargs...)
+    ws = Workspaces.NonlinearTermWorkspace(first(velocity_hats), ks)
+    return [calculate_partial_fluxes!(ws, vh, ks; kwargs...) for vh in velocity_hats]
+end
+
+function _partial_fluxes_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the partial-flux batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_partial_fluxes_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_hats, ks; kwargs...) =
+    _partial_fluxes_batch_threaded!(velocity_hats, ks; kwargs...)
+
+_partial_fluxes_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_hats, ks; kwargs...) =
+    throw(ArgumentError("calculate_partial_fluxes_batch supports SerialBackend() and ThreadedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 """
     calculate_partial_fluxes!(ws::NonlinearTermWorkspace, velocity_hat, ks; kwargs...)

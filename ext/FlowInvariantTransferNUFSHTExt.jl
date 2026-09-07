@@ -48,6 +48,7 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
     T::Type = Float64,
+    quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     θ, φ = coords
@@ -55,9 +56,16 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     lwork = dealias ? 2 * lmax : lmax
-    M ≥ (lwork + 1)^2 || throw(ArgumentError(
-        "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
-        "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    # The point count below is what the least-squares fit needs to determine `(lwork+1)²` coefficients.
+    # A quadrature determines them in one adjoint transform, at whatever count the rule is exact for.
+    if quadrature_weights === nothing
+        M ≥ (lwork + 1)^2 || throw(ArgumentError(
+            "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
+            "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    else
+        length(quadrature_weights) == M || throw(ArgumentError(
+            "quadrature_weights has length $(length(quadrature_weights)) for $M nodes."))
+    end
     FT = float(T)
     CT = Complex{FT}
 
@@ -88,9 +96,12 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
         zeros(FT, lmax + 1), zeros(FT, lmax + 1))
 
+    # Weights follow the coordinate array type, so a device point set keeps the whole analysis on device.
+    qw = quadrature_weights === nothing ? nothing : copyto!(similar(θ, FT, M), quadrature_weights)
+
     return FIT.Spherical.ScatteredSphericalTransferWorkspace(
         plan0, plan1, plan0w, ζ_lm, ψ_lm, ðψ, ðζ, A_lw, Gψ, Gζ, ζdata, Jc,
-        degcol, Pr, Tcol, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+        degcol, Pr, Tcol, qw, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
 end
 
 # `nusht_solve_spin!` returns `(C, iterations, residual, converged)`. The least-squares fit at scattered
@@ -98,6 +109,28 @@ end
 # threaded NUFFT spreading underneath it is not bitwise reproducible, and an unconverged solve
 # amplifies that by roughly `cond(A)²`, so two identical calls can disagree far above `rtol`. Reporting
 # the residual is what separates "this answer is at rtol" from "this answer is noise".
+"""
+    _analyze!(C, f, plan, qw, what; rtol, maxiter) -> C
+
+Spin-weighted coefficients of `f` at the plan's nodes.
+
+With per-node quadrature weights `qw` summing to `4π`, the coefficients are the projection
+`Σⱼ wⱼ fⱼ conj(ₛYℓm(xⱼ))`, which `nusht_type1_spin!` evaluates once the weights are folded into the
+field — exact for a rule that integrates the degree-`2·lwork` integrand, and one transform. `f` holds
+this call's input only, so the weighting scales it in place.
+
+With `qw === nothing` the nodes carry no such rule and the coefficients come from the least-squares
+fit, whose convergence is reported.
+"""
+_analyze!(C, f, plan, ::Nothing, what::String; rtol, maxiter) =
+    _solve_checked!(C, f, plan, what; rtol = rtol, maxiter = maxiter)
+
+function _analyze!(C, f, plan, qw::AbstractVector, what::String; rtol, maxiter)
+    f .*= qw
+    NUFSHT.nusht_type1_spin!(C, f, plan)
+    return C
+end
+
 function _solve_checked!(C, f, plan, what::String; rtol, maxiter)
     _, iters, residual, converged = NUFSHT.nusht_solve_spin!(C, f, plan; rtol = rtol, maxiter = maxiter)
     converged || @warn(
@@ -123,7 +156,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
     # Analyse ζ → spin-0 coefficients (CG solve reuses ws.ζ_lm, points preset in plan0).
     ws.ζdata .= vorticity
     fill!(ws.ζ_lm, zero(CT))
-    _solve_checked!(ws.ζ_lm, ws.ζdata, ws.plan0, "vorticity"; rtol = ws.rtol, maxiter = ws.maxiter)
+    _analyze!(ws.ζ_lm, ws.ζdata, ws.plan0, ws.qw, "vorticity"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # ψ = ∇⁻²ζ and the eth ladder → spin-1 gradient coefficients, as row-broadcasts over the
     # (degree = row, m = column) coefficient matrices — device-generic, no scalar indexing. ℓ(ℓ+1) is a
@@ -143,7 +176,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
 
     # Analyse A at degree lwork (dealiased).
     fill!(ws.A_lw, zero(CT))
-    _solve_checked!(ws.A_lw, ws.Jc, ws.plan0w, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
+    _analyze!(ws.A_lw, ws.Jc, ws.plan0w, ws.qw, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # Per-degree transfer = sum over m (matrix columns). A_lw (degree lwork) aligns to the lmax layout by a
     # contiguous column slice (m offset lwork−lmax); |m|>ℓ corners are 0 (ζ/ψ/A = 0), so the full row-sum
@@ -170,6 +203,7 @@ function FIT.calculate_energy_transfer(
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
     spectral = nothing,
+    quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
 )
@@ -179,7 +213,8 @@ function FIT.calculate_energy_transfer(
         "vorticity and both coordinate vectors must have equal length; got $((M, length(coords[1]), length(coords[2])))."))
     ws = FIT.Spherical.ScatteredSphericalTransferWorkspace(
         coords, lmax; radius = float(method.radius), dealias = dealias,
-        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)), execution = execution)
+        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)),
+        quadrature_weights = quadrature_weights, execution = execution)
     return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
 end
 
@@ -209,6 +244,7 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
     T::Type = Float64,
+    quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     θ, φ = coords
@@ -216,9 +252,14 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     lwork = dealias ? 2 * lmax : lmax
-    M ≥ (lwork + 1)^2 || throw(ArgumentError(
-        "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
-        "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    if quadrature_weights === nothing
+        M ≥ (lwork + 1)^2 || throw(ArgumentError(
+            "need M ≥ (2·lmax+1)² = $((lwork+1)^2) scattered points for the dealiased degree-$(lwork) solve; got M=$M. " *
+            "Use equidistributed (e.g. spherical-Fibonacci) points for well-conditioned coefficient recovery."))
+    else
+        length(quadrature_weights) == M || throw(ArgumentError(
+            "quadrature_weights has length $(length(quadrature_weights)) for $M nodes."))
+    end
     FT = float(T)
     CT = Complex{FT}
 
@@ -249,9 +290,11 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
         zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1))
 
+    qw = quadrature_weights === nothing ? nothing : copyto!(similar(θ, FT, M), quadrature_weights)
+
     return FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         planp, planm, plan0, plan0w, planpw, ap, am, sym, anti, ζc, δc, Khat, Adv_lm,
-        Up, Um, ζv, δv, Kv, gradK, Advv, ladl, ladw, Pr, Tcol, result,
+        Up, Um, ζv, δv, Kv, gradK, Advv, ladl, ladw, Pr, Tcol, qw, result,
         FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
 end
 
@@ -269,8 +312,8 @@ function FIT.calculate_divergent_spherical_transfer!(
     # Spin ±1 coefficients of U₊ = u_θ + i u_φ and U₋ = u_θ − i u_φ; rotational/divergent split.
     @. ws.Up = u_θ + im * u_φ
     @. ws.Um = u_θ - im * u_φ
-    fill!(ws.ap, zero(CT)); _solve_checked!(ws.ap, ws.Up, ws.planp, "velocity spin+1"; rtol = ws.rtol, maxiter = ws.maxiter)
-    fill!(ws.am, zero(CT)); _solve_checked!(ws.am, ws.Um, ws.planm, "velocity spin−1"; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.ap, zero(CT)); _analyze!(ws.ap, ws.Up, ws.planp, ws.qw, "velocity spin+1"; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.am, zero(CT)); _analyze!(ws.am, ws.Um, ws.planm, ws.qw, "velocity spin−1"; rtol = ws.rtol, maxiter = ws.maxiter)
     @. ws.sym  = (ws.ap + ws.am) / 2
     @. ws.anti = (ws.ap - ws.am) / 2
 
@@ -283,15 +326,17 @@ function FIT.calculate_divergent_spherical_transfer!(
 
     # K = ½|u|² (real, held complex); analyse at the dealiased degree lwork.
     @. ws.Kv = 0.5 * (u_θ^2 + u_φ^2)
-    fill!(ws.Khat, zero(CT)); _solve_checked!(ws.Khat, ws.Kv, ws.plan0w, "kinetic energy"; rtol = ws.rtol, maxiter = ws.maxiter)
+    fill!(ws.Khat, zero(CT)); _analyze!(ws.Khat, ws.Kv, ws.plan0w, ws.qw, "kinetic energy"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # ∇K = ð K = +√(ℓ(ℓ+1)) synth_spin+1(K̂)  (reuse Khat for the ladder-scaled coefficients).
     @. ws.Khat = ws.ladw * ws.Khat
     NUFSHT.nusht_type2_spin!(ws.gradK, ws.Khat, ws.planpw)
 
     # Skew-symmetric energy-conserving advection A = ∇K + (iζ + ½δ) U₊; analyse (spin+1) at lwork.
-    @. ws.Advv = ws.gradK + (im * ws.ζv + 0.5 * ws.δv) * ws.Up
-    fill!(ws.Adv_lm, zero(CT)); _solve_checked!(ws.Adv_lm, ws.Advv, ws.planpw, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
+    # U₊ is re-formed from the components here: `ws.Up` is an analysis input, and analysis against a
+    # quadrature scales its input by the weights.
+    @. ws.Advv = ws.gradK + (im * ws.ζv + 0.5 * ws.δv) * (u_θ + im * u_φ)
+    fill!(ws.Adv_lm, zero(CT)); _analyze!(ws.Adv_lm, ws.Advv, ws.planpw, ws.qw, "advection"; rtol = ws.rtol, maxiter = ws.maxiter)
 
     # Per-degree channel reduction T_rot = Σ_m Re{sym* Â}, T_div = Σ_m Re{anti* Â} (single 1/a factor).
     # A_lm (degree lwork) aligns to the lmax layout by a centred column slice; |m|>ℓ corners are 0.
@@ -315,6 +360,7 @@ function FIT.calculate_energy_transfer(
     rtol::Real = 1e-10,
     maxiter::Integer = 4000,
     spectral = nothing,
+    quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
 )
@@ -326,7 +372,8 @@ function FIT.calculate_energy_transfer(
         "$((M, length(u_φ), length(coords[1]), length(coords[2])))."))
     ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
-        maxiter = maxiter, T = float(eltype(u_θ)), execution = execution)
+        maxiter = maxiter, T = float(eltype(u_θ)), quadrature_weights = quadrature_weights,
+        execution = execution)
     return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
 end
 

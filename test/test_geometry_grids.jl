@@ -113,3 +113,33 @@ Test.@testset "coarse-graining on a FlowGeometries grid" begin
             (_gg_u(x, y), _gg_v(x, y)), bare, ℓ, filt)
     end
 end
+
+# ---------------------------------------------------------------------------
+# The other CGEF coarse-graining diagnostics FIT surfaces. Enstrophy is one of the package's
+# invariants, so its coarse-graining flux is the physical-space counterpart of the spectral enstrophy
+# transfer; band energies are the per-band energy content the flux moves between.
+# ---------------------------------------------------------------------------
+Test.@testset "coarse-graining band energies and enstrophy flux" begin
+    N = 32; L = 2π
+    x = range(0, L; length = N + 1)[1:N]; y = copy(x)
+    X = [xi for xi in x, _ in y]; Y = [yj for _ in x, yj in y]
+    u = _gg_u(X, Y); v = _gg_v(X, Y)
+    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, y)
+    ℓ = 20 * (L / N)
+    filt = FIT.Types.GaussianFilter()
+
+    Zref = CoarseGrainingEnergyFluxes.Diagnostics.enstrophy_flux(
+        u, v, grid, CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), ℓ)
+    Test.@test maximum(abs, Zref) > 1e-8                       # the reference carries signal
+    Test.@test FIT.calculate_enstrophy_flux((u, v), (x, y), ℓ, filt) == Zref
+    Test.@test FIT.calculate_enstrophy_flux((u, v), grid, ℓ, filt) == Zref
+
+    scales = [0.3, 0.6, 1.2]
+    bref = CoarseGrainingEnergyFluxes.Diagnostics.band_energies(
+        u, v, nothing, grid, CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), scales)
+    Test.@test FIT.calculate_band_energies((u, v), (x, y), filt, scales) == bref
+    Test.@test FIT.calculate_band_energies((u, v), grid, filt, scales) == bref
+
+    # A three-component field has no vertical vorticity to build the enstrophy flux from.
+    Test.@test_throws ArgumentError FIT.calculate_enstrophy_flux((u, v, u), grid, ℓ, filt)
+end

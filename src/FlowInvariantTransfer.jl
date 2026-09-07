@@ -36,19 +36,22 @@ include("Spherical/SphericalTransfer.jl")
 # geometry/dealiasing/result TYPES, which stay reachable qualified (`FlowInvariantTransfer.LinearBinning`).
 # ---------------------------------------------------------------------------
 
-using .SpectralFlux: SpectralFlux, calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
-using .Compressible: Compressible, calculate_compressible_flux, calculate_compressible_flux!
+using .SpectralFlux: SpectralFlux, calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_partial_fluxes_batch, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+using .Compressible: Compressible, calculate_compressible_flux, calculate_compressible_flux!,
+                     calculate_compressible_flux_batch
 using .Spherical: Spherical, calculate_spherical_transfer, calculate_spherical_transfer!, calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!
-using .CoarseGrainingFlux: CoarseGrainingFlux, calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch
+using .CoarseGrainingFlux: CoarseGrainingFlux, calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch,
+                           calculate_band_energies, calculate_enstrophy_flux
 using .ShellToShellTransfer: ShellToShellTransfer, calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_shell_to_shell_transfer_batch, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 using .BandTransfer: BandTransfer, calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch
 using .ModeToModeTransfer: ModeToModeTransfer, calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
 using .TriadicOrthogonalDecomposition: TriadicOrthogonalDecomposition, triadic_orthogonal_decomposition, triadic_orthogonal_decomposition!
 
-export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
-export calculate_compressible_flux, calculate_compressible_flux!
+export calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_partial_fluxes_batch, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
+export calculate_compressible_flux, calculate_compressible_flux!, calculate_compressible_flux_batch
 export calculate_spherical_transfer, calculate_spherical_transfer!, calculate_divergent_spherical_transfer, calculate_divergent_spherical_transfer!
 export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch
+export calculate_band_energies, calculate_enstrophy_flux
 export calculate_shell_to_shell_transfer, calculate_shell_to_shell_transfer!, calculate_shell_to_shell_transfer_batch, calculate_scalar_shell_to_shell_transfer, calculate_scalar_shell_to_shell_transfer!
 export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch
 export calculate_mode_to_mode_transfer, calculate_mode_to_mode_transfer!, calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_transfer!
@@ -174,6 +177,48 @@ end
 _nufft_coarse_graining_flux(spectral, args...; kwargs...) = throw(ArgumentError(
     "nufft_coarse_graining_flux with $(nameof(typeof(spectral))) requires its extension: `using FINUFFT` " *
     "(Types.FINUFFTBackend) or `using NonuniformFFTs` (Types.NonuniformFFTsBackend)."))
+
+"""
+    nufft_coarse_graining_flux_batch(velocity_fields_batch, scatter_coords, ℓ, filter, ms;
+                                     spectral, Ls, execution, kwargs...) -> Vector
+
+Scattered coarse-graining flux for a batch of snapshots on **one** point set. The NUFFT plans and every
+buffer are built once for the whole batch — for these providers the plan is the dominant cost.
+`execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over snapshots with one
+workspace per chunk. Results are in input order and each owns its flux field.
+"""
+function nufft_coarse_graining_flux_batch(velocity_fields_batch, scatter_coords, ℓ, filter, ms;
+                                          spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+                                          Ls::Tuple,
+                                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+                                          kwargs...)
+    n = length(velocity_fields_batch)
+    n == 0 && return Types.CoarseGrainingFluxResult[]
+    return _nufft_cg_batch!(Types.resolve_execution(execution), velocity_fields_batch, scatter_coords,
+                            ℓ, filter, ms; spectral = spectral, Ls = Ls, kwargs...)
+end
+
+# Serial reference: one workspace (plans + buffers) reused across the batch. `nufft_coarse_graining_flux!`
+# wraps `ws.Π`, overwritten on the next snapshot, so each result is copied out.
+function _nufft_cg_batch!(::ComputationalBackends.AbstractSerialBackend, batch, scatter_coords, ℓ, filter, ms;
+                          spectral, Ls, return_diagnostics::Bool = false, kwargs...)
+    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; spectral = spectral, Ls = Ls,
+                                      return_diagnostics = return_diagnostics, kwargs...)
+    return [deepcopy(nufft_coarse_graining_flux!(ws, vf, ℓ, filter, ms;
+                                                 return_diagnostics = return_diagnostics))
+            for vf in batch]
+end
+
+function _nufft_cg_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the scattered coarse-graining batch requires " *
+                        "OhMyThreads. Run `using OhMyThreads` to load the extension."))
+end
+_nufft_cg_batch!(::ComputationalBackends.AbstractThreadedBackend, batch, scatter_coords, ℓ, filter, ms; kwargs...) =
+    _nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms; kwargs...)
+
+_nufft_cg_batch!(be::ComputationalBackends.AbstractExecutionBackend, batch, scatter_coords, ℓ, filter, ms; kwargs...) =
+    throw(ArgumentError("nufft_coarse_graining_flux_batch supports SerialBackend() and ThreadedBackend(); " *
+                        "got execution = $(typeof(be))."))
 
 """
     NUFFTCoarseGrainingWorkspace(scatter_coords, ms; tol=1e-8)
@@ -402,7 +447,8 @@ function to_spectral!(args...; kwargs...)
     throw(ArgumentError("to_spectral! requires a NUFFT extension: `using FINUFFT` or `using NonuniformFFTs`."))
 end
 
-export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, NUFFTCoarseGrainingWorkspace
+export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, nufft_coarse_graining_flux_batch,
+       NUFFTCoarseGrainingWorkspace
 export ToSpectralWorkspace
 export NUFFTToSpectralWorkspace, to_spectral!
 
@@ -542,8 +588,9 @@ Pass a scalar (density / pressure / passive scalar) as a 1-tuple: `ρ̂, _ = to_
 """
 function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
                      spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-                     real_layout::Bool = eltype(velocity_fields[1]) <: Real)
-    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; spectral = spectral, real_layout = real_layout)
+                     real_layout::Bool = eltype(velocity_fields[1]) <: Real, kwargs...)
+    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; spectral = spectral,
+                             real_layout = real_layout, kwargs...)
     return to_spectral!(ws, velocity_fields)
 end
 
@@ -570,34 +617,20 @@ Base.show(io::IO, ::MIME"text/plain", w::ToSpectralWorkspace) = show(io, w)
 Build the reusable uniform-grid analysis workspace. `real_layout = true` (the default for real input
 fields) stores the non-redundant half spectrum; see [`to_spectral`](@ref).
 """
-function ToSpectralWorkspace(velocity_fields::Tuple, coords_vecs::Tuple;
-                             spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-                             real_layout::Bool = eltype(velocity_fields[1]) <: Real)
-    D = length(velocity_fields)
-    D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
-    spectral = Types.resolve_spectral(spectral)
-    spectral isa Union{SpectralBackends.DirectSumSpectralBackend, SpectralBackends.FFTSpectralBackend} || throw(ArgumentError(
-        "to_spectral transforms uniform-grid Cartesian data (spectral = SpectralBackends.FFTSpectralBackend() or the SpectralBackends.DirectSumSpectralBackend " *
-        "reference). For scattered Cartesian data use the NUFFT physical entry (Types.FINUFFTBackend / Types.NonuniformFFTsBackend); for spherical data use " *
-        "calculate_spherical_transfer."))
-    ns = Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
-    Utils.validate_uniform_grid(coords_vecs)
-    Ls = Utils.domain_size_from_coords(coords_vecs)
-    ks = Utils.wavenumber_grid(ns, Ls; real = real_layout)
-    ms = SpectralLayout.spectral_size(ks)
-    FT = float(real(eltype(velocity_fields[1])))
-    # The half layout IS the statement that the physical field is real, so it accepts only real input.
-    # The full layout carries whatever the input is, and stages in that element type.
-    real_layout && !(eltype(velocity_fields[1]) <: Real) && throw(ArgumentError(
-        "the half spectral layout stores the non-redundant half of a REAL field's transform, and these " *
-        "fields are $(eltype(velocity_fields[1])); pass `real_layout = false` for the full spectrum."))
-    field_phys = similar(velocity_fields[1], real_layout ? FT : float(eltype(velocity_fields[1])), ns..., D)
-    û = similar(velocity_fields[1], Complex{FT}, ms..., D)
-    # The shared analysis transform context (û = fft(u)/Nᵈ): DirectSum in core, FFT in the FFTW ext,
-    # cuFFT for device arrays.
-    # Errors clearly (no silent downgrade) if the FFT backend is requested without FFTW loaded.
-    tf = Compressible._resolve_tf(spectral, field_phys, ks, ns)
-    return ToSpectralWorkspace(tf, field_phys, û, ks)
+ToSpectralWorkspace(velocity_fields::Tuple, coords_vecs::Tuple; kwargs...) =
+    _to_spectral_workspace_on_axes(velocity_fields, coords_vecs; kwargs...)
+
+"""
+    _to_spectral_workspace_on_axes(velocity_fields, coords_vecs; kwargs...)
+
+Analysis workspace over per-axis coordinate vectors. Overridden by
+`FlowInvariantTransferFlowFieldSpectraExt`, which reads the uniform periodic box `L = N·Δ` those axes
+describe and builds the grid form on it.
+"""
+function _to_spectral_workspace_on_axes(args...; kwargs...)
+    throw(ArgumentError(
+        "to_spectral is the physical → spectral front-end and transforms through FlowFieldSpectra.jl. " *
+        "Run `using FlowFieldSpectra` to load the extension."))
 end
 
 """
@@ -618,6 +651,69 @@ function to_spectral!(ws::ToSpectralWorkspace, velocity_fields::Tuple)
     ws.tf.dft!(ws.û, ws.field_phys)
     return (ws.û, ws.ks)
 end
+
+"""
+    ToSpectralWorkspace(velocity_hat::AbstractArray, ks::Tuple; spectral=AutoSpectralBackend())
+
+Build the workspace from the coefficient side, sizing the physical buffer from `ks` — the form
+[`from_spectral`](@ref) needs. The same workspace drives both directions, so a loop that transforms
+back and forth builds one.
+"""
+ToSpectralWorkspace(velocity_hat::AbstractArray, ks::Tuple; kwargs...) =
+    _to_spectral_workspace_on_coeffs(velocity_hat, ks; kwargs...)
+
+"""
+    _to_spectral_workspace_on_coeffs(velocity_hat, ks; kwargs...)
+
+Workspace sized from the coefficient side. Overridden by
+`FlowInvariantTransferFlowFieldSpectraExt`, which rebuilds the periodic box `ks` describes — `ns` from
+the axes' own full lengths, `L_d = 2π/Δk_d` — and plans both directions on it.
+"""
+function _to_spectral_workspace_on_coeffs(args...; kwargs...)
+    throw(ArgumentError(
+        "from_spectral is the spectral → physical synthesis and transforms through FlowFieldSpectra.jl. " *
+        "Run `using FlowFieldSpectra` to load the extension."))
+end
+
+"""
+    from_spectral!(ws::ToSpectralWorkspace, velocity_hat) -> velocity_phys
+
+In-place synthesis `u = Σ û e^{ik·x}`, the inverse of [`to_spectral!`](@ref), reusing `ws`. Returns
+the component-last `(ns…, D)` real array `ws.field_phys`, overwritten by a later call — the same
+stacked shape `to_spectral!` returns its coefficients in, and allocation-free on repeat.
+"""
+function from_spectral!(ws::ToSpectralWorkspace, velocity_hat::AbstractArray)
+    nd = ndims(ws.field_phys) - 1
+    D  = size(ws.field_phys, nd + 1)
+    size(velocity_hat, nd + 1) == D || throw(DimensionMismatch(
+        "from_spectral! got $(size(velocity_hat, nd + 1)) components; workspace was built for $D"))
+    size(velocity_hat)[1:nd] == size(ws.û)[1:nd] || throw(DimensionMismatch(
+        "coefficient size $(size(velocity_hat)[1:nd]) does not match the workspace grid $(size(ws.û)[1:nd])"))
+    ws.tf.idft!(ws.field_phys, velocity_hat)
+    return ws.field_phys
+end
+
+"""
+    from_spectral(velocity_hat, ks; spectral=AutoSpectralBackend()) -> velocity_fields
+
+Synthesise physical-space components from Fourier coefficients on a uniform periodic Cartesian grid —
+the inverse of [`to_spectral`](@ref), and its normalization: `u = Σ û e^{ik·x}`. Accepts either
+spectral layout, reading which from `ks`, and returns real fields.
+
+The components come back as a tuple of views into one backing array, mirroring the tuple
+[`to_spectral`](@ref) takes. Build a [`ToSpectralWorkspace`](@ref) and call [`from_spectral!`](@ref)
+for the stacked array and plan reuse across snapshots.
+"""
+function from_spectral(velocity_hat::AbstractArray, ks::Tuple;
+                       spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend())
+    ws = ToSpectralWorkspace(velocity_hat, ks; spectral = spectral)
+    phys = from_spectral!(ws, velocity_hat)
+    nd = length(ks)
+    colons = ntuple(_ -> Colon(), nd)
+    return ntuple(c -> view(phys, colons..., c), size(phys, nd + 1))
+end
+
+export from_spectral, from_spectral!
 
 """
     to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple; spectral, Ls, tol=1e-9) -> (velocity_hat, ks)

@@ -23,6 +23,7 @@ using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 # Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT providers are benchmarked axes.
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
+using FlowFieldSpectra: FlowFieldSpectra          # the physical → spectral transform `to_spectral` runs
 using NonuniformFFTs: NonuniformFFTs
 using FINUFFT: FINUFFT
 
@@ -132,7 +133,7 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
     end
 
     # --- uniform-grid physical → spectral (no workspace exists: convenience only) ---
-    coords = ntuple(d -> collect(range(0, 2π; length = ns[d] + 1)[1:ns[d]]), D)
+    coords = ntuple(d -> range(0, 2π; length = ns[d] + 1)[1:ns[d]], D)
     uphys = ntuple(c -> real.(FFTW.bfft(view(û, ntuple(_ -> Colon(), D)..., c))), D)
     group("to_spectral_uniform")[CONV * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.to_spectral($uphys, $coords; spectral = $FFT) evals = 1
@@ -188,7 +189,7 @@ function add_scattered!(D::Int, ms::NTuple{N,Int}) where {N}
 end
 
 function add_cgef!(n::Int)
-    xs = collect(range(0, 2π; length = n + 1)[1:n]); ys = copy(xs)
+    xs = range(0, 2π; length = n + 1)[1:n]; ys = copy(xs)
     u = [sin(x) * cos(y) for x in xs, y in ys]
     v = [-cos(x) * sin(y) for x in xs, y in ys]
     ℓ = 2π / 16   # ~16 cells per filter window, sized off the grid rather than a fixed fraction

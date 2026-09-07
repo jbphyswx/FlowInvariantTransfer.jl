@@ -208,4 +208,49 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef(
     return FIT.CoarseGrainingFlux._cg_flux_cgef!(ws, velocity_fields)
 end
 
+# ---------------------------------------------------------------------------
+# The rest of CGEF's coarse-graining diagnostics, on the same domain argument as the flux.
+#
+# Each is declared on `FlowGeometries.Grids.AbstractGrid` upstream, so the grid form forwards directly
+# and the coordinate-vector form builds the grid those axes describe (`_cg_grid_from_coords`, shared
+# with the flux workspace).
+# ---------------------------------------------------------------------------
+
+_cg_domain_grid(grid::CGEF.FlowGeometries.Grids.AbstractGrid, ::Type, ::Any) = grid
+function _cg_domain_grid(coords_vecs::Tuple, ::Type{FT}, radius) where {FT}
+    nd = length(coords_vecs)
+    if radius === nothing
+        geom = CGEF.FlowGeometries.Geometry.CartesianGeometry{FT}()
+        return CGEF.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...)
+    end
+    nd == 2 || throw(ArgumentError(
+        "a spherical domain is the 2D (lon, lat) surface; got $(nd) coordinate vectors."))
+    geom = CGEF.FlowGeometries.Geometry.SphericalGeometry(FT(radius))
+    return CGEF.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs[1], coords_vecs[2])
+end
+
+function FIT.CoarseGrainingFlux.calculate_band_energies(
+    velocity_fields::Tuple, geometry, filter::FIT.Types.AbstractFilter, scales::AbstractVector;
+    radius = nothing, kwargs...,
+)
+    FT = eltype(velocity_fields[1])
+    grid = _cg_domain_grid(geometry, FT, radius)
+    w = length(velocity_fields) == 3 ? velocity_fields[3] : nothing
+    return CGEF.Diagnostics.band_energies(velocity_fields[1], velocity_fields[2], w, grid,
+                                          _to_cgef_kernel(filter), collect(FT, scales); kwargs...)
+end
+
+function FIT.CoarseGrainingFlux.calculate_enstrophy_flux(
+    velocity_fields::Tuple, geometry, ℓ::Real, filter::FIT.Types.AbstractFilter;
+    radius = nothing, kwargs...,
+)
+    length(velocity_fields) == 2 || throw(ArgumentError(
+        "the enstrophy flux is built from the vertical vorticity of a two-component tangent field; " *
+        "got $(length(velocity_fields))."))
+    FT = eltype(velocity_fields[1])
+    grid = _cg_domain_grid(geometry, FT, radius)
+    return CGEF.Diagnostics.enstrophy_flux(velocity_fields[1], velocity_fields[2], grid,
+                                           _to_cgef_kernel(filter), FT(ℓ); kwargs...)
+end
+
 end # module FlowInvariantTransferCGEFExt

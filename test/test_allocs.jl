@@ -258,7 +258,7 @@ Test.@testset "Allocations" begin
 
         Test.@testset "coarse_graining (CGEF, uniform grid)" begin
             Nc = 32; Lc = 2π
-            xs = collect(range(0, Lc; length = Nc + 1)[1:Nc]); ys = copy(xs)
+            xs = range(0, Lc; length = Nc + 1)[1:Nc]; ys = copy(xs)
             u  = [sin(xs[i]) * cos(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             v  = [-cos(xs[i]) * sin(ys[j]) + 0.2 * randn() for i in 1:Nc, j in 1:Nc]
             filt = FIT.Types.GaussianFilter(); ℓ = 0.5

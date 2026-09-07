@@ -4,7 +4,9 @@ using ..Types: Types
 using ..Decomposition: Decomposition
 using ComputationalBackends: ComputationalBackends
 
-export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch, CoarseGrainingFluxWorkspace
+export calculate_coarse_graining_flux, calculate_coarse_graining_flux!, calculate_coarse_graining_flux_batch,
+       CoarseGrainingFluxWorkspace,
+       calculate_band_energies, calculate_enstrophy_flux
 
 # ---------------------------------------------------------------------------
 # Internal stubs — overridden by FlowInvariantTransferCGEFExt when
@@ -127,9 +129,10 @@ function calculate_coarse_graining_flux(
     decomposition::Types.AbstractFieldDecomposition = Types.NoDecomposition(),
     kwargs...,
 )
-    decomposition isa Types.NoDecomposition || geometry isa Tuple || throw(ArgumentError(
-        "a field decomposition is built from the coordinate vectors, so it needs the `coords_vecs` form; " *
-        "on a grid, decompose upstream and pass the component fields."))
+    decomposition isa Types.NoDecomposition || geometry isa Tuple && throw(ArgumentError(
+        "a field decomposition solves a boundary-value problem on the domain, and coordinate vectors " *
+        "carry no topology, mask or geometry to solve it on. Pass a `FlowGeometries` grid, or decompose " *
+        "upstream and pass the component fields."))
     decomposed = Decomposition.decompose_field(decomposition, velocity_fields, geometry; kwargs...)
     return _calculate_coarse_graining_flux_decomposed(
         decomposed, velocity_fields, geometry, ℓ, filter; kwargs...
@@ -234,6 +237,40 @@ _cg_flux_batch!(::ComputationalBackends.AbstractDistributedBackend, velocity_fie
 _cg_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_fields_batch, geometry, ℓ, filter; kwargs...) =
     throw(ArgumentError("calculate_coarse_graining_flux_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
                         "got execution = $(typeof(be))."))
+
+# ---------------------------------------------------------------------------
+# The other coarse-graining diagnostics CoarseGrainingEnergyFluxes provides, on the same domain
+# argument as the flux: coordinate vectors or a `FlowGeometries` grid. Stubs here, methods in the
+# extension.
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_band_energies(velocity_fields, geometry, filter, scales; kwargs...)
+
+Scale-band kinetic energies: the energy in each band between successive entries of `scales`, from the
+filtered field at each scale. `geometry` is the coordinate vectors or a `FlowGeometries` grid, as for
+[`calculate_coarse_graining_flux`](@ref). Pass `maps = true` for the per-point band fields alongside
+the integrals. Requires `CoarseGrainingEnergyFluxes` to be loaded.
+"""
+function calculate_band_energies(args...; kwargs...)
+    throw(ArgumentError(
+        "calculate_band_energies requires CoarseGrainingEnergyFluxes.jl. " *
+        "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
+end
+
+"""
+    calculate_enstrophy_flux(velocity_fields, geometry, ℓ, filter; kwargs...)
+
+Pointwise cross-scale **enstrophy** flux at filter scale `ℓ` — the vorticity carried through the
+tracer-variance flux, the enstrophy counterpart of [`calculate_coarse_graining_flux`](@ref).
+`geometry` is the coordinate vectors or a `FlowGeometries` grid. Requires
+`CoarseGrainingEnergyFluxes` to be loaded.
+"""
+function calculate_enstrophy_flux(args...; kwargs...)
+    throw(ArgumentError(
+        "calculate_enstrophy_flux requires CoarseGrainingEnergyFluxes.jl. " *
+        "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
+end
 
 # One-line show (the workspace holds CGEF filter/derivative plans → default field-dump show can segfault).
 Base.show(io::IO, ::CoarseGrainingFluxWorkspace) = print(io, "CoarseGrainingFluxWorkspace(…)")

@@ -88,5 +88,6 @@ julia = "1.11"
 [extras]
 CoarseGrainingEnergyFluxes = "a8c2fbc6-778a-4d2b-8a8c-9c98efc7e8cf"
 FlowFieldSpectra = "e5f08a8b-40ae-41d5-97fc-c483fb8f16ad"
+FlowGeometries = "0ccd6995-f618-4175-b01e-f437d0cb4974"
 HelmholtzDecomposition = "10a91b07-9549-4913-979d-72f12272cfcc"
 NUFSHT = "e99b67a3-9706-455a-90e2-85b195a33206"

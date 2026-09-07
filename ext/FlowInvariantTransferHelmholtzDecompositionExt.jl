@@ -10,10 +10,10 @@ const _HDDecomp = Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDe
 #
 # The Poisson solve is left to `HDjl.AutoSolver`, which resolves it from the grid: it walks the
 # geometry's spectral algorithms in preference order (Cartesian: FFT then NUFFT; spherical: FSHT then
-# NUFSHT), each candidate checking the mask, axis uniformity, sampling, boundary and periodicity it
-# needs, and reaches the iterative `CGSolver` when none applies. A stretched Cartesian grid therefore
-# still reaches a NUFFT solve, and a Clenshaw–Curtis sphere a spherical-harmonic one. Pass `solver=`
-# to name one.
+# NUFSHT), each candidate checking the mask, axis uniformity, node layout, boundary and periodicity it
+# needs, and reaches the iterative `CGSolver` when none applies. On a Cartesian geometry that resolves
+# to the FFT solve for a uniform periodic grid, the cosine/sine solve for a uniform bounded one, the
+# NUFFT solve for a node set, and `CGSolver` for a stretched grid. Pass `solver=` to name one.
 #
 # `helmholtz_decompose` covers `StructuredGrid` (spectral or iterative); every other grid goes to
 # `helmholtz_decompose_spectral`, the entry declared on `AbstractGrid`. Both return the 3-way Hodge
@@ -46,24 +46,20 @@ function FIT.Decomposition._decompose_field_physical(
     end
 end
 
-# Coordinate-vector convenience: build the Cartesian grid those axes describe and take the path above.
-# `_to_axis` adapts each axis to `FT` preserving a uniform range's uniformity, so the solver selection
-# reads the same grid either way.
+# Coordinate vectors state no topology, mask or geometry, and the solver is selected from all three, so
+# the physical decomposition takes a grid. The spectral form below needs none of it.
 function FIT.Decomposition._decompose_field_physical(
     decomp::_HDDecomp,
     velocity_fields::Tuple,
     coords_vecs::Tuple;
-    mask = nothing,
     kwargs...
 )
-    D  = length(velocity_fields)
-    nd = length(coords_vecs)
-    D == nd || throw(ArgumentError(
-        "number of velocity components ($D) must equal spatial dimensions ($nd)"))
-    FT = float(real(eltype(velocity_fields[1])))
-    geom = HDjl.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    grid = HDjl.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...; mask = mask)
-    return FIT.Decomposition._decompose_field_physical(decomp, velocity_fields, grid; kwargs...)
+    throw(ArgumentError(
+        "physical-space $(nameof(typeof(decomp))) needs a `FlowGeometries` grid: the Poisson solve is " *
+        "selected from the domain's topology, mask, axis spacing and geometry, and coordinate vectors " *
+        "carry none of them. Build the grid those axes describe — e.g. " *
+        "`FlowGeometries.Grids.StructuredGrid(FlowGeometries.Geometry.CartesianGeometry{Float64}(), x, y; " *
+        "topology = (true, true))` for a periodic box — and pass that."))
 end
 
 # 2. Spectral-space decomposition
