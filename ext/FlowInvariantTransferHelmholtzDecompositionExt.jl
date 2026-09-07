@@ -3,49 +3,63 @@ module FlowInvariantTransferHelmholtzDecompositionExt
 using HelmholtzDecomposition: HelmholtzDecomposition as HDjl
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
-# 1. Physical-space decomposition
+const _HDDecomp = Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDecomposition,
+                        FIT.Types.DivergentDecomposition}
+
+# 1. Physical-space decomposition on a FlowGeometries grid.
+#
+# The Poisson solve is left to `HDjl.AutoSolver`, which resolves it from the grid: it walks the
+# geometry's spectral algorithms in preference order (Cartesian: FFT then NUFFT; spherical: FSHT then
+# NUFSHT), each candidate checking the mask, axis uniformity, node layout, boundary and periodicity it
+# needs, and reaches the iterative `CGSolver` when none applies. On a Cartesian geometry that resolves
+# to the FFT solve for a uniform periodic grid, the cosine/sine solve for a uniform bounded one, the
+# NUFFT solve for a node set, and `CGSolver` for a stretched grid. Pass `solver=` to name one.
+#
+# `helmholtz_decompose` covers `StructuredGrid` (spectral or iterative); every other grid goes to
+# `helmholtz_decompose_spectral`, the entry declared on `AbstractGrid`. Both return the 3-way Hodge
+# split `u_rot + u_div + u_harm` as component-last `(ns…, D)`; the harmonic (constant/mean,
+# divergence-free) part folds into the rotational component so rotational + divergent == the field,
+# matching the spectral path.
 function FIT.Decomposition._decompose_field_physical(
-    decomp::Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDecomposition, FIT.Types.DivergentDecomposition},
+    decomp::_HDDecomp,
     velocity_fields::Tuple,
-    coords_vecs::Tuple;
-    kwargs...
+    grid::HDjl.FlowGeometries.Grids.AbstractGrid;
+    solver::HDjl.AbstractPoissonSolver = HDjl.AutoSolver(),
+    boundary::HDjl.AbstractBoundaryCondition = HDjl.Neumann(),
+    kwargs...,          # the caller's own keywords (a filter scale, diagnostics flags) pass by
 )
-    D  = length(velocity_fields)
-    nd = length(coords_vecs)
-    D == nd || throw(ArgumentError(
-        "number of velocity components ($D) must equal spatial dimensions ($nd)"))
-    (nd == 2 || nd == 3) || throw(ArgumentError(
-        "physical-space Helmholtz decomposition supports 2D and 3D Cartesian grids (nd=$nd)."))
-    FT = float(real(eltype(velocity_fields[1])))
-
-    # FlowGeometries Cartesian grid from the coordinate axes (default topology — works for any grid). Pass
-    # the axes as given: `_to_axis` adapts them to `FT` while preserving a uniform range's uniformity.
-    # `mask` selects active cells.
-    geom = HDjl.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    mask = get(kwargs, :mask, nothing)
-    grid = HDjl.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...; mask = mask)
-
-    # `helmholtz_decompose` takes ONE component-last `(ns…, D)` array and returns the 3-way Hodge split
-    # (`u_rot + u_div + u_harm`, all `(ns…, D)`). A uniform grid gets HD's fast spectral (FFT) Poisson
-    # solver via the default AutoSolver; a stretched (nonuniform) grid has no spectral solver, so use HD's
-    # grid-agnostic CG solver explicitly. Fold the harmonic (constant/mean, divergence-free) into the
-    # rotational component so rotational + divergent == the field — matching the spectral path.
+    D = length(velocity_fields)
+    nd = ndims(velocity_fields[1])
     ustacked = stack(velocity_fields; dims = nd + 1)
-    res = HDjl.FlowGeometries.Grids.isuniform(grid) ?
-          HDjl.helmholtz_decompose(ustacked, grid) :
-          HDjl.helmholtz_decompose(ustacked, grid; solver = HDjl.CGSolver())
+    res = grid isa HDjl.FlowGeometries.Grids.StructuredGrid ?
+          HDjl.helmholtz_decompose(ustacked, grid; solver = solver, boundary = boundary) :
+          HDjl.helmholtz_decompose_spectral(ustacked, grid; solver = solver)
     colons = ntuple(_ -> Colon(), nd)
-    rot = ntuple(c -> res.u_rot[colons..., c] .+ res.u_harm[colons..., c], nd)
-    div = ntuple(c -> res.u_div[colons..., c], nd)
+    rot = ntuple(c -> res.u_rot[colons..., c] .+ res.u_harm[colons..., c], D)
+    div = ntuple(c -> res.u_div[colons..., c], D)
     if decomp isa FIT.Types.HelmholtzDecomposition
         return (; rotational = rot, divergent = div)
     elseif decomp isa FIT.Types.RotationalDecomposition
         return rot
-    elseif decomp isa FIT.Types.DivergentDecomposition
-        return div
     else
-        throw(ArgumentError("Unknown decomposition type: $decomp"))
+        return div
     end
+end
+
+# Coordinate vectors state no topology, mask or geometry, and the solver is selected from all three, so
+# the physical decomposition takes a grid. The spectral form below needs none of it.
+function FIT.Decomposition._decompose_field_physical(
+    decomp::_HDDecomp,
+    velocity_fields::Tuple,
+    coords_vecs::Tuple;
+    kwargs...
+)
+    throw(ArgumentError(
+        "physical-space $(nameof(typeof(decomp))) needs a `FlowGeometries` grid: the Poisson solve is " *
+        "selected from the domain's topology, mask, axis spacing and geometry, and coordinate vectors " *
+        "carry none of them. Build the grid those axes describe — e.g. " *
+        "`FlowGeometries.Grids.StructuredGrid(FlowGeometries.Geometry.CartesianGeometry{Float64}(), x, y; " *
+        "topology = (true, true))` for a periodic box — and pass that."))
 end
 
 # 2. Spectral-space decomposition

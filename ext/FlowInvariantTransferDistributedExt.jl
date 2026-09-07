@@ -27,20 +27,21 @@ function FIT.ShellToShellTransfer._shell_to_shell_distributed!(
     # bundle that workers can't deserialize (they need not have FFTWExt loaded).
     shell_idx = ws.shell_idx
 
-    # We distribute the computation over the mediator shells `m`.
-    # Using `Distributed.@distributed (+)` reduces the resulting N_sh x N_sh matrices.
-    T_mat_reduced = Distributed.@distributed (+) for m in 1:N_sh
-        # Compute column m on the worker process, using the worker-local backend.
-        col = compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat, inner)
-        
-        # Construct an array where only column m is filled
-        local_T = zeros(FT, N_sh, N_sh)
-        local_T[:, m] = col
-        local_T
+    # Mediators are partitioned into one contiguous chunk per worker. Each worker builds ONE
+    # `NonlinearTermWorkspace`, reuses it across its chunk, and ships back `(m, column)` pairs: the
+    # workspace and its FFT plans are built once per worker, and the returned data is N_sh columns.
+    nw = max(1, Distributed.nworkers())
+    chunks = collect(Iterators.partition(1:N_sh, max(1, cld(N_sh, nw))))
+    chunk_cols = Distributed.pmap(chunks) do ms
+        _shell_to_shell_worker_columns(ms, velocity_hat, ks, shell_idx, N_sh, invariant,
+                                       dealiasing, FT, spectral, advecting_hat, inner)
     end
-    
-    # Copy reduced results into our in-place result structure
-    copyto!(result.transfer_matrix, T_mat_reduced)
+    fill!(result.transfer_matrix, zero(FT))
+    for cols in chunk_cols, (m, col) in cols
+        @inbounds for n in 1:N_sh
+            result.transfer_matrix[n, m] = col[n]
+        end
+    end
     
     # Net energy gain of each shell: Σ_m T(n,m)
     for n in 1:N_sh
@@ -102,10 +103,11 @@ function FIT.SpectralFlux._spectral_flux_distributed!(
 
     T = Distributed.@distributed (+) for w in 1:nw
         t = zeros(FT, N_sh)
+        cis = CartesianIndices(ns)
         @inbounds for i in w:nw:Np
             n = sidx[i]
             n == 0 && continue
-            t[n] += td[i]
+            t[n] += FIT.SpectralLayout.hermitian_weight(ks, cis[i]) * td[i]
         end
         t
     end
@@ -113,58 +115,39 @@ function FIT.SpectralFlux._spectral_flux_distributed!(
     return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
-# Helper function executed on worker processes for Shell-to-Shell
-function compute_mediator_transfer_column(m, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing, FT, spectral, advecting_hat=velocity_hat, inner=ComputationalBackends.SerialBackend())
+# One worker's chunk of mediator shells → `[(m, column), …]`. The workspace and the band-field
+# scratch are built ONCE for the chunk and reused across its mediators; a per-mediator build would
+# put a full-grid allocation and an FFT plan build inside the loop.
+#
+# 𝒩̂_m = (u·∇)f_m: the full velocity (advecting_hat) advects the band-m primary field (AMP 2005) —
+# for energy this gives an antisymmetric A[n,m] reducing to transfer_spectrum[n], matching serial/FFT.
+#
+# Each column is one pass over the modes: every mode contributes to exactly the receiver shell it
+# belongs to, so there is no per-receiver rescan and no per-mediator density grid. `inner` is the
+# worker-local backend; the scatter writes a shared length-N_sh accumulator and stays serial.
+function _shell_to_shell_worker_columns(ms, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing,
+                                        FT, spectral, advecting_hat, inner)
     nd = length(ks)
     ns = size(velocity_hat)[1:nd]
-    M  = size(velocity_hat, nd+1)   # components of the binned/carried primary field
-
-    # Restrict the primary field to shell m
-    û_m = zeros(eltype(velocity_hat), size(velocity_hat)...)
-    for I in CartesianIndices(ns)
-        shell_idx[I] == m || continue
-        for comp in 1:M
-            û_m[I, comp] = velocity_hat[I, comp]
-        end
-    end
-
-    # Allocate a local NonlinearTermWorkspace.
-    # 𝒩̂_m = (u·∇)f_m: full velocity (advecting_hat) advects the band-m primary field (AMP 2005) —
-    # for energy gives antisymmetric A[n,m] reducing to transfer_spectrum[n] (matches serial/FFT).
-    nl_ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks)
-    FIT.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing=dealiasing,
-        spectral=spectral, advecting_hat=advecting_hat)
-
-    # Write per-mode transfer density
-    transfer_density = similar(velocity_hat, FT, ns...)
-    FIT.Invariants.transfer_density!(transfer_density, invariant, velocity_hat, nl_ws.N̂, ks)
-
-    # Accumulate into the column vector. `inner` is the worker-local execution backend from
-    # `ComputationalBackends.local_backend`: ComputationalBackends.SerialBackend (default) sums receiver shells serially; ComputationalBackends.ThreadedBackend threads
-    # that reduction with the worker's own threads (Base `@threads`, no cross-extension dependency) —
-    # this realises ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()) when workers are started with `-t N`. Each
-    # receiver shell n writes a disjoint col[n], so the threaded loop is race-free.
-    col = zeros(FT, N_sh)
-    if inner isa ComputationalBackends.ThreadedBackend
-        Threads.@threads for n in 1:N_sh
-            s = zero(FT)
-            @inbounds for I in CartesianIndices(ns)
-                shell_idx[I] == n || continue
-                s += transfer_density[I]
+    M  = size(velocity_hat, nd + 1)   # components of the binned/carried primary field
+    nl_ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
+    û_m = similar(velocity_hat)
+    out = Vector{Tuple{Int, Vector{FT}}}(undef, length(ms))
+    for (i, m) in enumerate(ms)
+        fill!(û_m, zero(eltype(û_m)))
+        @inbounds for I in CartesianIndices(ns)
+            shell_idx[I] == m || continue
+            for comp in 1:M
+                û_m[I, comp] = velocity_hat[I, comp]
             end
-            col[n] = s
         end
-    else
-        for n in 1:N_sh
-            s = zero(FT)
-            @inbounds for I in CartesianIndices(ns)
-                shell_idx[I] == n || continue
-                s += transfer_density[I]
-            end
-            col[n] = s
-        end
+        FIT.NonlinearTerm.compute_nonlinear_term!(nl_ws, û_m, ks; dealiasing = dealiasing,
+            spectral = spectral, advecting_hat = advecting_hat)
+        col = zeros(FT, N_sh)
+        FIT.Invariants.transfer_density_scatter!(col, invariant, velocity_hat, nl_ws.N̂, ks, shell_idx)
+        out[i] = (m, col)
     end
-    return col
+    return out
 end
 
 # ---------------------------------------------------------------------------
@@ -196,10 +179,10 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_distributed!(
             L[r.fi_l, r.fi_n, j] = r.s[j]
             T_budget[r.fi_l, r.fi_n, j] = r.Tb[j]
         end
-        P[(r.fi_l, r.fi_n)] = (convective = r.u, recipient = r.v)
+        P[r.i] = (convective = r.u, recipient = r.v)
         if return_coefficients
-            A_out[(r.fi_l, r.fi_n)] = (convective = r.A_conv, recipient = r.A_recip)
-            return_auxiliary_modes && (Xi_out[(r.fi_l, r.fi_n)] = (donor = r.donor, catalyst = r.catalyst))
+            A_out[r.i] = (convective = r.A_conv, recipient = r.A_recip)
+            return_auxiliary_modes && (Xi_out[r.i] = (donor = r.donor, catalyst = r.catalyst))
         end
     end
     return nothing
@@ -312,7 +295,9 @@ function _band_to_band_worker_T(ms, W, velocity_hat, ks, ns, D, FT, nb, invarian
             FIT.Invariants.transfer_density!(d, invariant, velocity_hat, lws.N̂, ks)
             for n in 1:nb
                 s = zero(FT)
-                for I in CartesianIndices(ns); s += W[n][I] * d[I]; end
+                for I in CartesianIndices(ns)
+                    s += FIT.SpectralLayout.hermitian_weight(ks, I) * W[n][I] * d[I]
+                end
                 local_T[n, m] = s                                # disjoint per m → thread-safe
             end
         end
@@ -366,7 +351,7 @@ function _partial_fluxes_worker(pis, prs, comps, names, velocity_hat, ks, ns, FT
                 advecting_hat = comps[sp], dealiasing = dealiasing, spectral = spectral)
             for sk in names
                 FIT.Invariants.transfer_density!(d, FIT.Types.KineticEnergy(), comps[sk], lws.N̂, ks)
-                ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(d, sidx, centers, Nsh)
+                ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(d, sidx, ks, centers, Nsh)
             end
         end
         return ch
@@ -404,9 +389,12 @@ function FIT.Compressible._compressible_distributed(
     decompose = true,
 )
     inner = ComputationalBackends.local_backend(execution)
+    # Each group's workspace carries only the scratch its own call uses: group A the channel set,
+    # group B the pressure term. The flags are fixed at construction, so they are set to match.
     runA = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner,
+            decompose = decompose, with_pressure = false)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = decompose, pressure_hat = nothing)
     end
@@ -415,7 +403,8 @@ function FIT.Compressible._compressible_distributed(
     end
     runB = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner,
+            decompose = false, with_pressure = true)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = false, pressure_hat = pressure_hat)
     end

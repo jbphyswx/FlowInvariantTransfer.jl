@@ -1,12 +1,14 @@
 module BandTransfer
 
 using ..Types: Types
+using ..SpectralLayout: SpectralLayout
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
 using ..NonlinearTerm: NonlinearTerm
 using ..Workspaces: Workspaces
 using ..ShellBinning: ShellBinning
+using ..CoarseGrainingFlux: CoarseGrainingFlux
 
 export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calculate_band_to_band_transfer_batch, BandTransferWorkspace
 
@@ -84,11 +86,11 @@ function calculate_band_to_band_transfer!(
     T, net, bws::BandTransferWorkspace, velocity_hat, ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
     # Fill the transfer matrix (one nonlinear term per band m → column T[·,m]), dispatched on execution.
@@ -125,7 +127,7 @@ function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::Band
         for n in 1:nb
             s = zero(FT)
             for I in CartesianIndices(ns)
-                s += W[n][I] * d[I]
+                s += SpectralLayout.hermitian_weight(ks, I) * W[n][I] * d[I]
             end
             T[n, m] = s
         end
@@ -165,12 +167,12 @@ function calculate_band_to_band_transfer(
     bands::Types.SmoothBands,
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     FT = real(eltype(velocity_hat))
     nb = length(bands.centers)
     bws = BandTransferWorkspace(velocity_hat, ks, bands; geometry=geometry)
@@ -198,11 +200,11 @@ function calculate_band_to_band_transfer_batch(
     bands::Types.SmoothBands,
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.DirectSumSpectralBackend(),
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    Types.require_coefficient_spectral(spectral)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     n       = length(velocity_hats)
     FT      = real(eltype(first(velocity_hats)))
     nb      = length(bands.centers)
@@ -273,5 +275,74 @@ _band_to_band_batch!(be::ComputationalBackends.AbstractExecutionBackend, results
 # under the default field-dump show).
 Base.show(io::IO, ::BandTransferWorkspace) = print(io, "BandTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::BandTransferWorkspace) = show(io, w)
+
+# ---------------------------------------------------------------------------
+# Band content of an invariant: the quantity the band-to-band transfer moves between bands.
+#
+#   E(n) = Σ_k w_n(k) · e(k)
+#
+# with `e` the invariant's own quadratic spectral density — the per-mode density `Invariants` already
+# defines, evaluated with the field in both slots — and `w_n` the band's weight. The weight is the only
+# thing that distinguishes one band definition from another: the sharp indicator of a shell for an
+# `AbstractShellBinning`, the graded partition of unity for `SmoothBands`.
+# ---------------------------------------------------------------------------
+
+# `E = ½|û|²` and `Z = ½|ω̂|²` carry the half their definitions do; helicity's `u·ω` does not.
+_density_scale(::Union{Types.KineticEnergy, Types.PassiveScalar, Types.Enstrophy}, ::Type{FT}) where {FT} = FT(0.5)
+_density_scale(::Types.Helicity, ::Type{FT}) where {FT} = one(FT)
+
+"""
+    calculate_band_energies(velocity_hat, ks; bands, invariant, geometry) -> (; centers, energies)
+
+Content of `invariant` in each band of `bands`, `E(n) = Σ_k w_n(k)·e(k)`.
+
+`bands` fixes the weight `w_n` and nothing else: an [`AbstractShellBinning`](@ref) gives sharp bands,
+where `w_n` is the indicator of shell `n`, and [`SmoothBands`](@ref) the graded partition of unity the
+smooth band-to-band transfer moves energy between — pass the same `bands` to
+[`calculate_band_to_band_transfer`](@ref) and the two describe the same partition.
+
+`e` is the invariant's quadratic spectral density (`½Σ_c|û_c|²` for kinetic energy, `½|ω̂|²` for
+enstrophy, `Re{conj(û)·ω̂}` for helicity). On a half spectrum each mode carries the Hermitian weight, so
+the total matches the full-spectrum sum.
+"""
+function CoarseGrainingFlux.calculate_band_energies(
+    velocity_hat::AbstractArray{<:Complex}, ks::Tuple;
+    bands::Union{Types.AbstractShellBinning, Types.SmoothBands},
+    invariant::Types.AbstractInvariant = Types.KineticEnergy(),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+)
+    return _band_energies(velocity_hat, ks, bands, invariant, geometry)
+end
+
+function _band_energies(velocity_hat, ks, binning::Types.AbstractShellBinning, invariant, geometry)
+    FT = real(eltype(velocity_hat))
+    kmax = ShellBinning.max_shell_coordinate(geometry, ks)
+    centers = collect(ShellBinning.shell_centers(binning, kmax))
+    sidx = ShellBinning.assign_shells(ShellBinning.shell_coordinate(geometry, ks),
+                                      ShellBinning.shell_edges(binning, kmax))
+    E = zeros(FT, length(centers))
+    # The sharp band sum IS the shell scatter the transfer drivers use, with the field in both slots.
+    Invariants.transfer_density_scatter!(E, invariant, velocity_hat, velocity_hat, ks, sidx)
+    E .*= _density_scale(invariant, FT)
+    return (; centers = centers, energies = E)
+end
+
+function _band_energies(velocity_hat, ks, bands::Types.SmoothBands, invariant, geometry)
+    nd = length(ks)
+    ms = size(velocity_hat)[1:nd]
+    M  = size(velocity_hat, nd + 1)
+    FT = real(eltype(velocity_hat))
+    W = _band_weights(bands.centers, bands.logwidth, ShellBinning.shell_coordinate(geometry, ks))
+    E = zeros(FT, length(bands.centers))
+    @inbounds for I in CartesianIndices(ms)
+        e = SpectralLayout.hermitian_weight(ks, I) *
+            Invariants._density_at(invariant, velocity_hat, velocity_hat, ks, I, M)
+        for n in eachindex(E)
+            E[n] += W[n][I] * e
+        end
+    end
+    E .*= _density_scale(invariant, FT)
+    return (; centers = collect(bands.centers), energies = E)
+end
 
 end # module BandTransfer

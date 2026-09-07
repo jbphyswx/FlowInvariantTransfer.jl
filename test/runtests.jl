@@ -17,6 +17,7 @@ using NonuniformFFTs: NonuniformFFTs
 using FlowFieldSpectra: FlowFieldSpectra
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using NUFSHT: NUFSHT
+using FlowGeometries: FlowGeometries as FG
 
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
@@ -218,6 +219,37 @@ Test.@testset "SpectralFlux — flux-sign convention Π = +cumsum(T)" begin
     r = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = FIT.Types.LinearBinning(2π/L), dealiasing = FIT.Types.NoDealiasing())
     Test.@test isapprox(r.flux, cumsum(r.transfer_spectrum); atol = 1e-12)
 end
+
+# -----------------------------------------------------------------------
+# Spectral-layout gate: analytic wavenumber axes, and the Hermitian weight that makes a half-spectrum
+# reduction equal the full-spectrum one. Every real-field diagnostic rests on this identity.
+include("test_layout.jl")
+
+# -----------------------------------------------------------------------
+# The consequence of that identity: every public diagnostic returns the same answer on a real field's
+# half spectrum as on its full one.
+include("test_half_equivalence.jl")
+
+# -----------------------------------------------------------------------
+# Device paths on a real device-array type (JLArrays under allowscalar(false)), which the
+# GPUBackend(KA.CPU()) proxy cannot exercise.
+include("test_device_paths.jl")
+
+# -----------------------------------------------------------------------
+# Coarse-graining on a caller-supplied FlowGeometries grid: structured 2D/3D, curvilinear, node set.
+include("test_geometry_grids.jl")
+
+# -----------------------------------------------------------------------
+# Spherical transfer routed from a grid's own sampling: the exact transform on the Clenshaw–Curtis
+# nodes it is defined on, the scattered least-squares fit on every other sphere sampling.
+include("test_spherical_grids.jl")
+
+# -----------------------------------------------------------------------
+# Batch entries: one workspace reused across a worker's snapshots, returning what the per-snapshot
+# calls return, in a concretely-typed vector.
+include("test_batch_entries.jl")
+include("test_band_energies.jl")
+include("test_decompose_physical.jl")
 
 # -----------------------------------------------------------------------
 # Comprehensive allocation contract (every !() path = 0 alloc; allocating entry points bounded).
@@ -705,7 +737,7 @@ end
 # -----------------------------------------------------------------------
 Test.@testset "CoarseGrainingFlux — 3D Cartesian Π_ℓ + diagnostics == CGEF directly" begin
     FT = Float64; N = 12; L = 2π
-    xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs); zs = copy(xs)
+    xs = range(0, L; length = N + 1)[1:N]; ys = copy(xs); zs = copy(xs)
     Random.seed!(29)
     u = randn(N, N, N); v = randn(N, N, N); w = randn(N, N, N); ℓ = L / 4
     r = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v, w), (xs, ys, zs), ℓ, FIT.Types.GaussianFilter())
@@ -714,7 +746,9 @@ Test.@testset "CoarseGrainingFlux — 3D Cartesian Π_ℓ + diagnostics == CGEF 
     Test.@test all(isfinite, r.flux_field)
     # Exact match to the sibling's true-3D compute_Π! on the same field/grid (wiring correctness).
     geom = CoarseGrainingEnergyFluxes.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    grid = CoarseGrainingEnergyFluxes.FlowGeometries.Grids.StructuredGrid(geom, FT.(xs), FT.(ys), FT.(zs), trues(N, N, N))
+    # The axes go in as the ranges the entry received: broadcasting them to `FT` materializes a dense
+    # vector, and a grid whose spacing is not in its axis type reaches a different CGEF engine.
+    grid = CoarseGrainingEnergyFluxes.FlowGeometries.Grids.StructuredGrid(geom, xs, ys, zs, trues(N, N, N))
     Πref = zeros(FT, N, N, N)
     CoarseGrainingEnergyFluxes.Diagnostics.compute_Π!(Πref, u, v, w, grid,
         CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), FT(ℓ))
@@ -730,8 +764,8 @@ end
 Test.@testset "CoarseGrainingFlux — spherical (lon–lat) Π_ℓ == CGEF directly" begin
     FT = Float64; R = 6.371e6
     Nlon, Nlat = 24, 20
-    lon = collect(range(0, 2π; length = Nlon + 1)[1:Nlon])   # radians, periodic
-    lat = collect(range(-1.2, 1.2; length = Nlat))           # radians, away from the poles
+    lon = range(0, 2π; length = Nlon + 1)[1:Nlon]   # radians, periodic
+    lat = range(-1.2, 1.2; length = Nlat)           # radians, away from the poles
     Random.seed!(37)
     u = randn(Nlon, Nlat); v = randn(Nlon, Nlat); ℓ = 5.0e5
     # radius=… selects the spherical grid; the sibling implements the spherical filter stencils.
@@ -754,7 +788,7 @@ end
 Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + workspace reuse" begin
     Random.seed!(7)
     N = 32; L = 2π
-    xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs)
+    xs = range(0, L; length = N + 1)[1:N]; ys = copy(xs)
     u  = [sin(xs[i]) * cos(ys[j]) + 0.2 * randn() for i in 1:N, j in 1:N]
     v  = [-cos(xs[i]) * sin(ys[j]) + 0.2 * randn() for i in 1:N, j in 1:N]
     filt = FIT.Types.GaussianFilter(); ℓ = 0.5
@@ -813,6 +847,10 @@ Test.@testset "calculate_energy_transfer — unified dispatch" begin
 end
 
 # -----------------------------------------------------------------------
+# Function barrier: `@allocated` at a testset's top level measures its own scope, so the call being
+# measured is made through a function with concretely-typed arguments.
+_alloc_from_spectral(ws, û) = (FIT.from_spectral!(ws, û); @allocated FIT.from_spectral!(ws, û))
+
 Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" begin
     N = 16; L = 2π
     x = range(0.0, L; length = N + 1)[1:N]
@@ -820,27 +858,63 @@ Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" be
     Random.seed!(11)
     u = randn(N, N); v = randn(N, N)
 
-    # FFT path reproduces the canonical û = fft(u)/Nᵈ + wavenumber_grid exactly.
+    # Real input takes the half (r2c) layout by default: the non-redundant `k₁ ≥ 0` coefficients and
+    # an `rfftfreq` first axis, reproducing the canonical û = rfft(u)/Nᵈ exactly.
     û_ts, ks_ts = FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.FFTSpectralBackend())
+    û_half = cat(FFTW.rfft(u), FFTW.rfft(v); dims = 3) ./ N^2
+    ks_half = FIT.Utils.wavenumber_grid((N, N), (L, L); real = true)
+    Test.@test size(û_ts) == (N ÷ 2 + 1, N, 2)
+    Test.@test isapprox(û_ts, û_half; atol = 1e-12)
+    Test.@test all(isapprox.(ks_ts, ks_half; atol = 1e-12))
+
+    # `real_layout = false` keeps the full complex spectrum, û = fft(u)/Nᵈ on the fftfreq grid.
+    û_full, ks_full = FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.FFTSpectralBackend(),
+                                      real_layout = false)
     û_man = cat(FFTW.fft(u), FFTW.fft(v); dims = 3) ./ N^2
     ks_man = FIT.Utils.wavenumber_grid((N, N), (L, L))
-    Test.@test isapprox(û_ts, û_man; atol = 1e-12)
-    Test.@test all(isapprox.(ks_ts, ks_man; atol = 1e-12))
+    Test.@test isapprox(û_full, û_man; atol = 1e-12)
+    Test.@test all(isapprox.(ks_full, ks_man; atol = 1e-12))
 
-    # DirectSum reference agrees with FFT.
-    û_ds, _ = FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.DirectSumSpectralBackend())
+    # DirectSum reference agrees with FFT, on both layouts.
+    û_ds, _ = FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.DirectSumSpectralBackend(),
+                              real_layout = false)
     Test.@test isapprox(û_ds, û_man; atol = 1e-10)
+    û_dsh, _ = FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.DirectSumSpectralBackend())
+    Test.@test isapprox(û_dsh, û_half; atol = 1e-10)
 
-    # A diagnostic computed from to_spectral output matches the hand-built coefficient path.
+    # The two layouts are the same field, so every diagnostic built on them agrees: the half spectrum
+    # carries the Hermitian weight that makes its shell sums equal the full-spectrum ones.
     Π_ts  = FIT.SpectralFlux.calculate_spectral_flux(û_ts, ks_ts; spectral = SpectralBackends.FFTSpectralBackend())
     Π_man = FIT.SpectralFlux.calculate_spectral_flux(û_man, ks_man; spectral = SpectralBackends.FFTSpectralBackend())
-    Test.@test isapprox(Π_ts.flux, Π_man.flux; atol = 1e-12)
+    Test.@test maximum(abs, Π_man.flux) > 1e-8
+    Test.@test isapprox(Π_ts.flux, Π_man.flux; rtol = 1e-10)
 
     # Scalar 1-tuple (density/pressure/passive-scalar style).
     ρ = randn(N, N)
     ρ̂, _ = FIT.to_spectral((ρ,), (x, y); spectral = SpectralBackends.FFTSpectralBackend())
-    Test.@test size(ρ̂) == (N, N, 1)
-    Test.@test isapprox(ρ̂[:, :, 1], FFTW.fft(ρ) ./ N^2; atol = 1e-12)
+    Test.@test size(ρ̂) == (N ÷ 2 + 1, N, 1)
+    Test.@test isapprox(ρ̂[:, :, 1], FFTW.rfft(ρ) ./ N^2; atol = 1e-12)
+
+    # Complex input has no Hermitian symmetry to exploit and stays on the full grid.
+    ûc, ksc = FIT.to_spectral((ComplexF64.(u), ComplexF64.(v)), (x, y); spectral = SpectralBackends.FFTSpectralBackend())
+    Test.@test size(ûc) == (N, N, 2)
+    Test.@test isapprox(ûc, û_man; atol = 1e-12)
+
+    # `from_spectral` inverts it on either layout, closing the loop for the entries that hand a user
+    # coefficients (a spectral decomposition, a spectral filter).
+    for rl in (true, false)
+        ûr, ksr = FIT.to_spectral((u, v), (x, y); real_layout = rl)
+        back = FIT.from_spectral(ûr, ksr)
+        Test.@test maximum(abs, back[1] .- u) < 1e-12 * maximum(abs, u)
+        Test.@test maximum(abs, back[2] .- v) < 1e-12 * maximum(abs, v)
+    end
+    # The `!` form reuses the workspace and returns the stacked `(ns…, D)` array.
+    û_rt, ks_rt = FIT.to_spectral((u, v), (x, y))
+    ws_rt = FIT.ToSpectralWorkspace(û_rt, ks_rt)
+    phys_rt = FIT.from_spectral!(ws_rt, û_rt)
+    Test.@test size(phys_rt) == (N, N, 2)
+    Test.@test maximum(abs, phys_rt[:, :, 1] .- u) < 1e-12 * maximum(abs, u)
+    Test.@test _alloc_from_spectral(ws_rt, û_rt) == 0
 
     # Scattered / spherical transforms are a geometry mismatch here → clear error, not a silent misroute.
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.Types.FINUFFTBackend())
@@ -1129,10 +1203,19 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
     u = [cos(x) for x in x, y in y]
     v = [sin(y) for x in x, y in y]
 
+    # A decomposition solves on the domain, so it takes the grid those axes describe — here the
+    # periodic box the fields are sampled on.
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    grid2 = FG.Grids.StructuredGrid(cart, x, y; topology = (true, true))
+
     cg_none = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.NoDecomposition())
-    cg_helm = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.HelmholtzDecomposition())
-    cg_rot  = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.RotationalDecomposition())
-    cg_div  = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (x, y), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.DivergentDecomposition())
+    cg_helm = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), grid2, 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.HelmholtzDecomposition())
+    cg_rot  = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), grid2, 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.RotationalDecomposition())
+    cg_div  = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), grid2, 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.DivergentDecomposition())
+
+    # Coordinate vectors carry no topology to solve on, so the decomposition refuses them.
+    Test.@test_throws ArgumentError FIT.CoarseGrainingFlux.calculate_coarse_graining_flux(
+        (u, v), (x, y), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.HelmholtzDecomposition())
 
     Test.@test cg_none isa FIT.Types.CoarseGrainingFluxResult
     Test.@test cg_helm isa NamedTuple
@@ -1141,16 +1224,28 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
     Test.@test cg_div isa FIT.Types.CoarseGrainingFluxResult
 
     # 3. 3D coarse-graining with Helmholtz decomposition (physical-space decompose + 3D CGEF flux).
-    M = 8; x3 = collect(range(0, L; length=M+1)[1:M]); y3 = copy(x3); z3 = copy(x3)
+    # Range axes: the spacing is proved at the type level, which is the uniform grid the
+    # transform-based solvers and filters are defined on.
+    M = 8; x3 = range(0, L; length=M+1)[1:M]; y3 = copy(x3); z3 = copy(x3)
     u3 = [cos(xi) * sin(zi) for xi in x3, yi in y3, zi in z3]
     v3 = [sin(yi)           for xi in x3, yi in y3, zi in z3]
     w3 = [cos(zi)           for xi in x3, yi in y3, zi in z3]
+    grid3 = FG.Grids.StructuredGrid(cart, x3, y3, z3; topology = (true, true, true))
     cg3_none = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u3, v3, w3), (x3, y3, z3), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.NoDecomposition())
-    cg3_helm = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u3, v3, w3), (x3, y3, z3), 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.HelmholtzDecomposition())
+    cg3_helm = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u3, v3, w3), grid3, 1.0, FIT.Types.GaussianFilter(); decomposition=FIT.Types.HelmholtzDecomposition())
     Test.@test cg3_none isa FIT.Types.CoarseGrainingFluxResult && size(cg3_none.flux_field) == (M, M, M)
     Test.@test cg3_helm isa NamedTuple && haskey(cg3_helm, :rotational) && haskey(cg3_helm, :divergent)
     Test.@test size(cg3_helm.rotational.flux_field) == (M, M, M)
     Test.@test all(isfinite, cg3_helm.divergent.flux_field)
+
+    # The identity that defines the split: the two parts reconstruct the field. A solver that answered
+    # a different boundary-value problem passes every assertion above and fails this one.
+    rot3, div3 = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), grid3)
+    for (c, f) in enumerate((u3, v3, w3))
+        Test.@test maximum(abs, rot3[c] .+ div3[c] .- f) < 1e-10 * maximum(abs, f)
+    end
+    # The divergent part of this field is nonzero, so the split is doing work.
+    Test.@test maximum(abs, div3[1]) > 1e-8
 end
 
 # -----------------------------------------------------------------------
@@ -1162,6 +1257,9 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     # Load the package and extensions on all workers
     Distributed.@everywhere using FlowInvariantTransfer: FlowInvariantTransfer as FIT
     Distributed.@everywhere using SharedArrays
+    # The transform runs where the mediator columns are computed, so the workers need it too: the
+    # entries resolve `AutoSpectralBackend` on the master and hand the workers a concrete backend.
+    Distributed.@everywhere using FFTW
 
     # Create sample data
     Random.seed!(42)
@@ -1277,7 +1375,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
         ψh = FFTW.fft(randn(N, N)) ./ N^2
         cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)            # divergence-free snapshot
     end
-    xs = collect(range(0, L; length = N + 1)[1:N]); ys = copy(xs)
+    xs = range(0, L; length = N + 1)[1:N]; ys = copy(xs)
     ufields = map(_ -> (randn(N, N), randn(N, N)), 1:nsnap)        # physical fields for coarse-graining
     filt = FIT.Types.GaussianFilter(); ℓ = 0.5
 
@@ -1664,8 +1762,8 @@ Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
     Test.@test maximum(abs, Array(ts_d) .- ts_h) == 0
 
     # Compressible device helpers (copy-trunc / Helmholtz split / shell bin) match the scalar CPU path.
-    dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, (N, N), 2, true)
-    dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), (N, N), 2, true)
+    dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, ks2, (N, N), true)
+    dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), ks2, (N, N), true)
     Test.@test maximum(abs, Array(dcd) .- dch) == 0
     rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, ks2, (N, N))
     rd = JLArrays.JLArray(similar(û2)); cd = JLArrays.JLArray(similar(û2))
@@ -1675,8 +1773,8 @@ Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
     kmag = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2); bb = FIT.Types.LinearBinning(2π / L)
     edges = FIT.ShellBinning.shell_edges(bb, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
     Nsh = length(collect(FIT.ShellBinning.shell_centers(bb, maximum(kmag))))
-    Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, (N, N), true)
-    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, (N, N), true)
+    Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, ks2, (N, N), true)
+    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, ks2, (N, N), true)
     Test.@test maximum(abs, Td .- Th) == 0
 end
 
@@ -2018,7 +2116,7 @@ end
 # Spherical spectral transfer (FSH extension, 2D-barotropic).
 # The rigorous anchor is exact conservation Σ_l T = 0 (= ∫ψ J(ψ,ζ) dΩ = 0 by antisymmetry),
 # which holds to machine precision iff the quadratic Jacobian is dealiased (evaluated on the
-# 2·lmax grid). Convention verified directly against FSH's eth definition (see THEORY.md §6.1).
+# 2·lmax grid). Convention verified directly against FSH's eth definition.
 Test.@testset "Spherical spectral transfer (FastSphericalHarmonics, 2D barotropic)" begin
     lmax = 20; N = lmax + 1
     rng = Random.MersenneTwister(2024)

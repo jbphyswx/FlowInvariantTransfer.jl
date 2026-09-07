@@ -51,7 +51,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
     rngs = collect(OhMyThreads.index_chunks(1:N_sh; n = nchunks))
     pool = [(nlw = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
              ûm = similar(velocity_hat),
-             d  = similar(velocity_hat, FT, ns...)) for _ in 1:length(rngs)]
+             col = zeros(FT, N_sh)) for _ in 1:length(rngs)]
 
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         p = pool[ci]
@@ -69,15 +69,11 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
             FIT.NonlinearTerm.compute_nonlinear_term!(p.nlw, p.ûm, ks;
                 dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
 
-            FIT.Invariants.transfer_density!(p.d, invariant, velocity_hat, p.nlw.N̂, ks)
-
-            for n in 1:N_sh
-                s = zero(FT)
-                for I in CartesianIndices(ns)
-                    shell_idx[I] == n || continue
-                    s += p.d[I]
-                end
-                result.transfer_matrix[n, m] = s
+            # Column m in ONE pass over the modes (each mode lands in its own receiver shell), and
+            # with no per-mediator density grid: the per-chunk scratch is a length-N_sh vector.
+            FIT.Invariants.transfer_density_scatter!(p.col, invariant, velocity_hat, p.nlw.N̂, ks, shell_idx)
+            @inbounds for n in 1:N_sh
+                result.transfer_matrix[n, m] = p.col[n]
             end
         end
     end
@@ -140,10 +136,11 @@ function FIT.SpectralFlux._spectral_flux_threaded!(
     nchunks = max(1, Threads.nthreads())
     T = OhMyThreads.tmapreduce(+, OhMyThreads.index_chunks(1:Np; n = nchunks)) do rng
         t = zeros(FT, N_sh)
+        cis = CartesianIndices(ns)
         @inbounds for i in rng
             n = shell_idx[i]
             n == 0 && continue
-            t[n] += td[i]
+            t[n] += FIT.SpectralLayout.hermitian_weight(ks, cis[i]) * td[i]
         end
         t
     end
@@ -212,6 +209,66 @@ end
 # ---------------------------------------------------------------------------
 # Thread-parallel band-to-band BATCH (snapshots are the outer parallel axis)
 # ---------------------------------------------------------------------------
+# Overrides `_partial_fluxes_batch_threaded!`. One nonlinear-term workspace per chunk, reused across
+# that chunk's snapshots with a serial inner transform.
+function FIT.SpectralFlux._partial_fluxes_batch_threaded!(velocity_hats, ks; kwargs...)
+    n = length(velocity_hats)
+    û1 = first(velocity_hats)
+    nchunks = max(1, min(Threads.nthreads(), n))
+    rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
+    chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
+        ws = FIT.Workspaces.NonlinearTermWorkspace(û1, ks)
+        [FIT.SpectralFlux.calculate_partial_fluxes!(ws, velocity_hats[i], ks; kwargs...) for i in rngs[ci]]
+    end
+    return reduce(vcat, chunk_results)
+end
+
+# Overrides `_nufft_cg_batch_threaded!`. One NUFFT workspace (plans + buffers) per chunk, reused across
+# that chunk's snapshots. Each result is copied out because `nufft_coarse_graining_flux!` wraps the
+# workspace's own `Π`, which the chunk's next snapshot overwrites.
+function FIT._nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms;
+                                       spectral, Ls, return_diagnostics::Bool = false, kwargs...)
+    n = length(batch)
+    nchunks = max(1, min(Threads.nthreads(), n))
+    rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
+    chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
+        ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; spectral = spectral, Ls = Ls,
+                                              return_diagnostics = return_diagnostics, kwargs...)
+        [deepcopy(FIT.nufft_coarse_graining_flux!(ws, batch[i], ℓ, filter, ms;
+                                                  return_diagnostics = return_diagnostics))
+         for i in rngs[ci]]
+    end
+    return reduce(vcat, chunk_results)
+end
+
+# Overrides `_compressible_batch_threaded!`. Each chunk reuses one CompressibleWorkspace across its
+# snapshots (pipeline serial → bit-identical to the serial batch, no nested threading). That workspace
+# is the largest the package builds, and a chunk allocates one for its whole run of snapshots.
+#
+# Each chunk returns its own concretely-typed vector and `reduce(vcat, …)` concatenates them; the
+# chunks are contiguous ascending ranges, so the result is in input order.
+function FIT.Compressible._compressible_batch_threaded!(
+    velocity_hats, density_hats, pressure_hats, ks;
+    spectral, binning, geometry, dealiasing, decompose,
+)
+    n = length(velocity_hats)
+    û1 = first(velocity_hats)
+    nchunks = max(1, min(Threads.nthreads(), n))
+    rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
+    pool = [FIT.Compressible.CompressibleWorkspace(û1, ks; spectral = spectral, binning = binning,
+                                                   geometry = geometry, decompose = decompose,
+                                                   with_pressure = pressure_hats !== nothing)
+            for _ in eachindex(rngs)]
+    chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
+        ws = pool[ci]
+        [FIT.Compressible.calculate_compressible_flux!(
+             ws, velocity_hats[i], density_hats[i], ks;
+             pressure_hat = pressure_hats === nothing ? nothing : pressure_hats[i],
+             dealiasing = dealiasing, decompose = decompose) for i in rngs[ci]]
+    end
+    return reduce(vcat, chunk_results)
+end
+
 # Overrides `_band_to_band_batch_threaded!`. Each chunk reuses one BandTransferWorkspace across its
 # snapshots (transform serial → bit-identical to the serial batch, no nested threading).
 function FIT.BandTransfer._band_to_band_batch_threaded!(
@@ -275,7 +332,6 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
     nTriads = length(fk_idx)
     nStateNx = nState * nx
     CT = eltype(Q_hat)
-    lk = ReentrantLock()
 
     # Chunk the triads so each task reuses ONE set of scratch (SVD buffers + reshape buffers) across its
     # triads — exactly like the serial loop — instead of allocating per triad. The pool is built ONCE,
@@ -319,25 +375,19 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_threaded!(
                 end
                 T_budget[fi_l, fi_n, j] = s[j] * real(acc)
             end
-            lock(lk) do
-                P[(fi_l, fi_n)] = (convective = u, recipient = v)
-            end
+            P[i] = (convective = u, recipient = v)
 
             if return_coefficients
                 A_conv = u' * (Q_hat_kl .* weights)
                 A_recip = v' * (Q_hat_n .* weights)
-                lock(lk) do
-                    A_out[(fi_l, fi_n)] = (convective = A_conv, recipient = A_recip)
-                end
+                A_out[i] = (convective = A_conv, recipient = A_recip)
                 if return_auxiliary_modes
                     Q_hat_l = reshape(permutedims(LHS(Q_l_raw), (2, 1, 3)), nStateNx, nBlks)
                     Q_hat_k = reshape(permutedims(LHS(Q_k_raw), (2, 1, 3)), nStateNx, nBlks)
                     inv_s = 1 ./ s[1:nm]
                     donor_mode = Q_hat_l * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
                     catalyst_mode = Q_hat_k * A_recip' * LinearAlgebra.Diagonal(inv_s) ./ nBlks
-                    lock(lk) do
-                        Xi_out[(fi_l, fi_n)] = (donor = donor_mode[:, 1:nm], catalyst = catalyst_mode[:, 1:nm])
-                    end
+                    Xi_out[i] = (donor = donor_mode[:, 1:nm], catalyst = catalyst_mode[:, 1:nm])
                 end
             end
         end
@@ -433,7 +483,7 @@ function FIT.BandTransfer._band_to_band_threaded!(
             for n in 1:nb
                 s = zero(FT)
                 for I in CartesianIndices(ns)
-                    s += W[n][I] * p.d[I]
+                    s += FIT.SpectralLayout.hermitian_weight(ks, I) * W[n][I] * p.d[I]
                 end
                 T[n, m] = s
             end
@@ -470,7 +520,7 @@ function FIT.SpectralFlux._partial_fluxes_threaded!(
                 advecting_hat = comps[sp], dealiasing = dealiasing, spectral = spectral)
             for sk in names
                 FIT.Invariants.transfer_density!(p.d, FIT.Types.KineticEnergy(), comps[sk], p.ws.N̂, ks)
-                p.ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(p.d, sidx, centers, Nsh)
+                p.ch[(sk, sp, sq)] = FIT.SpectralFlux._partial_binflux(p.d, sidx, ks, centers, Nsh)
             end
         end
     end

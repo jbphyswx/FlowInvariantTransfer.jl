@@ -45,7 +45,7 @@ end
 # The transform machinery (analysis/synthesis, eth gradients) lives in the extensions:
 # FastSphericalHarmonics for regular colatitude–longitude grids; NUFSHT for scattered points.
 # Both share the reduction below by flattening their coefficients to per-mode arrays.
-# (Augier–Lindborg 2013; Boer 1983; see THEORY.md §"Spherical spectral transfer".)
+# (Augier–Lindborg 2013; Boer 1983.)
 # ---------------------------------------------------------------------------
 
 """
@@ -107,7 +107,7 @@ lets a snapshot time series on the same points reuse them. NUFSHT plans self-fin
 resources, so this struct needs no finalizer. Fields are typed via parameters so the core names no
 NUFSHT type. Requires `using NUFSHT`.
 """
-struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, RES, R}
+struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, QW, RES, R}
     plan0::P0        # spin-0 analysis plan at lmax
     plan1::P1        # spin-1 synthesis plan at lmax
     plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
@@ -123,6 +123,10 @@ struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, RES,
     degcol::DC       # (lmax+1, 1) degrees 0:lmax — row-broadcast for the coefficient-space ops
     Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
     Tcol::TC         # (lmax+1, 1) real per-degree column-sum scratch
+    # (M,) quadrature weights, `Σw = 4π`, when the nodes carry a rule exact at degree `2·lwork`.
+    # Analysis is then the weighted adjoint `Σⱼ wⱼ fⱼ conj(sYlm(xⱼ))`. `nothing` at points carrying no
+    # such rule, where analysis is the least-squares fit.
+    qw::QW
     result::RES      # reused Types.SphericalTransferResult
     radius::R
     lmax::Int
@@ -258,7 +262,16 @@ therefore just carries the reused [`DivergentSphericalTransferResult`](@ref) and
 parameters. Fields are typed via parameters so the core names no extension type. Requires
 `using FastSphericalHarmonics`.
 """
-struct DivergentSphericalTransferWorkspace{RES, R}
+struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC}
+    uθw::RW          # (lwork) velocity components on the work grid
+    uφw::RW
+    ζw::RW           # (lwork) vorticity / divergence on the work grid
+    δw::RW
+    K::RW            # (lwork) kinetic energy ½|u|²
+    Adv::CW          # (lwork) complex spin+1 advection A = ∇K + (iζ + ½δ)U₊
+    Cw1::CW          # (lwork) spin+1 embed target
+    Cw0::RW          # (lwork) spin-0 embed target
+    χc::RC           # (lmax) velocity-potential coefficients χ = ∇⁻²δ
     result::RES      # reused Types.DivergentSphericalTransferResult
     radius::R
     lmax::Int
@@ -280,7 +293,7 @@ spin +1 at the dealiased `lwork = 2·lmax`) with the points preset, plus every c
 buffer and the result. The plans are the dominant reusable cost. Fields are typed via parameters so the
 core names no NUFSHT type. Requires `using NUFSHT`.
 """
-struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, CM, CMW, CV, RV, RVW, PB, TC, RES, R}
+struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, CM, CMW, CV, RV, RVW, PB, TC, QW, RES, R}
     planp::PP        # spin+1 analysis plan at lmax
     planm::PM        # spin−1 analysis plan at lmax
     plan0::P0        # spin-0 synthesis plan at lmax (vorticity/divergence)
@@ -297,6 +310,9 @@ struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, CM, CM
     ladw::RVW                                # (lwork+1,1) ladder at lwork
     Pr::PB                                   # (lmax+1, 2lmax+1) real product scratch (row-sum reduce)
     Tcol::TC                                 # (lmax+1,1) real per-degree column-sum scratch
+    # (M,) quadrature weights, `Σw = 4π`, when the nodes carry a rule exact at degree `2·lwork`;
+    # `nothing` at points carrying no such rule. See the barotropic workspace.
+    qw::QW
     result::RES
     radius::R
     lmax::Int

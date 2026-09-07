@@ -1,5 +1,7 @@
 module Utils
 
+using ..SpectralLayout: SpectralLayout
+
 export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 export as_component_field
@@ -27,38 +29,19 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    wavenumber_grid(ns, Ls) -> NTuple{D, Vector{Float64}}
+    wavenumber_grid(ns, Ls; real=false) -> NTuple{D, AbstractWavenumberAxis}
 
-Return a tuple of 1D physical-wavenumber vectors matching the FFTW `fftfreq`
-convention (centered at zero after fftshift).
-
-# Arguments
-- `ns::NTuple{D,Int}`: Number of grid points along each dimension.
-- `Ls::NTuple{D,Float64}`: Physical domain size along each dimension.
-
-# Returns
-Tuple of length D; element d is the range
-  k_d ∈ [−⌊N_d/2⌋, ⌊(N_d−1)/2⌋] × (2π / L_d).
-
-# Example
-```julia
-ks = wavenumber_grid((16, 16), (2π, 2π))
-# ks[1] and ks[2] are both [-8, -7, ..., 7] * (2π/2π)
-```
+The physical wavenumber axes of an `ns`-point periodic grid of side lengths `Ls`, `k = 2πm/L`, in the
+FFTW `fftfreq` order (`m = 0, 1, …, ⌊(N−1)/2⌋, −⌊N/2⌋, …, −1`). With `real = true` the first axis is
+the `rfftfreq` half `m = 0…N₁÷2` — the layout of a real field's `rfft` — and the remaining axes stay
+`fftfreq`. The axes are analytic ([`SpectralLayout.FullAxis`](@ref) / [`SpectralLayout.HalfAxis`](@ref)):
+no wavenumber array is stored, and they carry the field's spectral layout for every diagnostic.
 """
-function wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D}) where {D}
+function wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D}; real::Bool = false) where {D}
     FT = promote_type(map(x -> typeof(float(x)), Ls)...)
     return ntuple(Val(D)) do d
-        N  = ns[d]
         dk = FT(2π) / FT(Ls[d])
-        ks = zeros(FT, N)
-        for i in 1:N
-            k_idx = i - 1
-            # fftfreq/FFTW ordering: even-N Nyquist is -N/2, not +N/2. `2·k_idx < N` gets the sign right
-            # for both parities — magnitude/|k| uses are immune, signed-k (derivative) uses are not.
-            ks[i] = 2 * k_idx < N ? k_idx * dk : (k_idx - N) * dk
-        end
-        return ks
+        (real && d == 1) ? SpectralLayout.HalfAxis(ns[d], dk) : SpectralLayout.FullAxis(ns[d], dk)
     end
 end
 

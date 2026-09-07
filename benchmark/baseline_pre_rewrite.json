@@ -1,0 +1,188 @@
+{
+    "allocs": {
+        "to_spectral_uniform": {
+            "convenience/2D/N128": 1580544,
+            "convenience/2D/N256": 6305088,
+            "convenience/3D/N32": 4198384,
+            "convenience/3D/N64": 33560816
+        },
+        "mode_to_mode": {
+            "hot/2D/N16": 0
+        },
+        "nonlinear_term": {
+            "hot/2D/N128": 0,
+            "hot/3D/N64": 0,
+            "hot/3D/N32": 0,
+            "hot/2D/N256": 0
+        },
+        "compressible": {
+            "hot/2D/N128": 8736,
+            "convenience/2D/N128": 16671856,
+            "convenience/3D/N32": 52703104,
+            "convenience/3D/N64": 421545984,
+            "hot/3D/N64": 5568,
+            "hot/3D/N32": 3168,
+            "convenience/2D/N256": 66628784,
+            "hot/2D/N256": 15456
+        },
+        "nufft_coarse_graining": {
+            "hot/nonuniformffts/2D/np200000/ms256": 9728,
+            "convenience/finufft/2D/np200000/ms256": 36223424,
+            "hot/nonuniformffts/3D/np200000/ms64": 19328,
+            "convenience/nonuniformffts/3D/np200000/ms64": 203384592,
+            "hot/finufft/3D/np200000/ms64": 32,
+            "hot/finufft/2D/np200000/ms256": 32,
+            "convenience/finufft/3D/np200000/ms64": 87597216,
+            "convenience/nonuniformffts/2D/np200000/ms256": 56011136
+        },
+        "partial_fluxes": {
+            "hot/helical/3D/N64": 79752096,
+            "hot/helical/3D/N32": 9982048
+        },
+        "cgef_coarse_graining": {
+            "convenience/2D/N256": 9757664,
+            "hot/2D/N256": 0
+        },
+        "to_spectral_scattered": {
+            "hot/nonuniformffts/2D/np200000/ms256": 1536,
+            "hot/nonuniformffts/3D/np200000/ms64": 2352,
+            "hot/finufft/3D/np200000/ms64": 0,
+            "hot/finufft/2D/np200000/ms256": 0
+        },
+        "band_to_band": {
+            "hot/2D/N128": 0,
+            "hot/3D/N64": 0,
+            "hot/3D/N32": 0,
+            "hot/2D/N256": 0
+        },
+        "spectral_flux": {
+            "hot/2D/N128": 0,
+            "convenience/2D/N128": 3195168,
+            "convenience/3D/N32": 9247264,
+            "convenience/3D/N64": 73935280,
+            "hot/3D/N64": 0,
+            "hot/3D/N32": 0,
+            "convenience/2D/N256": 12756000,
+            "hot/2D/N256": 0
+        },
+        "shell_to_shell": {
+            "hot/2D/N128": 0,
+            "hot/3D/N64": 0,
+            "hot/3D/N32": 0,
+            "hot/2D/N256": 0
+        },
+        "decomposition": {
+            "hot/helical/3D/N64": 73438608,
+            "hot/helical/3D/N32": 9183120
+        }
+    },
+    "threads": 1,
+    "times_ns": {
+        "to_spectral_uniform": {
+            "convenience/2D/N128": 885244,
+            "convenience/2D/N256": 4.2916795e6,
+            "convenience/3D/N32": 2344046,
+            "convenience/3D/N64": 19443397
+        },
+        "mode_to_mode": {
+            "hot/2D/N16": 2687773
+        },
+        "nonlinear_term": {
+            "hot/2D/N128": 1220371,
+            "hot/3D/N64": 56656246,
+            "hot/3D/N32": 4614686,
+            "hot/2D/N256": 5988552
+        },
+        "compressible": {
+            "hot/2D/N128": 11341054,
+            "convenience/2D/N128": 17750946,
+            "convenience/3D/N32": 58448627,
+            "convenience/3D/N64": 648106703,
+            "hot/3D/N64": 502034840,
+            "hot/3D/N32": 41575346,
+            "convenience/2D/N256": 98531606,
+            "hot/2D/N256": 59057349
+        },
+        "nufft_coarse_graining": {
+            "hot/nonuniformffts/2D/np200000/ms256": 1037795240,
+            "convenience/finufft/2D/np200000/ms256": 264550481,
+            "hot/nonuniformffts/3D/np200000/ms64": 31044423749,
+            "convenience/nonuniformffts/3D/np200000/ms64": 37260053113,
+            "hot/finufft/3D/np200000/ms64": 2.7213442975e9,
+            "hot/finufft/2D/np200000/ms256": 237972734,
+            "convenience/finufft/3D/np200000/ms64": 4285325987,
+            "convenience/nonuniformffts/2D/np200000/ms256": 1195492177
+        },
+        "partial_fluxes": {
+            "hot/helical/3D/N64": 345906232,
+            "hot/helical/3D/N32": 27490787
+        },
+        "cgef_coarse_graining": {
+            "convenience/2D/N256": 18203177,
+            "hot/2D/N256": 1.42861335e7
+        },
+        "to_spectral_scattered": {
+            "hot/nonuniformffts/2D/np200000/ms256": 7.40868375e7,
+            "hot/nonuniformffts/3D/np200000/ms64": 1717239543,
+            "hot/finufft/3D/np200000/ms64": 3.999705065e8,
+            "hot/finufft/2D/np200000/ms256": 31298152
+        },
+        "band_to_band": {
+            "hot/2D/N128": 6007475,
+            "hot/3D/N64": 308416165,
+            "hot/3D/N32": 22751671,
+            "hot/2D/N256": 28402857
+        },
+        "spectral_flux": {
+            "hot/2D/N128": 1.2005145e6,
+            "convenience/2D/N128": 3513838,
+            "convenience/3D/N32": 9693249,
+            "convenience/3D/N64": 99284632,
+            "hot/3D/N64": 58539043,
+            "hot/3D/N32": 4.7769345e6,
+            "convenience/2D/N256": 18131669,
+            "hot/2D/N256": 6.3095925e6
+        },
+        "shell_to_shell": {
+            "hot/2D/N128": 1.171390525e8,
+            "hot/3D/N64": 3474676084,
+            "hot/3D/N32": 1.373623755e8,
+            "hot/2D/N256": 1292648910
+        },
+        "decomposition": {
+            "hot/helical/3D/N64": 40654433,
+            "hot/helical/3D/N32": 5050305
+        }
+    },
+    "workspace_bytes": {
+        "NUFFTToSpectralWorkspace finufft 2D/np200000/ms256": 9549824,
+        "NonlinearTermWorkspace 2D/N128": 2375680,
+        "ShellToShellWorkspace 2D/N256  (N_sh=182)": 12914896,
+        "ShellToShellWorkspace 2D/N128  (N_sh=91)": 3229088,
+        "CompressibleWorkspace 2D/N256": 63964592,
+        "NUFFTToSpectralWorkspace finufft 3D/np200000/ms64": 24778752,
+        "SpectralFluxWorkspace 2D/N128": 2508208,
+        "NonlinearTermWorkspace 2D/N256": 9502720,
+        "ShellToShellWorkspace 3D/N64  (N_sh=56)": 75785152,
+        "SpectralFluxWorkspace 3D/N32": 7635392,
+        "CoarseGrainingFluxWorkspace 2D/N256": 10326112,
+        "SpectralFluxWorkspace 2D/N256": 10029920,
+        "NUFFTCoarseGrainingWorkspace nonuniformffts 2D/np200000/ms256": 49548960,
+        "NonlinearTermWorkspace 3D/N64": 58982400,
+        "NUFFTCoarseGrainingWorkspace finufft 2D/np200000/ms256": 35646976,
+        "CompressibleWorkspace 2D/N128": 15991512,
+        "ShellToShellWorkspace 3D/N32  (N_sh=28)": 9476448,
+        "CompressibleWorkspace 3D/N32": 51380448,
+        "NUFFTCoarseGrainingWorkspace finufft 3D/np200000/ms64": 76864512,
+        "BandTransferWorkspace 2D/N256  (nb=4)": 14221344,
+        "NUFFTToSpectralWorkspace nonuniformffts 2D/np200000/ms256": 14895272,
+        "BandTransferWorkspace 3D/N32  (nb=4)": 10256416,
+        "BandTransferWorkspace 3D/N64  (nb=4)": 82051104,
+        "NonlinearTermWorkspace 3D/N32": 7372800,
+        "NUFFTCoarseGrainingWorkspace nonuniformffts 3D/np200000/ms64": 152155392,
+        "CompressibleWorkspace 3D/N64": 411042240,
+        "NUFFTToSpectralWorkspace nonuniformffts 3D/np200000/ms64": 58543656,
+        "BandTransferWorkspace 2D/N128  (nb=4)": 3555360,
+        "SpectralFluxWorkspace 3D/N64": 61080448
+    }
+}

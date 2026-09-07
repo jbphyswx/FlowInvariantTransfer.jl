@@ -276,7 +276,8 @@ coarse-graining / spherical layers.
 
 ## See also
 
-- [`THEORY.md`](THEORY.md) — sign conventions, normalizations, and references for every diagnostic.
+- [Documentation](https://jbphyswx.github.io/FlowInvariantTransfer.jl/) — sign conventions,
+  normalizations, and references for every diagnostic.
 - The `jbphyswx` flow ecosystem: spectra (`FlowFieldSpectra.jl`), the rotational/divergent solve
   (`HelmholtzDecomposition.jl`), and pointwise coarse-graining (`CoarseGrainingEnergyFluxes.jl`).
 

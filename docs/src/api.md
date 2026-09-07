@@ -10,6 +10,25 @@ CurrentModule = FlowInvariantTransfer
 calculate_energy_transfer
 ```
 
+## Physical → Spectral
+
+The diagnostics take Fourier coefficients, so gridded physical data is transformed here once. A real
+field takes the half (`rfft`) layout by default — the non-redundant `k₁ ≥ 0` coefficients, with `ks[1]`
+an `rfftfreq` axis — which every diagnostic consumes directly; pass `real_layout = false` for the full
+complex spectrum. Build the workspace once to reuse the plans and buffers across snapshots.
+
+The domain is given either as the per-axis coordinate vectors of a uniform periodic box, or as a
+`FlowGeometries` grid. Passing a grid (`using FlowFieldSpectra`) selects the transform from the grid
+itself through `FlowFieldSpectra.plan_spectrum` — the tensor-product FFT on a uniform Cartesian grid,
+the FFT/NUFFT composite where some directions are stretched — and reads the period the grid declares.
+
+```@docs
+to_spectral
+ToSpectralWorkspace
+from_spectral
+from_spectral!
+```
+
 ## Spectral Flux
 
 ```@docs
@@ -47,7 +66,10 @@ calculate_band_to_band_transfer_batch
 
 ```@docs
 calculate_partial_fluxes
+calculate_partial_fluxes!
+calculate_partial_fluxes_batch
 calculate_helical_partial_fluxes
+calculate_helical_partial_fluxes!
 ```
 
 ## Compressible Energy Transfer
@@ -55,6 +77,7 @@ calculate_helical_partial_fluxes
 ```@docs
 calculate_compressible_flux
 calculate_compressible_flux!
+calculate_compressible_flux_batch
 ```
 
 ## Coarse-Graining Flux
@@ -62,7 +85,9 @@ calculate_compressible_flux!
 ```@docs
 calculate_coarse_graining_flux
 calculate_coarse_graining_flux_batch
+calculate_enstrophy_flux
 nufft_coarse_graining_flux
+nufft_coarse_graining_flux_batch
 ```
 
 ## Scattered-Cartesian NUFFT
@@ -124,9 +149,28 @@ FlowInvariantTransfer.Invariants.transfer_density!
 
 ## Field Decomposition
 
+`decompose_field` splits a field on either side of the transform. Given coefficients it returns
+coefficients; given physical fields and a `FlowGeometries` grid it returns physical fields — the
+Helmholtz family by solving on the grid, and the per-mode splits (helical, toroidal/poloidal) by
+analysing, projecting and synthesising each component back.
+
 ```@docs
 FlowInvariantTransfer.Decomposition.decompose_field
+FlowInvariantTransfer.Decomposition.decompose_field!
 FlowInvariantTransfer.Decomposition.helmholtz_project_spectral!
+```
+
+## Band Energies
+
+The content of an invariant in each band, `E(n) = Σ_k w_n(k)·e(k)`. The band definition supplies the
+weight `w_n` and nothing else: an `AbstractShellBinning` gives the sharp indicator of a shell, and
+`SmoothBands` the graded partition of unity [`calculate_band_to_band_transfer`](@ref) moves energy
+between, so passing the same `bands` to both describes one partition. A separate method takes physical
+fields, a domain and a filter, where the weight is the filter's own transfer function and the sum runs
+in real space (so it also serves masked and bounded domains).
+
+```@docs
+calculate_band_energies
 ```
 
 ## Method Types

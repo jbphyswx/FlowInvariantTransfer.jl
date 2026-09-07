@@ -287,3 +287,46 @@ T(f_l, f_n, m) = \lambda_m \text{Re}\langle \phi_m, W \psi_m \rangle
 where ``W`` is the spatial inner-product weighting matrix.
 
 **References:** Yeung, Chu & Schmidt (2026) — *Triadic orthogonal decomposition reveals nonlinearity in fluid flows* J. Fluid Mech. 1031, A34. [DOI: 10.1017/jfm.2026.11183](https://doi.org/10.1017/jfm.2026.11183)
+
+## Spectral layout: the half spectrum of a real field
+
+A real field's transform is Hermitian, ``\hat{u}(-k) = \overline{\hat{u}(k)}``, so half its coefficients
+are redundant. `to_spectral` therefore returns the **half layout** for real input: axis 1 carries
+``k_1 \ge 0`` on an `rfftfreq` axis of length ``n_1/2 + 1``, the remaining axes carry the full
+`fftfreq` range, and the conjugate half is implied. Complex input, and `real_layout = false`, give the
+full `fftfreq` grid on every axis. Which layout an array is in is carried by `ks`, so every diagnostic
+reads it from there.
+
+### The Hermitian weight
+
+Every transfer density in this package is even under ``k \mapsto -k``: ``|\hat{u}|^2`` and
+``\mathrm{Re}\{\overline{\hat{u}} \hat{N}\}`` both are, because ``\hat{u}`` and ``\hat{N}`` are
+transforms of real fields. A full-spectrum sum of such an ``f`` equals a weighted half-spectrum sum,
+
+```math
+\sum_{k \in \text{full}} f(k) \;=\; \sum_{k \in \text{half}} w(k)\, f(k),
+```
+
+with a weight that is **not** uniformly 2. The ``k_1 = 0`` hyperplane is stored whole and is mapped
+onto itself by ``k \mapsto -k``, so each of its modes already has its mirror in the array: ``w = 1``.
+For even ``n_1`` the Nyquist plane ``k_1 = n_1/2 \equiv -n_1/2`` is the same situation: ``w = 1``.
+Every other stored mode stands for itself and its unstored mirror: ``w = 2``. On the full layout
+``w \equiv 1``.
+
+### The Nyquist mode of an even axis
+
+That self-mirrored Nyquist slot holds ``+n/2`` and ``-n/2`` at once, so any operator **first order in
+``k``** is not single-valued there for a real field, and it carries zero: the gradient ``\partial_d``,
+the vorticity ``i k \times \hat{u}`` behind the helicity density, and the Helmholtz projector. (The
+enstrophy density has two factors of ``k`` and is unaffected.) The ``3/2``-padded dealiasing instead
+**splits** that coefficient across ``\pm n/2`` on the finer grid — the unique real band-limited
+function it represents is ``\hat{u}_{\text{Nyq}} \cos(n x / 2)`` — and recombines the pair on the way
+back. The ``2/3`` rule discards the mode entirely.
+
+### Which decompositions stay real
+
+A half layout is only available to a field that is genuinely real. Under ``k \mapsto -k`` the helical
+frame obeys ``e_1 \mapsto -e_1`` and ``e_2 \mapsto e_2``, so ``u_\pm(-k) = \overline{u_\pm(k)}`` and the
+helical components of a real field are individually Hermitian; the same holds for the toroidal/poloidal
+and Helmholtz (rotational/divergent) components, whose projectors are real and commute with
+conjugation. Every decomposition this package provides therefore runs on the half layout.
