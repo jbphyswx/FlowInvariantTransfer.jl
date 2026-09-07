@@ -7,7 +7,8 @@ using SpectralBackends: SpectralBackends
 using ..ShellBinning: ShellBinning
 using ..NonlinearTerm: NonlinearTerm
 
-export calculate_compressible_flux, calculate_compressible_flux!, CompressibleWorkspace
+export calculate_compressible_flux, calculate_compressible_flux!, calculate_compressible_flux_batch,
+       CompressibleWorkspace
 
 # ---------------------------------------------------------------------------
 # Compressible kinetic-energy spectral transfer (Singh–Tiwari–Sharma–Verma 2025,
@@ -328,7 +329,9 @@ function CompressibleWorkspace(velocity_hat, ks;
     edges   = ShellBinning.shell_edges(binning, kmax)
     centers = collect(ShellBinning.shell_centers(binning, kmax))
     sidx    = ShellBinning.assign_shells(k_mag, edges)
-    channels = decompose ?
+    # The pressure-dilatation term projects the velocity and momentum onto the rotational/compressive
+    # split and reads it out of this scratch, so it is allocated for either term.
+    channels = (decompose || with_pressure) ?
         CompressibleChannels(ca(), ca(), ca(), ca(), ca(), ra(), ra(), ra(), ra(), ca(), ca(), ca(), ca()) :
         nothing
     pressure = with_pressure ?
@@ -371,6 +374,11 @@ function calculate_compressible_flux(
     size(velocity_hat, nd + 1) == nd ||
         throw(ArgumentError("compressible transfer needs D = nd velocity components (got $(size(velocity_hat, nd+1)) for nd=$nd)."))
     exec = Types.resolve_execution(execution)
+    # Which optional terms a workspace can compute is fixed when it is built, so the one-shot sizes it
+    # from what this call asks for: a supplied `pressure_hat` needs the pressure scratch, `decompose`
+    # the channel set. The batch entry derives them the same way.
+    with_pressure = get(kwargs, :pressure_hat, nothing) !== nothing
+    decompose = get(kwargs, :decompose, true)
     if exec isa ComputationalBackends.DistributedBackend
         # Compressible is a single FFT pipeline (no outer loop): its independent work units are the
         # decomposition-channel set and the pressure-dilatation, computed on separate workers (each
@@ -387,10 +395,13 @@ function calculate_compressible_flux(
             "compressible transfer runs on-device automatically for device-array inputs (the pipeline is " *
             "device-generic broadcasts + cuFFT via AbstractFFTs); execution=ComputationalBackends.GPUBackend() does not move a host " *
             "array to the device. Pass device-array inputs (e.g. CuArray), or use ComputationalBackends.SerialBackend()/ComputationalBackends.ThreadedBackend()."))
-        ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=ComputationalBackends.SerialBackend())
+        ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry,
+                                   execution=ComputationalBackends.SerialBackend(),
+                                   decompose=decompose, with_pressure=with_pressure)
         return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
     end
-    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry, execution=exec)
+    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry,
+                               execution=exec, decompose=decompose, with_pressure=with_pressure)
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
 end
 
@@ -398,6 +409,78 @@ end
 _compressible_distributed(args...; kwargs...) = throw(ArgumentError(
     "Distributed compressible transfer requires Distributed. " *
     "Run `using Distributed` to load the extension."))
+
+"""
+    calculate_compressible_flux_batch(velocity_hats, density_hats, ks; pressure_hats=nothing,
+        spectral, binning, geometry, dealiasing, decompose, execution) -> Vector
+
+Compressible transfer for a batch of snapshots sharing one grid (`velocity_hats`/`density_hats`
+iterables of coefficient arrays). One [`CompressibleWorkspace`](@ref) is built per worker and reused
+across its snapshots — this is the workspace the package allocates most for, so a time series pays for
+it once. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over snapshots with a
+serial inner pipeline. Results are in input order and equal the per-snapshot
+[`calculate_compressible_flux`](@ref).
+"""
+function calculate_compressible_flux_batch(
+    velocity_hats,
+    density_hats,
+    ks;
+    pressure_hats = nothing,
+    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    binning::Types.AbstractShellBinning = _default_binning(ks),
+    geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    decompose::Bool = true,
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+)
+    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
+    n = length(velocity_hats)
+    length(density_hats) == n || throw(DimensionMismatch(
+        "got $n velocity snapshots and $(length(density_hats)) density snapshots"))
+    pressure_hats === nothing || length(pressure_hats) == n || throw(DimensionMismatch(
+        "got $n velocity snapshots and $(length(pressure_hats)) pressure snapshots"))
+    n == 0 && return Types.CompressibleFluxResult[]
+    return _compressible_batch!(Types.resolve_execution(execution), velocity_hats, density_hats,
+                                pressure_hats, ks; spectral = spectral, binning = binning,
+                                geometry = geometry, dealiasing = dealiasing, decompose = decompose)
+end
+
+# Serial reference: one workspace reused across the whole batch.
+function _compressible_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_hats, density_hats,
+                              pressure_hats, ks; spectral, binning, geometry, dealiasing, decompose)
+    ws = CompressibleWorkspace(first(velocity_hats), ks; spectral = spectral, binning = binning,
+                               geometry = geometry, decompose = decompose,
+                               with_pressure = pressure_hats !== nothing)
+    return [calculate_compressible_flux!(ws, velocity_hats[i], density_hats[i], ks;
+                pressure_hat = pressure_hats === nothing ? nothing : pressure_hats[i],
+                dealiasing = dealiasing, decompose = decompose)
+            for i in eachindex(velocity_hats)]
+end
+
+# Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace, serial inner).
+function _compressible_batch_threaded!(args...; kwargs...)
+    throw(ArgumentError("execution = ThreadedBackend() for the compressible batch requires OhMyThreads. " *
+                        "Run `using OhMyThreads` to load the extension."))
+end
+_compressible_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_hats, density_hats,
+                     pressure_hats, ks; kwargs...) =
+    _compressible_batch_threaded!(velocity_hats, density_hats, pressure_hats, ks; kwargs...)
+
+# A device batch loops the device pipeline on one device-resident workspace.
+function _compressible_batch!(gpu::ComputationalBackends.AbstractGPUBackend, velocity_hats, density_hats,
+                              pressure_hats, ks; spectral, binning, geometry, dealiasing, decompose)
+    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
+        "calculate_compressible_flux_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
+        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
+    return _compressible_batch!(ComputationalBackends.SerialBackend(), velocity_hats, density_hats,
+                                pressure_hats, ks; spectral = spectral, binning = binning,
+                                geometry = geometry, dealiasing = dealiasing, decompose = decompose)
+end
+
+_compressible_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_hats, density_hats,
+                     pressure_hats, ks; kwargs...) =
+    throw(ArgumentError("calculate_compressible_flux_batch supports SerialBackend(), ThreadedBackend() " *
+                        "and GPUBackend(); got execution = $(typeof(be))."))
 
 """
     calculate_compressible_flux!(ws::CompressibleWorkspace, velocity_hat, density_hat, ks; kwargs...)

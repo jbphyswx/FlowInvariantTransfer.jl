@@ -389,9 +389,12 @@ function FIT.Compressible._compressible_distributed(
     decompose = true,
 )
     inner = ComputationalBackends.local_backend(execution)
+    # Each group's workspace carries only the scratch its own call uses: group A the channel set,
+    # group B the pressure term. The flags are fixed at construction, so they are set to match.
     runA = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner,
+            decompose = decompose, with_pressure = false)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = decompose, pressure_hat = nothing)
     end
@@ -400,7 +403,8 @@ function FIT.Compressible._compressible_distributed(
     end
     runB = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            spectral = spectral, binning = binning, geometry = geometry, execution = inner)
+            spectral = spectral, binning = binning, geometry = geometry, execution = inner,
+            decompose = false, with_pressure = true)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = false, pressure_hat = pressure_hat)
     end
