@@ -3,7 +3,6 @@ module NonlinearTerm
 using ..Types: Types
 using ..SpectralLayout: SpectralLayout
 using ..Workspaces: Workspaces
-using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
 export compute_nonlinear_term, compute_nonlinear_term!
@@ -91,13 +90,9 @@ function compute_nonlinear_term!(
     spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     advecting_hat = velocity_hat,
 )
-    # DirectSum builds the nonlinear term with scalar-indexed direct sums (a host O(N²ᴰ) reference); it
-    # cannot run on a device array (scalar indexing errors under `allowscalar(false)`). Raise a clear
-    # error directing to the device path rather than a cryptic scalar-indexing crash. `ComputationalBackends.is_gpu_array`
-    # (the `AbstractGPUArray` trait) — NOT `!(x isa Array)`, which would misflag host non-`Array` types
-    # (FixedSizeArray/StaticArray/SubArray/…); `ComputationalBackends.GPUBackend(KA.CPU())`'s host-`Array` proxy stays on the path.
+    # The direct sum scalar-indexes, so it refuses a device array before any work starts.
     spectral = Types.resolve_spectral(spectral)
-    if spectral isa SpectralBackends.DirectSumSpectralBackend && ComputationalBackends.is_gpu_array(velocity_hat)
+    if spectral isa SpectralBackends.DirectSumSpectralBackend && Types._is_device(velocity_hat)
         throw(ArgumentError(
             "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot run on " *
             "device arrays; use `spectral = SpectralBackends.FFTSpectralBackend()` (cuFFT via AbstractFFTs) for the device path."))

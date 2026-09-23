@@ -391,7 +391,7 @@ function calculate_compressible_flux(
         # kernel, so the device path is selected by the INPUT ARRAY TYPE, not this knob. A host `Array`
         # under ComputationalBackends.GPUBackend cannot be honoured (no data movement, no separate device kernel) → clear error
         # rather than a silent serial run; a device-array input runs on device by construction.
-        ComputationalBackends.is_gpu_array(velocity_hat) || throw(ArgumentError(
+        Types._is_device(velocity_hat) || throw(ArgumentError(
             "compressible transfer runs on-device automatically for device-array inputs (the pipeline is " *
             "device-generic broadcasts + cuFFT via AbstractFFTs); execution=ComputationalBackends.GPUBackend() does not move a host " *
             "array to the device. Pass device-array inputs (e.g. CuArray), or use ComputationalBackends.SerialBackend()/ComputationalBackends.ThreadedBackend()."))

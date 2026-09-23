@@ -2,14 +2,9 @@ module FlowInvariantTransferGPUArraysCoreExt
 
 using GPUArraysCore: GPUArraysCore
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using ComputationalBackends: ComputationalBackends
-using SpectralBackends: SpectralBackends
 using LinearAlgebra: LinearAlgebra as LA
 
-# Device-array detection trait: any `GPUArraysCore.AbstractGPUArray` (CuArray / JLArray / ROCArray / …) is a device
-# array; host arrays keep the core default `false`. Used to route device inputs correctly (reject the
-# host-only DirectSum reference and the host-array-under-GPUBackend case).
-ComputationalBackends.is_gpu_array(::GPUArraysCore.AbstractGPUArray) = true
+FIT.Types._is_device(::GPUArraysCore.AbstractGPUArray) = true
 
 # ---------------------------------------------------------------------------
 # Device-generic versions of the three compressible-pipeline reductions/masks that the scalar `src`

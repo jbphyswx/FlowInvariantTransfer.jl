@@ -1692,10 +1692,10 @@ Test.@testset "GPU backend routing — clear errors, device detection, dispatch"
     û = randn(rng, ComplexF64, N, N, 2); ρ̂ = randn(rng, ComplexF64, N, N)
     gpu = ComputationalBackends.GPUBackend(KA.CPU())
 
-    # is_gpu_array trait: host arrays (incl. non-`Array` host types) are NOT device; JLArray is.
-    Test.@test ComputationalBackends.is_gpu_array(û) == false
-    Test.@test ComputationalBackends.is_gpu_array(view(û, :, :, 1)) == false   # host SubArray ≠ device
-    Test.@test ComputationalBackends.is_gpu_array(JLArrays.JLArray(û)) == true
+    # Host arrays, including non-`Array` host types, are not device arrays; a JLArray is.
+    Test.@test FIT.Types._is_device(û) == false
+    Test.@test FIT.Types._is_device(view(û, :, :, 1)) == false
+    Test.@test FIT.Types._is_device(JLArrays.JLArray(û)) == true
 
     # DirectSum can't run on a device array (scalar reference) → clear error (via the trait), not a crash.
     Test.@test_throws ArgumentError FIT.SpectralFlux.calculate_spectral_flux(JLArrays.JLArray(û), ks; spectral = SpectralBackends.DirectSumSpectralBackend())

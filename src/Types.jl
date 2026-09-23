@@ -56,6 +56,14 @@ function resolve_spectral(::SpectralBackends.AbstractAutoSpectralBackend)
 end
 
 """
+    _is_device(x) -> Bool
+
+`true` for a device array. The GPUArraysCore extension adds the method for
+`GPUArraysCore.AbstractGPUArray`; every host array, `Array` or not, is `false`.
+"""
+_is_device(::Any) = false
+
+"""
     _FFT_BACKEND_LOADED
 
 Set to `true` by the FFTW extension's `__init__`. [`resolve_spectral`](@ref) reads it to answer the

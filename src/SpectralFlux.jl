@@ -74,7 +74,7 @@ function calculate_spectral_flux(
     spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     # DirectSum uses scalar-indexed direct sums (host-only); reject a device array up front, before the
     # workspace/FFT-plan build would fail with an opaque "JLArray to Ptr" (FFTW plan on a device array).
-    (spectral isa SpectralBackends.DirectSumSpectralBackend && ComputationalBackends.is_gpu_array(velocity_hat)) &&
+    (spectral isa SpectralBackends.DirectSumSpectralBackend && Types._is_device(velocity_hat)) &&
         throw(ArgumentError(
             "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot " *
             "run on device arrays; use spectral = SpectralBackends.FFTSpectralBackend() (cuFFT via AbstractFFTs) for the device path."))
