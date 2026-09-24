@@ -3,6 +3,13 @@ module FlowInvariantTransferFSHExt
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
+using FlowTransformBindings: FlowTransformBindings as FTB
+
+# The spin transforms run FastTransforms, so each goes through `FTB.with_fasttransforms_threads`, which
+# sets its OpenMP count on the calling OS thread and restores it after. `spinsph_eth`/`spinsph_ethbar`
+# act on coefficients in Julia and need no guard.
+_transform(F, s) = FTB.with_fasttransforms_threads(() -> FSH.spinsph_transform(F, s))
+_evaluate(C, s) = FTB.with_fasttransforms_threads(() -> FSH.spinsph_evaluate(C, s))
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer on a regular colatitude–longitude grid, via
@@ -22,7 +29,7 @@ using ComputationalBackends: ComputationalBackends
 # assembled complex grid is written into the caller-provided `out` buffer.
 function _sph_grad!(out::AbstractMatrix{<:Complex}, C0::AbstractMatrix{<:Real})
     ðC = FSH.spinsph_eth(C0, 0)             # Array{SVector{2,Float64},2}
-    G  = FSH.spinsph_evaluate(ðC, 1)        # SVector(re, im) of ðf at each grid point
+    G  = _evaluate(ðC, 1)                   # SVector(re, im) of ðf at each grid point
     @inbounds for j in axes(G, 2), i in axes(G, 1)
         out[i, j] = complex(G[i, j][1], G[i, j][2])
     end
@@ -84,7 +91,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
 
     # ζ̂_lm (real spinsph(0) layout) — FSH-internal allocation (floor). FSH's real spin transform takes
     # any `AbstractMatrix{Float64}` and widens internally, so a Float64 input goes straight in.
-    Cζ0 = FSH.spinsph_transform(vorticity isa AbstractMatrix{Float64} ? vorticity : Matrix{Float64}(vorticity), 0)
+    Cζ0 = _transform(vorticity isa AbstractMatrix{Float64} ? vorticity : Matrix{Float64}(vorticity), 0)
 
     # Embed into the (dealiased) work grid, recovering ψ = ∇⁻²ζ mode-by-mode. Reuses ws.Cζ/ws.Cψ.
     fill!(ws.Cζ, 0.0)
@@ -100,7 +107,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
     _sph_grad!(ws.Gψ, ws.Cψ)
     _sph_grad!(ws.Gζ, ws.Cζ)
     @. ws.J = imag(conj(ws.Gψ) * ws.Gζ) / a^2
-    CA = FSH.spinsph_transform(ws.J, 0)                            # Â_lm — FSH-internal (floor)
+    CA = _transform(ws.J, 0)                                       # Â_lm — FSH-internal (floor)
 
     # Flatten to per-mode arrays (reused) and reduce into the reused result vectors.
     k = 0
@@ -151,8 +158,8 @@ _fsh_colm(col) = col == 1 ? 0 : (col % 2 == 0 ? -1 : 1) * (col ÷ 2)
 
 # ∇f as a complex spin+1 field, via the validated real→SVector eth path (same as `_sph_grad!`).
 function _fsh_nabla(freal::AbstractMatrix{<:Real})
-    ðC = FSH.spinsph_eth(FSH.spinsph_transform(Matrix{Float64}(freal), 0), 0)
-    G = FSH.spinsph_evaluate(ðC, 1)                        # SVector{2} field = ð f = -∇f
+    ðC = FSH.spinsph_eth(_transform(Matrix{Float64}(freal), 0), 0)
+    G = _evaluate(ðC, 1)                                   # SVector{2} field = ð f = -∇f
     out = Matrix{ComplexF64}(undef, size(G))
     @inbounds for j in axes(G, 2), i in axes(G, 1)
         out[i, j] = -complex(G[i, j][1], G[i, j][2])       # ∇f = -ð f
@@ -163,11 +170,11 @@ end
 # Vorticity ζ = k̂·∇×u and divergence δ = ∇·u (real fields) from the spin+1 velocity, via the complex
 # ethbar with the FSH per-column α pre-flip: ð̄U₊ = -(δ + iζ) ⟹ δ = -Re, ζ = -Im.
 function _fsh_vort_div(uθ::AbstractMatrix{<:Real}, uφ::AbstractMatrix{<:Real})
-    C = FSH.spinsph_transform(ComplexF64.(uθ .+ im .* uφ), 1)
+    C = _transform(ComplexF64.(uθ .+ im .* uφ), 1)
     @inbounds for col in axes(C, 2)
         _fsh_colm(col) ≥ 0 || (@views C[:, col] .*= -1)
     end
-    Cf = FSH.spinsph_evaluate(FSH.spinsph_ethbar(C, 1), 0)
+    Cf = _evaluate(FSH.spinsph_ethbar(C, 1), 0)
     return -imag.(Cf), -real.(Cf)                          # ζ, δ
 end
 
@@ -214,17 +221,17 @@ function FIT.calculate_divergent_spherical_transfer!(
     (size(u_θ) == (lmax + 1, 2lmax + 1) && size(u_φ) == (lmax + 1, 2lmax + 1)) || throw(ArgumentError(
         "velocity component sizes $((size(u_θ), size(u_φ))) do not match the workspace lmax=$lmax grid (lmax+1, 2lmax+1)."))
 
-    a₊ = FSH.spinsph_transform(ComplexF64.(u_θ .+ im .* u_φ), 1)   # spin+1 velocity coefficients (lmax)
+    a₊ = _transform(ComplexF64.(u_θ .+ im .* u_φ), 1)              # spin+1 velocity coefficients (lmax)
     ζin, δin = _fsh_vort_div(u_θ, u_φ)                             # vorticity/divergence fields (lmax grid)
-    δc = FSH.spinsph_transform(δin, 0)                             # reused for the work grid and for χ
+    δc = _transform(δin, 0)                                        # reused for the work grid and for χ
 
     # Evaluate velocity + ζ,δ on the (dealiased) work grid so the quadratic advection is alias-free.
     uθw = ws.uθw; uφw = ws.uφw; ζw = ws.ζw; δw = ws.δw
     if ws.dealias
-        Uw = FSH.spinsph_evaluate(_fsh_embed!(ws.Cw1, a₊, 1, lmax), 1)
+        Uw = _evaluate(_fsh_embed!(ws.Cw1, a₊, 1, lmax), 1)
         @. uθw = real(Uw); @. uφw = imag(Uw)
-        ζw .= FSH.spinsph_evaluate(_fsh_embed!(ws.Cw0, FSH.spinsph_transform(ζin, 0), 0, lmax), 0)
-        δw .= FSH.spinsph_evaluate(_fsh_embed!(ws.Cw0, δc, 0, lmax), 0)
+        ζw .= _evaluate(_fsh_embed!(ws.Cw0, _transform(ζin, 0), 0, lmax), 0)
+        δw .= _evaluate(_fsh_embed!(ws.Cw0, δc, 0, lmax), 0)
     else
         copyto!(uθw, u_θ); copyto!(uφw, u_φ); copyto!(ζw, ζin); copyto!(δw, δin)
     end
@@ -233,7 +240,7 @@ function FIT.calculate_divergent_spherical_transfer!(
     @. ws.K = 0.5 * (uθw^2 + uφw^2)
     ∇K = _fsh_nabla(ws.K)
     @. ws.Adv = ∇K + (im * ζw + 0.5 * δw) * (uθw + im * uφw)
-    Â = FSH.spinsph_transform(ws.Adv, 1)                           # spin+1 advection coefficients (lwork)
+    Â = _transform(ws.Adv, 1)                                      # spin+1 advection coefficients (lwork)
 
     # Divergent-channel velocity coefficients: anti = spin+1 coeffs of ∇χ, χ = ∇⁻²δ (lmax).
     χc = ws.χc
@@ -241,7 +248,7 @@ function FIT.calculate_divergent_spherical_transfer!(
     @inbounds for l in 1:lmax, m in -l:l
         i = FSH.spinsph_mode(0, l, m); χc[i] = -δc[i] / (l * (l + 1))
     end
-    anti = FSH.spinsph_transform(ComplexF64.(_fsh_nabla(FSH.spinsph_evaluate(χc, 0))), 1)
+    anti = _transform(ComplexF64.(_fsh_nabla(_evaluate(χc, 0))), 1)
 
     # Per-degree channels T_rot = Σ_m Re{sym* Â}, T_div = Σ_m Re{anti* Â}; sym = a₊ − anti. The lwork Â
     # is truncated to l ≤ lmax automatically (same spinsph_mode index in both arrays). Single 1/a factor.
