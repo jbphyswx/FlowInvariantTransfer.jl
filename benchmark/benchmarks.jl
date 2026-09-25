@@ -21,9 +21,10 @@ using Random: Random
 using JSON3: JSON3
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
-# Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT providers are benchmarked axes.
+# Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT libraries are benchmarked axes.
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using FlowFieldSpectra: FlowFieldSpectra          # the physical → spectral transform `to_spectral` runs
+using FlowTransformBindings: FlowTransformBindings as FTB
 using NonuniformFFTs: NonuniformFFTs
 using FINUFFT: FINUFFT
 
@@ -169,8 +170,8 @@ function add_scattered!(D::Int, ms::NTuple{N,Int}) where {N}
     tag = "$(D)D/np$(NPTS)/ms$(ms[1])"
     ℓ = 0.5
     filt = FIT.Types.GaussianFilter()
-    for (name, be) in (("nonuniformffts", FIT.Types.NonuniformFFTsBackend()),
-                       ("finufft", FIT.Types.FINUFFTBackend()))
+    for (name, be) in (("nonuniformffts", FTB.NonuniformFFTsBackend()),
+                       ("finufft", FTB.FINUFFTBackend()))
         tsw = FIT.NUFFTToSpectralWorkspace(coords, ms; spectral = be, Ls = Ls, ncomponents = D, tol = 1e-9)
         group("to_spectral_scattered")[HOT * "/$name/" * tag] =
             BenchmarkTools.@benchmarkable FIT.to_spectral!($tsw, $fields) evals = 1

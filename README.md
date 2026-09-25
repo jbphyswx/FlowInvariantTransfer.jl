@@ -233,8 +233,9 @@ from t=0 to t=10 — the forward cascade building in time.
 
 Two orthogonal axes that compose:
 
-- **Spectral (transform):** `DirectSumSpectralBackend` (no deps) · `FFTSpectralBackend` (FFTW) · `NUFFTSpectralBackend`
-  (FINUFFT) · `FSHTSpectralBackend`/`NUFSHTSpectralBackend` (spherical).
+- **Spectral (transform):** `DirectSumSpectralBackend` (no deps) · `FFTSpectralBackend` (FFTW) ·
+  `FlowTransformBindings.NonuniformFFTsBackend`/`FINUFFTBackend` (scattered Cartesian) ·
+  `FSHTSpectralBackend`/`NUFSHTSpectralBackend` (spherical).
 - **Execution (parallelism):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
   `DistributedBackend` · `GPUBackend{B}` (KernelAbstractions).
 
@@ -268,7 +269,7 @@ coarse-graining / spherical layers.
 | `KernelAbstractions` | GPU kernels |
 | `HelmholtzDecomposition` | rotational/divergent decomposition |
 | `CoarseGrainingEnergyFluxes` | pointwise coarse-graining flux `Π_ℓ(x)` |
-| `FINUFFT` / `NUFSHT` / `FastSphericalHarmonics` | scattered-Cartesian / scattered-spherical / regular-spherical front-ends |
+| `NonuniformFFTs` or `FINUFFT` / `NUFSHT` / `FastSphericalHarmonics` | scattered-Cartesian (through FlowTransformBindings) / scattered-spherical / regular-spherical front-ends |
 | `FlowFieldSpectra` | spectra integration |
 | `CairoMakie` | plotting |
 

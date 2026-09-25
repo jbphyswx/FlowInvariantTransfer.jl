@@ -662,26 +662,8 @@ ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 
 # Transform (spectral) backend TYPES come from the shared `SpectralBackends` package
 # (`SpectralBackends.DirectSumSpectralBackend`/`FFTSpectralBackend`/`FSHTSpectralBackend`/…, all
-# `<: SpectralBackends.AbstractSpectralBackend`). The scattered-Cartesian NUFFT transform has two peer
-# provider implementations, supplied by FIT's weakdep extensions and defined here as symmetric concrete
-# subtypes of the shared `AbstractNonUniformFastFourierTransformSpectralBackend` — neither is a default.
-# FIT also adds the geometry classification + coefficient-input validation below.
-
-"""
-    FINUFFTBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend
-
-Scattered-Cartesian NUFFT provided by FINUFFT.jl (the C library). Peer of [`NonuniformFFTsBackend`](@ref);
-`using FINUFFT` supplies the transform methods it dispatches to.
-"""
-struct FINUFFTBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend end
-
-"""
-    NonuniformFFTsBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend
-
-Scattered-Cartesian NUFFT provided by the pure-Julia NonuniformFFTs.jl. Peer of [`FINUFFTBackend`](@ref);
-`using NonuniformFFTs` supplies the transform methods it dispatches to.
-"""
-struct NonuniformFFTsBackend <: SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend end
+# `<: SpectralBackends.AbstractSpectralBackend`); the NUFFT libraries' tags come from
+# FlowTransformBindings. FIT adds the geometry classification + coefficient-input validation below.
 
 # ---------------------------------------------------------------------------
 # Transform-backend geometry classification + validation
@@ -718,7 +700,8 @@ require_coefficient_spectral(spectral::Union{SpectralBackends.AbstractAutoSpectr
 require_coefficient_spectral(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = throw(ArgumentError(
     "A NUFFT backend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
     "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
-    "physical-space entry, e.g. `calculate_spectral_flux(velocity_fields, scatter_coords; spectral=Types.FINUFFTBackend())`."))
+    "physical-space entry, e.g. `to_spectral(velocity_fields, scatter_coords, ms; spectral, Ls)` or the " *
+    "4-positional `calculate_energy_transfer(method, velocity_fields, scatter_coords, ms; spectral, Ls)`."))
 require_coefficient_spectral(::Union{SpectralBackends.FSHTSpectralBackend, SpectralBackends.NUFSHTSpectralBackend}) = throw(ArgumentError(
     "FSHTSpectralBackend and NUFSHTSpectralBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
     "on the sphere (regular grid → FSHTSpectralBackend, scattered points → NUFSHTSpectralBackend). The Cartesian flux " *

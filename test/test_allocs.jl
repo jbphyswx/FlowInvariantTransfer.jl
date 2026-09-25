@@ -28,6 +28,8 @@ using SpectralBackends: SpectralBackends
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using FastSphericalHarmonics: FastSphericalHarmonics
 using NUFSHT: NUFSHT
+using FINUFFT: FINUFFT
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 # --- function barriers: warm up, then measure a second call with concrete-typed backend args ---
 function _alloc_nlt(ws, û, ks, adv, da, sp)
@@ -247,12 +249,11 @@ Test.@testset "Allocations" begin
     end
 
     # -----------------------------------------------------------------------
-    # Workspace-reuse for the plan-owning extension methods (CGEF / FINUFFT / FSH / NUFSHT / TOD): the `!`
-    # form reuses its plans + buffers, so a repeat call allocates far less than a fresh call that rebuilds
-    # the workspace. With a serial backend CGEF prebuilds every plan and reuse is exactly 0-alloc; the
+    # Workspace-reuse for the plan-owning methods (CGEF / NUFFT / FSH / NUFSHT / TOD): the `!` form reuses
+    # its plans + buffers, so a repeat call allocates far less than a fresh call that rebuilds the
+    # workspace. With a serial backend CGEF prebuilds every plan and reuse is exactly 0-alloc; the
     # others — and CGEF's own threaded path, whose parallel sweeps carry an OhMyThreads task-spawn floor —
-    # hold a ratio (not zero) because each wraps an external transform or task spawn that allocates
-    # internally. (Previously scattered inline in the extension correctness testsets in runtests.jl.)
+    # hold a ratio because each wraps an external transform or task spawn that allocates internally.
     Test.@testset "reuse ratio — plan-owning extension methods" begin
         Random.seed!(7)
 
@@ -280,7 +281,7 @@ Test.@testset "Allocations" begin
 
         # (scattered NUFFT coarse-graining workspace-reuse allocation is asserted per provider in the
         # "NUFFT scattered coarse-graining — both providers vs exact NDFT" testset in runtests.jl,
-        # alongside the NDFT correctness gate.)
+        # alongside the NDFT correctness test.)
 
         Test.@testset "spherical (FSH, equiangular grid)" begin
             lmax = 20; Ng = lmax + 1
@@ -291,15 +292,22 @@ Test.@testset "Allocations" begin
             Test.@test a_reuse < a_fresh
         end
 
+        # The NUFSHT tests name FINUFFT, which runs each execution on its plan's thread count and
+        # allocates nothing there, so the ratio counts the plans the workspace keeps.
+        # NonuniformFFTs spreads on the thread count too, but its deconvolution and zero-fill run on
+        # every Julia thread and allocate their tasks on each execution.
         Test.@testset "spherical (NUFSHT, scattered)" begin
             lmax = 8; M = (2lmax + 1)^2 + 20
             ga = π * (3 - sqrt(5.0))
             θ = [acos(clamp(1 - 2 * (i + 0.5) / M, -1, 1)) for i in 0:M-1]
             φ = [mod(i * ga, 2π) for i in 0:M-1]
             ζ = [cos(θ[i]) * sin(φ[i]) for i in 1:M]
-            ws = FIT.Spherical.ScatteredSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12, rtol = 1e-13)
+            nu = FTB.FINUFFTBackend()
+            ws = FIT.Spherical.ScatteredSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12, rtol = 1e-13,
+                                                                   nufft = nu)
             fresh(z) = FIT.calculate_energy_transfer(
-                FIT.Types.SphericalTransferMethod(radius = 1.0), z, (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+                FIT.Types.SphericalTransferMethod(radius = 1.0), z, (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13,
+                nufft = nu)
             a_reuse, a_fresh = _reuse_spherical!(ws, ζ, fresh)
             Test.@test a_reuse < a_fresh ÷ 3
         end
@@ -322,9 +330,12 @@ Test.@testset "Allocations" begin
             θ = [acos(clamp(1 - 2 * (i + 0.5) / M, -1, 1)) for i in 0:M-1]
             φ = [mod(i * ga, 2π) for i in 0:M-1]
             uθ = [cos(θ[i]) for i in 1:M]; uφ = [sin(φ[i]) for i in 1:M]
-            ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12, rtol = 1e-13)
+            nu = FTB.FINUFFTBackend()
+            ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12,
+                                                                            rtol = 1e-13, nufft = nu)
             fresh(a, c) = FIT.calculate_energy_transfer(
-                FIT.Types.DivergentSphericalTransferMethod(radius = 1.0), (a, c), (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+                FIT.Types.DivergentSphericalTransferMethod(radius = 1.0), (a, c), (θ, φ); lmax = lmax, tol = 1e-12,
+                rtol = 1e-13, nufft = nu)
             a_reuse, a_fresh = _reuse_divergent!(ws, uθ, uφ, fresh)
             Test.@test a_reuse < a_fresh ÷ 2
         end

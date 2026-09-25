@@ -92,19 +92,19 @@ nufft_coarse_graining_flux_batch
 
 ## Scattered-Cartesian NUFFT
 
-Two peer providers back the scattered NUFFT transform — `FlowInvariantTransfer.Types.FINUFFTBackend`
-(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`),
-selected via the required `spectral` keyword. They drive the scattered coarse-graining flux and the
-scattered→uniform `to_spectral` reconstruction; the workspace forms preset the plan + buffers for
-allocation-light reuse.
+The scattered NUFFTs run through FlowTransformBindings' plans, on the library the required `spectral`
+keyword names: `FlowTransformBindings.NonuniformFFTsBackend()` (`using NonuniformFFTs`) or
+`FlowTransformBindings.FINUFFTBackend()` (`using FINUFFT`, and `using CUDA` for cuFINUFFT on device
+points). They drive the scattered coarse-graining flux and the scattered→uniform `to_spectral`
+reconstruction; the workspace forms hold the plans and buffers for reuse, and `close!` releases the
+plans.
 
 ```@docs
 NUFFTCoarseGrainingWorkspace
 nufft_coarse_graining_flux!
 NUFFTToSpectralWorkspace
 to_spectral!
-FlowInvariantTransfer.Types.FINUFFTBackend
-FlowInvariantTransfer.Types.NonuniformFFTsBackend
+FlowInvariantTransfer.close!
 ```
 
 ## Spherical Spectral Transfer
@@ -291,9 +291,11 @@ The transform-algorithm tags are provided by the shared
 selects the transform by the tag's geometry; the concrete types are `SpectralBackends.DirectSumSpectralBackend`,
 `SpectralBackends.FFTSpectralBackend`, `SpectralBackends.FSHTSpectralBackend`, and
 `SpectralBackends.NUFSHTSpectralBackend`, all `<: SpectralBackends.AbstractSpectralBackend`. The
-scattered-Cartesian NUFFT transform has two peer providers, defined by FIT as symmetric subtypes of
-`SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend`: `FlowInvariantTransfer.Types.FINUFFTBackend`
-(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`).
+scattered-Cartesian NUFFT libraries' tags come from
+[`FlowTransformBindings`](https://github.com/jbphyswx/FlowTransformBindings.jl), as subtypes of
+`SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend`:
+`FlowTransformBindings.FINUFFTBackend` (`using FINUFFT`) and
+`FlowTransformBindings.NonuniformFFTsBackend` (`using NonuniformFFTs`).
 
 ## Execution (Parallelism) Backends
 

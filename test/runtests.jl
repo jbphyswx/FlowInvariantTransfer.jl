@@ -22,8 +22,9 @@ using FlowGeometries: FlowGeometries as FG
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
+using FlowTransformBindings: FlowTransformBindings as FTB
 using JLArrays: JLArrays   # reference GPU-array backend: allowscalar(false) → catches non-device-generic code
-using CUDA: CUDA           # triggers FlowInvariantTransferFINUFFTCUDAExt (precompile/load guard; device transform runs only on NVIDIA hardware)
+using CUDA: CUDA           # cuFINUFFT device plans for the scattered `to_spectral`; they run only on NVIDIA hardware
 
 # -----------------------------------------------------------------------
 Test.@testset "Utils — wavenumber_grid" begin
@@ -917,7 +918,7 @@ Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" be
     Test.@test _alloc_from_spectral(ws_rt, û_rt) == 0
 
     # Scattered / spherical transforms are a geometry mismatch here → clear error, not a silent misroute.
-    Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FIT.Types.FINUFFTBackend())
+    Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = FTB.FINUFFTBackend())
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.FSHTSpectralBackend())
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), (x, y); spectral = SpectralBackends.NUFSHTSpectralBackend())
 end
@@ -1366,7 +1367,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
     b     = FIT.Types.LinearBinning(2π / L)
     bands = FIT.Types.SmoothBands([1.0, 2.0, 3.0]; logwidth = 0.5)
-    FTB = SpectralBackends.FFTSpectralBackend()
+    FFT = SpectralBackends.FFTSpectralBackend()
     Ser = ComputationalBackends.SerialBackend()
     Thr = ComputationalBackends.ThreadedBackend()
     Dst = ComputationalBackends.DistributedBackend()
@@ -1380,11 +1381,11 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     filt = FIT.Types.GaussianFilter(); ℓ = 0.5
 
     # --- spectral flux ---
-    sf1 = [FIT.SpectralFlux.calculate_spectral_flux(vh, ks; binning = b, spectral = FTB) for vh in vhats]
-    sfS = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
-    sfT = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
-    sfD = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
-    sfG = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
+    sf1 = [FIT.SpectralFlux.calculate_spectral_flux(vh, ks; binning = b, spectral = FFT) for vh in vhats]
+    sfS = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FFT, execution = Ser)
+    sfT = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FFT, execution = Thr)
+    sfD = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FFT, execution = Dst)
+    sfG = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = FFT, execution = GPU)
     Test.@test length(sfS) == nsnap
     Test.@test maximum(abs, sf1[1].transfer_spectrum) > 0                       # genuine nonzero transfer
     for i in 1:nsnap
@@ -1396,14 +1397,14 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     end
     # GPU batch requires the FFT backend (DirectSum is a host-only reference).
     Test.@test_throws ArgumentError FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, spectral = SpectralBackends.DirectSumSpectralBackend(), execution = GPU)
-    Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, spectral = FTB))
+    Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, spectral = FFT))
 
     # --- shell to shell ---
-    ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, spectral = FTB) for vh in vhats]
-    ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Ser)
-    ssT = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Thr)
-    ssD = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = Dst)
-    ssG = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FTB, execution = GPU)
+    ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, spectral = FFT) for vh in vhats]
+    ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FFT, execution = Ser)
+    ssT = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FFT, execution = Thr)
+    ssD = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FFT, execution = Dst)
+    ssG = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, spectral = FFT, execution = GPU)
     for i in 1:nsnap
         Test.@test ssS[i].transfer_matrix == ss1[i].transfer_matrix
         Test.@test ssS[i].net_transfer == ss1[i].net_transfer
@@ -1413,11 +1414,11 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     end
 
     # --- band to band ---
-    bb1 = [FIT.BandTransfer.calculate_band_to_band_transfer(vh, ks; bands = bands, spectral = FTB) for vh in vhats]
-    bbS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Ser)
-    bbT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Thr)
-    bbD = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = Dst)
-    bbG = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FTB, execution = GPU)
+    bb1 = [FIT.BandTransfer.calculate_band_to_band_transfer(vh, ks; bands = bands, spectral = FFT) for vh in vhats]
+    bbS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FFT, execution = Ser)
+    bbT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FFT, execution = Thr)
+    bbD = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FFT, execution = Dst)
+    bbG = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, spectral = FFT, execution = GPU)
     for i in 1:nsnap
         Test.@test bbS[i].transfer_matrix == bb1[i].transfer_matrix
         Test.@test bbS[i].net_transfer == bb1[i].net_transfer
@@ -1838,12 +1839,11 @@ function _nufft_ts_reuse_fresh(ws, fields, coords, ms, Ls, spectral)
     return (a_reuse, a_fresh)
 end
 
-# Extension smoke tests: exercise the previously-untested extensions with meaningful
-# numerical assertions, not @test true. CairoMakie (plot dispatch incl. the new TOD figure),
-# FINUFFT (scattered-Cartesian coarse-graining + the calculate_energy_transfer wiring),
-# and FlowFieldSpectra (physical→spectral front-end). FSH/NUFSHT spherical transfer is tested
-# in its own testset once the genuine spherical implementation lands.
-Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" begin
+# Optional-package entries with numerical assertions: CairoMakie (plot dispatch incl. the TOD figure),
+# the scattered-Cartesian NUFFT entries through FlowTransformBindings (coarse-graining, `to_spectral`,
+# the calculate_energy_transfer wiring), and FlowFieldSpectra (physical→spectral front-end). FSH/NUFSHT
+# spherical transfer has its own testsets below.
+Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)" begin
     L = 2π; N = 16
     ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
     kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
@@ -1900,7 +1900,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         relq(a, b) = sqrt(sum(abs2, a .- b) / sum(abs2, a))
         method = FIT.Types.CoarseGrainingFluxMethod(filt, ℓ)
 
-        for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+        for spectral in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
             r = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = spectral, Ls = (Lx, Ly), return_diagnostics = true)
             Test.@test relq(τxx, r.stress_tensor[:, 1, 1]) < 1e-6
             Test.@test relq(τyy, r.stress_tensor[:, 2, 2]) < 1e-6
@@ -1911,11 +1911,9 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
             Test.@test isapprox(wired.flux_field, r.flux_field; rtol = 1e-8)
             ws = FIT.NUFFTCoarseGrainingWorkspace((X, Y), ms; spectral = spectral, Ls = (Lx, Ly))
             a_reuse, a_fresh = _nufft_cg_reuse_fresh(ws, U, V, ℓ, filt, ms, X, Y, spectral, (Lx, Ly))
-            # Reuse skips the plan rebuild (the dominant cost), so it stays below a fresh build. A tighter
-            # ratio isn't portable: NonuniformFFTs threads its transforms off Threads.nthreads() with no
-            # per-plan control, so at -t>1 each exec carries a scratch floor that FINUFFT (pinnable to 1
-            # thread) doesn't — the exact allocation is thread-count dependent for one provider but not the
-            # other, so gate the claim that holds for both.
+            # Reuse skips the plan rebuild (the dominant cost), so it stays below a fresh build.
+            # NonuniformFFTs allocates a fixed amount per execution inside the library, so this ratio is
+            # the bound both libraries meet.
             Test.@test a_reuse < a_fresh
         end
         # Odd mode counts exercise the other branch of the real-input (r2c) analysis: an odd axis has no
@@ -1936,14 +1934,14 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
             Syyo = t2o([im * kyo[b] * v̄so[a, b] for a in Ao, b in Bo])
             Sxyo = 0.5 .* (t2o([im * kyo[b] * ūso[a, b] for a in Ao, b in Bo]) .+ t2o([im * kxo[a] * v̄so[a, b] for a in Ao, b in Bo]))
             Πo = -(τxxo .* Sxxo .+ τyyo .* Syyo .+ 2 .* τxyo .* Sxyo)
-            for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+            for spectral in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
                 ro = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, mso; spectral = spectral, Ls = (Lx, Ly), return_diagnostics = true)
                 Test.@test relq(Sxxo, ro.strain_rate[:, 1, 1]) < 1e-6
                 Test.@test relq(Πo, ro.flux_field) < 1e-6
             end
         end
         # Ls is a required physical input (the domain the samples under-span), never guessed from the span.
-        Test.@test_throws UndefKeywordError FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = FIT.Types.FINUFFTBackend())
+        Test.@test_throws UndefKeywordError FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; spectral = FTB.FINUFFTBackend())
     end
 
     Test.@testset "NUFFT scattered → to_spectral (uniform reconstruction feeds the flux family)" begin
@@ -1955,7 +1953,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
 
         # Samples on a uniform grid → û == fft(u)/Nᵈ exactly (drop-in for the uniform diagnostics).
         û_sc, ks_sc = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                        spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
+                                        spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln))
         û_man  = cat(FFTW.fft(ug), FFTW.fft(vg); dims = 3) ./ Nn^2
         ks_man = FIT.Utils.wavenumber_grid((Nn, Nn), (Ln, Ln))
         Test.@test isapprox(û_sc, û_man; atol = 1e-8)
@@ -1972,7 +1970,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         xr = rand(rng2, Np) .* Ln; yr = rand(rng2, Np) .* Ln
         kx0 = 2π / Ln * 2; ky0 = 2π / Ln * 3
         us = cos.(kx0 .* xr .+ ky0 .* yr)
-        ûs, kss = FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
+        ûs, kss = FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln))
         peak = argmax(abs.(ûs[:, :, 1]))
         Test.@test abs(abs(kss[1][peak[1]]) - kx0) < 1e-8
         Test.@test abs(abs(kss[2][peak[2]]) - ky0) < 1e-8
@@ -1981,15 +1979,15 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         # û == fft(u)/Nᵈ on the uniform grid). Serial FINUFFT (C) is 0-alloc on repeat; NonuniformFFTs
         # carries an inherent per-exec KA/library alloc floor, so its reuse is gated well below the fresh
         # (plan-building) call rather than == 0.
-        for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+        for spectral in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
             wsts = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); spectral = spectral, ncomponents = 2, Ls = (Ln, Ln))
             û_ip, _ = FIT.to_spectral!(wsts, (vec(ug), vec(vg)))
             Test.@test isapprox(û_ip, û_man; atol = 1e-8)
             a_reuse, a_fresh = _nufft_ts_reuse_fresh(wsts, (vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn), (Ln, Ln), spectral)
-            if spectral isa FIT.Types.FINUFFTBackend
+            if spectral isa FTB.FINUFFTBackend
                 Test.@test a_reuse == 0                                     # C plan pinned single-threaded → genuinely 0-alloc reuse
             else
-                Test.@test a_reuse < a_fresh                                # NonuniformFFTs threads off nthreads() (unpinnable per-exec floor); reuse still skips the plan rebuild
+                Test.@test a_reuse < a_fresh                                # NonuniformFFTs allocates a fixed amount per execution inside the library
             end
         end
 
@@ -1997,9 +1995,9 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         # backend with device points/buffers, so scattered → velocity_hat runs on-device. GPUBackend(KA.CPU())
         # exercises that plumbing on the host (device-array kind = Array), CPU-parity-testable with no GPU.
         û_host, _ = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                    spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln))
+                                    spectral = FTB.NonuniformFFTsBackend(), Ls = (Ln, Ln))
         û_dev, _  = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                    spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln),
+                                    spectral = FTB.NonuniformFFTsBackend(), Ls = (Ln, Ln),
                                     execution = ComputationalBackends.GPUBackend(KA.CPU()))
         Test.@test isapprox(Array(û_dev), û_host; atol = 1e-10)   # device path == host path
         Test.@test isapprox(Array(û_dev), û_man;  atol = 1e-8)    # …and == fft(u)/Nᵈ on the uniform grid
@@ -2007,12 +2005,12 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         # Float32 with a below-eps(Float32) tol: half-support clamps to eps(FT), so spreading stays finite.
         û_f32, _ = FIT.to_spectral((Float32.(vec(ug)), Float32.(vec(vg))),
                                    (Float32.(vec(Xg)), Float32.(vec(Yg))), (Nn, Nn);
-                                   spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln), tol = 1e-9)
+                                   spectral = FTB.NonuniformFFTsBackend(), Ls = (Ln, Ln), tol = 1e-9)
         Test.@test eltype(û_f32) == ComplexF32
         Test.@test all(isfinite, û_f32)
         Test.@test maximum(abs, û_f32 .- ComplexF32.(û_man)) < 1e-2
 
-        # 3-arg scattered form requires a NUFFT backend (Types.FINUFFTBackend) — a clear error, not a silent wrong path.
+        # The 3-arg scattered form refuses a non-NUFFT backend with a clear error.
         Test.@test_throws ArgumentError FIT.to_spectral((us,), (xr, yr), (Nn, Nn); spectral = SpectralBackends.FFTSpectralBackend(), Ls = (Ln, Ln))
 
         # The NonuniformFFTs provider transforms the real velocity through a real-input (r2c) plan and
@@ -2025,21 +2023,13 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         xr2 = Ln .* rand(rngr, Nr); yr2 = Ln .* rand(rngr, Nr)
         ur2 = @. sin(3 * xr2) * cos(2 * yr2) + 0.25 * cos(7 * xr2)
         for msr in ((20, 20), (21, 21), (20, 21), (21, 20))
-            û_r2c, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (Ln, Ln))
-            û_cpx, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
+            û_r2c, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FTB.NonuniformFFTsBackend(), Ls = (Ln, Ln))
+            û_cpx, _ = FIT.to_spectral((ur2,), (xr2, yr2), msr; spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln))
             Test.@test sqrt(sum(abs2, û_r2c .- û_cpx) / sum(abs2, û_cpx)) < 1e-7
         end
     end
 
     Test.@testset "cuFINUFFT device to_spectral (FINUFFT provider)" begin
-        # Ext load + device-method registration: checkable wherever CUDA is present, no GPU needed. A
-        # cuFINUFFT symbol named in a dispatch signature (rather than wrapped in the owned plan handle)
-        # would fail to precompile the ext and trip these.
-        ext = Base.get_extension(FIT, :FlowInvariantTransferFINUFFTCUDAExt)
-        Test.@test ext !== nothing
-        Test.@test any(m -> occursin("CUDABackend", string(m.sig)), Base.methods(FIT._finufft_ts_build))
-        Test.@test any(m -> occursin("CuFINUFFTPlan", string(m.sig)), Base.methods(FIT.to_spectral!))
-
         # The device transform needs an NVIDIA GPU; where one exists it reconstructs the same coefficients
         # as the host FINUFFT path. No functional GPU here → the transform is not exercised (logged).
         if CUDA.functional()
@@ -2048,8 +2038,8 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
             Xg = [xs1[i] for i in 1:Nn, j in 1:Nn]; Yg = [xs1[j] for i in 1:Nn, j in 1:Nn]
             Random.seed!(7); ug = randn(Nn, Nn); vg = randn(Nn, Nn)
             û_host, _ = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                        spectral = FIT.Types.FINUFFTBackend(), Ls = (Ln, Ln))
-            wsd = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); spectral = FIT.Types.FINUFFTBackend(),
+                                        spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln))
+            wsd = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); spectral = FTB.FINUFFTBackend(),
                                                ncomponents = 2, Ls = (Ln, Ln),
                                                execution = ComputationalBackends.GPUBackend(CUDA.CUDABackend()))
             û_dev, _ = FIT.to_spectral!(wsd, (CUDA.CuArray(vec(ug)), CUDA.CuArray(vec(vg))))
@@ -2070,7 +2060,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         Random.seed!(17); ug = randn(Nn, Nn); vg = randn(Nn, Nn)
         fields = (vec(ug), vec(vg)); coords = (vec(Xg), vec(Yg))
         b = FIT.Types.LinearBinning(2π / Ln)
-        for spectral in (FIT.Types.FINUFFTBackend(), FIT.Types.NonuniformFFTsBackend())
+        for spectral in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
             û_oc, ks_oc = FIT.to_spectral(fields, coords, (Nn, Nn); spectral = spectral, Ls = (Ln, Ln))
             sf1 = FIT.calculate_energy_transfer(FIT.Types.SpectralFluxMethod(b), fields, coords, (Nn, Nn); spectral = spectral, Ls = (Ln, Ln))
             sf2 = FIT.calculate_energy_transfer(FIT.Types.SpectralFluxMethod(b), û_oc, ks_oc)
@@ -2084,7 +2074,7 @@ Test.@testset "Extension smoke tests (CairoMakie / FINUFFT / FlowFieldSpectra)" 
         end
         # NUFFT backend needs Ls (periodic domain) — a clear error, not a silent guess.
         Test.@test_throws UndefKeywordError FIT.calculate_energy_transfer(
-            FIT.Types.SpectralFluxMethod(b), fields, coords, (Nn, Nn); spectral = FIT.Types.FINUFFTBackend())
+            FIT.Types.SpectralFluxMethod(b), fields, coords, (Nn, Nn); spectral = FTB.FINUFFTBackend())
     end
 
     Test.@testset "FlowFieldSpectra front-end" begin
@@ -2237,6 +2227,16 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
     Test.@test abs(sum(ip.energy_transfer)) < 1e-8 * scaleE
     # (workspace-reuse allocation ratio asserted in test_allocs.jl)
     Test.@test_throws DimensionMismatch FIT.Spherical.calculate_spherical_transfer!(ws, ζscat[1:end-1])
+
+    # `nufft` names the NUFFT library the workspace's spin plans run.
+    for lib in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
+        wl = FIT.Spherical.ScatteredSphericalTransferWorkspace((θs, φs), lmax; radius = a, tol = 1e-12, rtol = 1e-13,
+                                                               nufft = lib)
+        Test.@test all(p -> FTB._backend(NUFSHT._nufft2(p).plan) === lib, (wl.plan0, wl.plan1, wl.plan0w))
+        rl = FIT.Spherical.calculate_spherical_transfer!(wl, ζscat)
+        Test.@test maximum(abs.(rl.energy_transfer .- res.energy_transfer)) < 1e-10 * scaleE
+        FIT.close!(wl)
+    end
 end
 
 # -----------------------------------------------------------------------
@@ -2311,8 +2311,8 @@ Test.@testset "Backend matrix — transform axis (facade-proof)" begin
     û = cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3)          # divergence-free 2D velocity coeffs
     ρ̂ = FFTW.fft(1.0 .+ 0.1 .* randn(N, N)) ./ N^2
     b = FIT.Types.LinearBinning(2π / L); bands = FIT.Types.SmoothBands([2.0, 4.0])
-    DS = SpectralBackends.DirectSumSpectralBackend(); FTB = SpectralBackends.FFTSpectralBackend()
-    NU = FIT.Types.FINUFFTBackend(); SH = SpectralBackends.FSHTSpectralBackend(); NS = SpectralBackends.NUFSHTSpectralBackend()
+    DS = SpectralBackends.DirectSumSpectralBackend(); FF = SpectralBackends.FFTSpectralBackend()
+    NU = FTB.FINUFFTBackend(); SH = SpectralBackends.FSHTSpectralBackend(); NS = SpectralBackends.NUFSHTSpectralBackend()
 
     # Cartesian Fourier-coefficient diagnostics: SUPPORTED = {DirectSum, FFT}; REJECTED = scattered/spherical.
     cart = (
@@ -2325,7 +2325,7 @@ Test.@testset "Backend matrix — transform axis (facade-proof)" begin
     )
     Test.@testset "Cartesian coefficient diagnostics" begin
         for (name, invoke) in cart
-            for sp in (DS, FTB)
+            for sp in (DS, FF)
                 Test.@test invoke(sp) !== nothing
             end
             for sp in (NU, SH, NS)
@@ -2351,7 +2351,7 @@ Test.@testset "Backend matrix — transform axis (facade-proof)" begin
     Test.@testset "Spherical diagnostics" begin
         for (name, geom, invoke) in sph
             ok_backends  = geom === :SH ? (nothing, SH) : (nothing, NS)
-            bad_backends = geom === :SH ? (FTB, NU, NS) : (FTB, NU, SH)
+            bad_backends = geom === :SH ? (FF, NU, NS) : (FF, NU, SH)
             for sp in ok_backends
                 Test.@test invoke(sp) !== nothing
             end

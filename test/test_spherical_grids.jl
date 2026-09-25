@@ -16,7 +16,8 @@ using FlowGeometries: FlowGeometries as FG
 using FFTW: FFTW                               # the uniform `to_spectral` transform
 using FlowFieldSpectra: FlowFieldSpectra       # `to_spectral` on a grid routes through its plans
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
-using NonuniformFFTs: NonuniformFFTs           # the scattered NUFFT provider
+using NonuniformFFTs: NonuniformFFTs           # the scattered NUFFT library
+using FlowTransformBindings: FlowTransformBindings as FTB
 using NUFSHT: NUFSHT
 using ComputationalBackends: ComputationalBackends
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
@@ -222,25 +223,23 @@ Test.@testset "scattered NUFFT entries on a node grid" begin
                                      periodic = (true, true), period = (L, L))
     ms = (12, 12)
 
-    ûg, ksg = FIT.to_spectral((u, v), grid, ms; spectral = FIT.Types.NonuniformFFTsBackend(), tol = 1e-12)
-    ûc, ksc = FIT.to_spectral((u, v), (xs, ys), ms; spectral = FIT.Types.NonuniformFFTsBackend(),
+    ûg, ksg = FIT.to_spectral((u, v), grid, ms; spectral = FTB.NonuniformFFTsBackend(), tol = 1e-12)
+    ûc, ksc = FIT.to_spectral((u, v), (xs, ys), ms; spectral = FTB.NonuniformFFTsBackend(),
                               Ls = (L, L), tol = 1e-12)
-    # NonuniformFFTs threads its transforms off `Threads.nthreads()`, and threaded spreading is not
-    # bitwise reproducible across plan instances: measured 0.0 at -t1 and ~4e-16 here.
-    _nuf_tol(scale) = Threads.nthreads() == 1 ? 0.0 : 1e-12 * scale
-    Test.@test maximum(abs, ûg .- ûc) <= _nuf_tol(maximum(abs, ûc))
+    # Both run their transforms on one thread, so the two plan instances agree bit for bit.
+    Test.@test maximum(abs, ûg .- ûc) == 0
     Test.@test all(collect(ksg[d]) == collect(ksc[d]) for d in 1:2)
 
     ℓ = 0.8
     rg = FIT.nufft_coarse_graining_flux((u, v), grid, ℓ, FIT.Types.GaussianFilter(), ms;
-                                        spectral = FIT.Types.NonuniformFFTsBackend())
+                                        spectral = FTB.NonuniformFFTsBackend())
     rc = FIT.nufft_coarse_graining_flux((u, v), (xs, ys), ℓ, FIT.Types.GaussianFilter(), ms;
-                                        spectral = FIT.Types.NonuniformFFTsBackend(), Ls = (L, L))
+                                        spectral = FTB.NonuniformFFTsBackend(), Ls = (L, L))
     Test.@test maximum(abs, rc.flux_field) > 1e-10
-    Test.@test maximum(abs, rg.flux_field .- rc.flux_field) <= _nuf_tol(maximum(abs, rc.flux_field))
+    Test.@test maximum(abs, rg.flux_field .- rc.flux_field) == 0
 
     # A bounded node grid carries no period for the Fourier box.
     gb = FG.Grids.UnstructuredGrid(geom, (xs, ys), fill(L^2 / n, n))
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), gb, ms;
-                                                     spectral = FIT.Types.NonuniformFFTsBackend())
+                                                     spectral = FTB.NonuniformFFTsBackend())
 end

@@ -36,24 +36,6 @@ function _sph_grad!(out::AbstractMatrix{<:Complex}, C0::AbstractMatrix{<:Real})
     return out
 end
 
-"""
-    calculate_energy_transfer(method::SphericalTransferMethod, vorticity::AbstractMatrix;
-                              dealias=true, kwargs...)
-
-Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
-flow on the sphere, from the **vorticity field** `ζ` sampled on the FastSphericalHarmonics
-equiangular colatitude–longitude grid — `size(vorticity) == (lmax+1, 2lmax+1)`, i.e. the grid from
-`FastSphericalHarmonics.sph_points(lmax+1)`. Returns a [`SphericalTransferResult`](@ref).
-
-The streamfunction is recovered spectrally as `ψ = ∇⁻²ζ` (`ψ̂_lm = -a²/(l(l+1)) ζ̂_lm`), so the flow
-is treated as non-divergent; the `l=0` mode carries no transfer.
-
-The advection `A = J(ψ,ζ)` is quadratic, so it has spectral content up to degree `2·lmax`. With
-`dealias=true` (default) the products are evaluated on a grid resolving `2·lmax` and truncated back,
-so the retained transfers `l ≤ lmax` are alias-free and conserve `Σ_l T_E = Σ_l T_Z = 0` to machine
-precision. `dealias=false` computes on the native grid (aliased; conservation only for fields
-band-limited well below `lmax`). Requires `using FastSphericalHarmonics`.
-"""
 # Build the reusable work arrays for a given resolution. FastSphericalHarmonics is Float64-only, so
 # every buffer is Float64. `dealias` fixes the work-grid size (2·lmax vs lmax), so it is a
 # workspace-level choice. The FSH transforms themselves (spinsph_transform/eth/evaluate) allocate
@@ -122,13 +104,31 @@ function FIT.Spherical.calculate_spherical_transfer!(
     return FIT.Spherical.spherical_transfer_reduce!(ws.result, ws.degs, ws.ψv, ws.ζv, ws.Av)
 end
 
+"""
+    calculate_energy_transfer(method::SphericalTransferMethod, vorticity::AbstractMatrix;
+                              dealias=true, spectral=nothing, execution=SerialBackend())
+
+Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
+flow on the sphere, from the **vorticity field** `ζ` sampled on the FastSphericalHarmonics
+equiangular colatitude–longitude grid — `size(vorticity) == (lmax+1, 2lmax+1)`, i.e. the grid from
+`FastSphericalHarmonics.sph_points(lmax+1)`. Returns a [`SphericalTransferResult`](@ref).
+
+The streamfunction is recovered spectrally as `ψ = ∇⁻²ζ` (`ψ̂_lm = -a²/(l(l+1)) ζ̂_lm`), so the flow
+is treated as non-divergent; the `l=0` mode carries no transfer.
+
+The advection `A = J(ψ,ζ)` is quadratic, so it has spectral content up to degree `2·lmax`. With
+`dealias=true` (default) the products are evaluated on a grid resolving `2·lmax` and truncated back,
+so the retained transfers `l ≤ lmax` are alias-free and conserve `Σ_l T_E = Σ_l T_Z = 0` to machine
+precision. `dealias=false` computes on the native grid (aliased; conservation only for fields
+band-limited well below `lmax`). `spectral`, when given, must be
+`SpectralBackends.FSHTSpectralBackend()`. Requires `using FastSphericalHarmonics`.
+"""
 function FIT.calculate_energy_transfer(
     method::FIT.Types.SphericalTransferMethod,
     vorticity::AbstractMatrix{<:Real};
     dealias::Bool = true,
     spectral = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-    kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :regular)
     Nθ, Nφ = size(vorticity)
@@ -265,7 +265,8 @@ end
 
 """
     calculate_energy_transfer(method::DivergentSphericalTransferMethod,
-                              velocity::Tuple{<:AbstractMatrix,<:AbstractMatrix}; dealias=true, kwargs...)
+                              velocity::Tuple{<:AbstractMatrix,<:AbstractMatrix};
+                              dealias=true, spectral=nothing, execution=SerialBackend())
 
 Divergent horizontal-KE spectral transfer for the full (rotational + divergent) flow on a regular
 colatitude–longitude grid, from the horizontal velocity `(u_θ, u_φ)` on the FastSphericalHarmonics
@@ -278,7 +279,6 @@ function FIT.calculate_energy_transfer(
     dealias::Bool = true,
     spectral = nothing,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-    kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :regular)
     u_θ, u_φ = velocity

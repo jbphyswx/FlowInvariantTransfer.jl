@@ -11,6 +11,7 @@ using Test: Test
 using Random: Random
 using FFTW: FFTW
 using NonuniformFFTs: NonuniformFFTs
+using FlowTransformBindings: FlowTransformBindings as FTB
 using OhMyThreads: OhMyThreads
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
@@ -50,17 +51,15 @@ Test.@testset "batch entries reproduce the per-snapshot calls" begin
         Random.seed!(12)
         cx = Ln .* rand(M); cy = Ln .* rand(M)
         vf = [(sin.(cx .+ 0.1k) .* cos.(cy), cos.(cx) .* sin.(cy .+ 0.1k)) for k in 1:4]
-        sp = FIT.Types.NonuniformFFTsBackend(); filt = FIT.Types.GaussianFilter()
+        sp = FTB.NonuniformFFTsBackend(); filt = FIT.Types.GaussianFilter()
         ref = [FIT.nufft_coarse_graining_flux(v, (cx, cy), ℓ, filt, ms; spectral = sp, Ls = (Ln, Ln))
                for v in vf]
         got = FIT.nufft_coarse_graining_flux_batch(vf, (cx, cy), ℓ, filt, ms;
                                                    spectral = sp, Ls = (Ln, Ln), execution = exec)
         scale = maximum(maximum(abs, ref[i].flux_field) for i in eachindex(vf))
         Test.@test scale > 1e-8
-        # NonuniformFFTs threads its transforms off `Threads.nthreads()`, and threaded spreading is not
-        # bitwise reproducible across plan instances: measured 0.0 at -t1 and ~3e-15 at -t4.
-        tol = Threads.nthreads() == 1 ? 0.0 : 1e-12 * scale
-        Test.@test maximum(maximum(abs, got[i].flux_field .- ref[i].flux_field) for i in eachindex(vf)) <= tol
+        # Every workspace here runs its transforms on one thread, so two plan instances agree bit for bit.
+        Test.@test maximum(maximum(abs, got[i].flux_field .- ref[i].flux_field) for i in eachindex(vf)) == 0
         Test.@test isconcretetype(eltype(got))
         Test.@test got[1].flux_field !== got[2].flux_field      # each result owns its field
     end

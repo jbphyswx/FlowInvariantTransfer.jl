@@ -134,7 +134,7 @@ function FIT.ToSpectralWorkspace(
     D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
     # This entry analyses gridded data onto a Cartesian mode grid. The spherical transforms and the
     # scattered-point providers answer a different question and are reached by their own entries.
-    spectral isa Union{FIT.Types.FINUFFTBackend, FIT.Types.NonuniformFFTsBackend,
+    spectral isa Union{SpectralBackends.AbstractNUFFTSpectralBackend,
                        SpectralBackends.FSHTSpectralBackend,
                        SpectralBackends.NUFSHTSpectralBackend} && throw(ArgumentError(
         "`to_spectral` analyses gridded data; got spectral = $(nameof(typeof(spectral))). Scattered " *

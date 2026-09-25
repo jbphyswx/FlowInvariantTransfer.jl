@@ -21,12 +21,8 @@ end
 # through, so the full-grid host→device copy happens at construction and a repeat call pays nothing.
 _on_device(dev, A::AbstractArray) = KA.get_backend(A) === dev ? A : _to_device(dev, A)
 
-# Device-resident buffers + point arrays for the NonuniformFFTs `to_spectral` workspace on a GPUBackend
-# (host defaults live in core FlowInvariantTransfer). `KA.allocate` gives an uninitialized device buffer
-# (all three scratch buffers are fully overwritten by `to_spectral!`); coordinate vectors are copied onto
-# the backend so they match the device-tagged `PlanNUFFT`.
-FIT._nufft_new(gpu::ComputationalBackends.AbstractGPUBackend, ::Type{CT}, dims::Vararg{Int}) where {CT} =
-    KA.allocate(gpu.backend, CT, dims...)
+# The scattered `to_spectral` workspace's points, copied onto the GPUBackend's device; the NUFFT plan and
+# every buffer built from them then live there too.
 FIT._nufft_to_device(gpu::ComputationalBackends.AbstractGPUBackend, x::AbstractArray) = _to_device(gpu.backend, x)
 
 # Device method of the real-NUFFT Hermitian expansion (core holds the per-mode rule and the host loop).

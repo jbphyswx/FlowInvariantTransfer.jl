@@ -110,7 +110,7 @@ AbstractExecutionBackend (abstract)
 ├── DistributedBackend      # Distributed.jl + SharedArrays
 ├── GPUBackend{B}           # KernelAbstractions (parametric on device)
 ├── AutoBackend             # Auto-detect best available
-├── NUFFTSpectralBackend            # Non-uniform FFT (FINUFFT)
+├── FlowTransformBindings NUFFT tags  # Non-uniform FFT (NonuniformFFTs / FINUFFT)
 ├── FSHTSpectralBackend              # Regular spherical harmonics (FSH)
 └── NUFSHTSpectralBackend           # Scattered spherical harmonics (NUFSHT)
 ```
@@ -255,6 +255,7 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
 | `src/NonlinearTerm.jl` | Pseudospectral (u·∇)u — Serial and FFT paths |
 | `src/SpectralFlux.jl` | Spectral flux Π(K) and transfer spectrum T(k) |
 | `src/CoarseGrainingFlux.jl` | Wrapper stub for CGEF extension |
+| `src/Scattered.jl` | Scattered-Cartesian NUFFT entries (coarse-graining flux, `to_spectral`) over FlowTransformBindings' plans |
 | `src/ShellToShell/ShellToShellTransfer.jl` | Shell-to-shell T(n,m) — Serial core |
 | `src/ScaleToScale/ModeToModeTransfer.jl` | Mode-to-mode S(k\|p\|q) — Serial core |
 | `src/ScaleToScale/TriadicOrthogonalDecomposition/` | TOD implementation |
@@ -269,7 +270,6 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
 | `ext/FlowInvariantTransferKernelAbstractionsExt.jl` | KernelAbstractions | GPU kernels for all transfer densities and triads |
 | `ext/FlowInvariantTransferCGEFExt.jl` | CoarseGrainingEnergyFluxes | Coarse-graining flux computation |
 | `ext/FlowInvariantTransferHelmholtzDecompositionExt.jl` | HelmholtzDecomposition | Physical and spectral Helmholtz decomposition |
-| `ext/FlowInvariantTransferFINUFFTExt.jl` | FINUFFT | Non-uniform FFT path |
 | `ext/FlowInvariantTransferNUFSHTExt.jl` | NUFSHT | Scattered spherical front-end |
 | `ext/FlowInvariantTransferFSHExt.jl` | FastSphericalHarmonics | Regular spherical front-end |
 | `ext/FlowInvariantTransferFlowFieldSpectraExt.jl` | FlowFieldSpectra | Spectral analysis integration |

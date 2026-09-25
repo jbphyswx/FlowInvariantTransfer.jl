@@ -102,10 +102,10 @@ end
 Reusable buffers for the SCATTERED-point spherical transfer `!()` (NUFSHT extension). Holds the three
 NUFSHT spin plans (spin-0 at `lmax`, spin-1 at `lmax`, spin-0 at the dealiased `lwork = 2·lmax`) with
 the scattered points preset, plus every coefficient/gradient/reduction buffer and the result vectors.
-The plans are the dominant cost (FINUFFT planning + the CG least-squares setup); building them once
-lets a snapshot time series on the same points reuse them. NUFSHT plans self-finalize their FINUFFT
-resources, so this struct needs no finalizer. Fields are typed via parameters so the core names no
-NUFSHT type. Requires `using NUFSHT`.
+The plans are the dominant cost (NUFFT planning + the least-squares setup); building them once lets a
+snapshot time series on the same points reuse them. They hold NUFFT resources that
+[`close!`](@ref FlowInvariantTransfer.close!) releases; the allocating entries close theirs. Fields
+are typed via parameters so the core names no NUFSHT type. Requires `using NUFSHT`.
 """
 struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, QW, RES, R}
     plan0::P0        # spin-0 analysis plan at lmax
@@ -204,7 +204,7 @@ function _neg_cumsum!(Π::AbstractVector, T::AbstractVector)
     return Π
 end
 
-# One-line show (these hold FSH / NUFSHT (FINUFFT-backed) plans → default field-dump show can segfault).
+# One-line show (these hold FSH / NUFSHT (NUFFT-backed) plans → default field-dump show can segfault).
 Base.show(io::IO, ::SphericalTransferWorkspace) = print(io, "SphericalTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::SphericalTransferWorkspace) = show(io, w)
 Base.show(io::IO, ::ScatteredSphericalTransferWorkspace) = print(io, "ScatteredSphericalTransferWorkspace(…)")
@@ -290,8 +290,9 @@ end
 Reusable buffers for the SCATTERED-point divergent KE transfer `!()` (NUFSHT extension; loading it
 provides the constructor). Holds the five NUFSHT spin plans (spin ±1 and spin 0 at `lmax`, spin 0 and
 spin +1 at the dealiased `lwork = 2·lmax`) with the points preset, plus every coefficient/field/reduction
-buffer and the result. The plans are the dominant reusable cost. Fields are typed via parameters so the
-core names no NUFSHT type. Requires `using NUFSHT`.
+buffer and the result. The plans are the dominant reusable cost, and hold NUFFT resources that
+[`close!`](@ref FlowInvariantTransfer.close!) releases. Fields are typed via parameters so the core
+names no NUFSHT type. Requires `using NUFSHT`.
 """
 struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, CM, CMW, CV, RV, RVW, PB, TC, QW, RES, R}
     planp::PP        # spin+1 analysis plan at lmax
@@ -346,7 +347,7 @@ function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferRe
     return result
 end
 
-# One-line show (these hold FSH / NUFSHT (FINUFFT-backed) plans → default field-dump show can segfault).
+# One-line show (these hold FSH / NUFSHT (NUFFT-backed) plans → default field-dump show can segfault).
 Base.show(io::IO, ::DivergentSphericalTransferWorkspace) = print(io, "DivergentSphericalTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::DivergentSphericalTransferWorkspace) = show(io, w)
 Base.show(io::IO, ::ScatteredDivergentSphericalTransferWorkspace) = print(io, "ScatteredDivergentSphericalTransferWorkspace(…)")

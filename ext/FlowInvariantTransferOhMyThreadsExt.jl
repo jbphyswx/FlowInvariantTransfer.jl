@@ -224,8 +224,8 @@ function FIT.SpectralFlux._partial_fluxes_batch_threaded!(velocity_hats, ks; kwa
 end
 
 # Overrides `_nufft_cg_batch_threaded!`. One NUFFT workspace (plans + buffers) per chunk, reused across
-# that chunk's snapshots. Each result is copied out because `nufft_coarse_graining_flux!` wraps the
-# workspace's own `Π`, which the chunk's next snapshot overwrites.
+# that chunk's snapshots and closed when the chunk ends. Each result is copied out because
+# `nufft_coarse_graining_flux!` wraps the workspace's own `Π`, which the chunk's next snapshot overwrites.
 function FIT._nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms;
                                        spectral, Ls, return_diagnostics::Bool = false, kwargs...)
     n = length(batch)
@@ -234,9 +234,13 @@ function FIT._nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms;
     chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
         ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; spectral = spectral, Ls = Ls,
                                               return_diagnostics = return_diagnostics, kwargs...)
-        [deepcopy(FIT.nufft_coarse_graining_flux!(ws, batch[i], ℓ, filter, ms;
-                                                  return_diagnostics = return_diagnostics))
-         for i in rngs[ci]]
+        try
+            [deepcopy(FIT.nufft_coarse_graining_flux!(ws, batch[i], ℓ, filter, ms;
+                                                      return_diagnostics = return_diagnostics))
+             for i in rngs[ci]]
+        finally
+            FIT.close!(ws)
+        end
     end
     return reduce(vcat, chunk_results)
 end

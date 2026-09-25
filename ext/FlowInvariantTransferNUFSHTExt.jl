@@ -3,12 +3,13 @@ module FlowInvariantTransferNUFSHTExt
 using NUFSHT: NUFSHT
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
+using SpectralBackends: SpectralBackends
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer at SCATTERED points on the sphere, via NUFSHT
 # (non-uniform spherical-harmonic transforms). Same 2D-barotropic formulation as the FSH regular-grid
 # path (core reduction: FlowInvariantTransfer.Spherical),
-# but analysis/synthesis are FINUFFT-backed scattered transforms.
+# but analysis/synthesis are NUFFT-backed scattered transforms.
 #
 # NUFSHT's spin-weighted harmonics are the standard convention ₛYℓm = √((2ℓ+1)/4π) d^ℓ_{m,-s}(θ) e^{imφ}
 # (read from NUFSHT/src/Spin.jl), so the eth ladder is exactly ð(ₛYℓm) = √((ℓ-s)(ℓ+s+1)) ₛ₊₁Yℓm.
@@ -21,24 +22,6 @@ using ComputationalBackends: ComputationalBackends
 # dealiased by solving it at degree 2·lmax, which needs M ≥ (2lmax+1)² points.
 # ---------------------------------------------------------------------------
 
-"""
-    calculate_energy_transfer(method::SphericalTransferMethod, vorticity::AbstractVector,
-                              coords::Tuple{<:AbstractVector,<:AbstractVector};
-                              lmax, dealias=true, tol=1e-10, rtol=1e-10, maxiter=4000, kwargs...)
-
-Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
-flow on the sphere, from the **vorticity field** `ζ` sampled at `M` **scattered** points
-`coords = (θ, φ)` (colatitudes `θ ∈ [0,π]`, longitudes `φ ∈ [0,2π)`, each length `M`). Returns a
-[`SphericalTransferResult`](@ref) over degrees `l = 0…lmax`.
-
-Coefficients are recovered by NUFSHT's CG least-squares solve, which is well-conditioned only for
-**equidistributed** points — use spherical-Fibonacci or a spherical `t`-design, not clustered/jittered
-points (those recover the field but not the coefficients the transfer needs). The Jacobian is
-dealiased by solving it at degree `2·lmax`, so `M ≥ (2·lmax+1)²` is required (more is better).
-
-Keyword `dealias=false` skips the 2·lmax dealiasing (aliased). `tol` is the FINUFFT tolerance;
-`rtol`/`maxiter` control the CG solve. Requires `using NUFSHT`.
-"""
 function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     coords::Tuple{<:AbstractVector, <:AbstractVector},
     lmax::Integer;
@@ -49,6 +32,7 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     maxiter::Integer = 4000,
     T::Type = Float64,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
+    nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     θ, φ = coords
@@ -70,17 +54,16 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     CT = Complex{FT}
 
     # The three NUFSHT spin plans (points preset) — the dominant, reusable cost. `nthreads=1` (Serial,
-    # default) keeps the FINUFFT-backed transforms single-threaded: FINUFFT shares libfftw3 with FFTW.jl,
-    # so a multithreaded plan spawns Julia Tasks per exec (allocating), and single-threaded is 0-alloc +
-    # oversubscription-free when the outer batch axis is parallelised. ComputationalBackends.ThreadedBackend threads a lone call.
+    # default) keeps the NUFFTs single-threaded, which leaves the cores to an outer batch axis;
+    # ComputationalBackends.ThreadedBackend threads a lone call.
     nthr = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
-    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  0; tol = tol, nthreads = nthr)
-    plan1  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  1; tol = tol, nthreads = nthr)
-    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork, 0; tol = tol, nthreads = nthr)
+    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  0; tol = tol, nthreads = nthr, nufft = nufft)
+    plan1  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  1; tol = tol, nthreads = nthr, nufft = nufft)
+    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork, 0; tol = tol, nthreads = nthr, nufft = nufft)
 
     # Buffers follow the coordinate array type (`similar(θ, …)`): device-array coordinates θ, φ make
-    # NUFSHT build device (cuFINUFFT) plans, and these matching device buffers keep the whole transform
-    # device-resident. Host coordinates → host buffers → CPU FINUFFT, exactly as before.
+    # NUFSHT build device plans, and these matching device buffers keep the whole transform
+    # device-resident. Host coordinates give host buffers and host plans.
     _z(dims...) = fill!(similar(θ, CT, dims...), zero(CT))
     ζ_lm = _z(lmax + 1, 2lmax + 1)
     ψ_lm = _z(lmax + 1, 2lmax + 1)
@@ -102,6 +85,11 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     return FIT.Spherical.ScatteredSphericalTransferWorkspace(
         plan0, plan1, plan0w, ζ_lm, ψ_lm, ðψ, ðζ, A_lw, Gψ, Gζ, ζdata, Jc,
         degcol, Pr, Tcol, qw, result, FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+end
+
+function FIT.close!(ws::FIT.Spherical.ScatteredSphericalTransferWorkspace)
+    foreach(NUFSHT.close!, (ws.plan0, ws.plan1, ws.plan0w))
+    return ws
 end
 
 # `nusht_solve_spin!` returns `(C, iterations, residual, converged)`. The least-squares fit at scattered
@@ -193,6 +181,30 @@ function FIT.Spherical.calculate_spherical_transfer!(
     return ws.result
 end
 
+"""
+    calculate_energy_transfer(method::SphericalTransferMethod, vorticity::AbstractVector,
+                              coords::Tuple{<:AbstractVector,<:AbstractVector};
+                              lmax, dealias=true, tol=1e-10, rtol=1e-10, maxiter=4000,
+                              spectral=nothing, quadrature_weights=nothing,
+                              nufft=AutoSpectralBackend(), execution=SerialBackend())
+
+Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
+flow on the sphere, from the **vorticity field** `ζ` sampled at `M` **scattered** points
+`coords = (θ, φ)` (colatitudes `θ ∈ [0,π]`, longitudes `φ ∈ [0,2π)`, each length `M`). Returns a
+[`SphericalTransferResult`](@ref) over degrees `l = 0…lmax`.
+
+Coefficients are recovered by NUFSHT's least-squares solve, which determines them on
+**equidistributed** points (spherical Fibonacci, a spherical `t`-design); clustered or jittered points
+reproduce the field while leaving the coefficients the transfer reads undetermined. The Jacobian is
+dealiased by solving it at degree `2·lmax`, so `M ≥ (2·lmax+1)²` is required (more is better).
+Per-node `quadrature_weights` (`Σw = 4π`), for a rule exact at that degree, replace the solve by a
+projection.
+
+Keyword `dealias=false` skips the 2·lmax dealiasing (aliased). `tol` is the NUFFT tolerance and
+`nufft` the NUFFT library NUFSHT runs (a FlowTransformBindings tag; `AutoSpectralBackend()` lets NUFSHT
+choose); `rtol`/`maxiter` control the solve. `spectral`, when given, must be
+`SpectralBackends.NUFSHTSpectralBackend()`. Requires `using NUFSHT`.
+"""
 function FIT.calculate_energy_transfer(
     method::FIT.Types.SphericalTransferMethod,
     vorticity::AbstractVector{<:Real},
@@ -204,8 +216,8 @@ function FIT.calculate_energy_transfer(
     maxiter::Integer = 4000,
     spectral = nothing,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
+    nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-    kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :scattered)
     M = length(vorticity)
@@ -214,8 +226,12 @@ function FIT.calculate_energy_transfer(
     ws = FIT.Spherical.ScatteredSphericalTransferWorkspace(
         coords, lmax; radius = float(method.radius), dealias = dealias,
         tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)),
-        quadrature_weights = quadrature_weights, execution = execution)
-    return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
+        quadrature_weights = quadrature_weights, nufft = nufft, execution = execution)
+    try
+        return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
+    finally
+        FIT.close!(ws)
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -229,11 +245,13 @@ end
 """
     ScatteredDivergentSphericalTransferWorkspace(coords, lmax; radius=1.0, dealias=true,
                                                  tol=1e-10, rtol=1e-10, maxiter=4000, T=Float64,
+                                                 nufft=AutoSpectralBackend(),
                                                  execution=ComputationalBackends.SerialBackend())
 
 Reusable buffers + the five NUFSHT spin plans (points preset) for the scattered divergent KE transfer.
 `coords = (θ, φ)` are the `M` colatitudes/longitudes. Needs `M ≥ (2·lmax+1)²` **equidistributed**
-points (e.g. spherical-Fibonacci) for well-conditioned coefficient recovery. Requires `using NUFSHT`.
+points (e.g. spherical-Fibonacci) for well-conditioned coefficient recovery. `nufft` is the NUFFT
+library NUFSHT runs, as for the barotropic workspace. Requires `using NUFSHT`.
 """
 function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     coords::Tuple{<:AbstractVector, <:AbstractVector},
@@ -245,6 +263,7 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     maxiter::Integer = 4000,
     T::Type = Float64,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
+    nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     θ, φ = coords
@@ -263,16 +282,16 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     FT = float(T)
     CT = Complex{FT}
 
-    # Single-threaded FINUFFT plans by default (see the barotropic workspace above for the rationale);
+    # Single-threaded NUFFT plans by default (see the barotropic workspace above);
     # ComputationalBackends.ThreadedBackend threads a lone call. Five plans: spin ±1 & spin-0 at lmax, spin-0 & spin+1 at lwork.
     nthr = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
-    planp  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   1; tol = tol, nthreads = nthr)
-    planm  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  -1; tol = tol, nthreads = nthr)
-    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   0; tol = tol, nthreads = nthr)
-    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  0; tol = tol, nthreads = nthr)
-    planpw = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  1; tol = tol, nthreads = nthr)
+    planp  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   1; tol = tol, nthreads = nthr, nufft = nufft)
+    planm  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,  -1; tol = tol, nthreads = nthr, nufft = nufft)
+    plan0  = NUFSHT.make_spin_plan(CT, θ, φ,lmax,   0; tol = tol, nthreads = nthr, nufft = nufft)
+    plan0w = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  0; tol = tol, nthreads = nthr, nufft = nufft)
+    planpw = NUFSHT.make_spin_plan(CT, θ, φ,lwork,  1; tol = tol, nthreads = nthr, nufft = nufft)
 
-    # Buffers follow the coordinate array type (device-array coords → device buffers → cuFINUFFT).
+    # Buffers follow the coordinate array type (device-array coords → device buffers and plans).
     _z(dims...) = fill!(similar(θ, CT, dims...), zero(CT))
     ap = _z(lmax + 1, 2lmax + 1); am = _z(lmax + 1, 2lmax + 1)
     sym = _z(lmax + 1, 2lmax + 1); anti = _z(lmax + 1, 2lmax + 1)
@@ -296,6 +315,11 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         planp, planm, plan0, plan0w, planpw, ap, am, sym, anti, ζc, δc, Khat, Adv_lm,
         Up, Um, ζv, δv, Kv, gradK, Advv, ladl, ladw, Pr, Tcol, qw, result,
         FT(radius), Int(lmax), Int(lwork), FT(rtol), Int(maxiter))
+end
+
+function FIT.close!(ws::FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace)
+    foreach(NUFSHT.close!, (ws.planp, ws.planm, ws.plan0, ws.plan0w, ws.planpw))
+    return ws
 end
 
 function FIT.calculate_divergent_spherical_transfer!(
@@ -361,8 +385,8 @@ function FIT.calculate_energy_transfer(
     maxiter::Integer = 4000,
     spectral = nothing,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
+    nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-    kwargs...,
 )
     FIT.Spherical._validate_spherical_backends(spectral, execution, :scattered)
     u_θ, u_φ = velocity
@@ -373,8 +397,12 @@ function FIT.calculate_energy_transfer(
     ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
         maxiter = maxiter, T = float(eltype(u_θ)), quadrature_weights = quadrature_weights,
-        execution = execution)
-    return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
+        nufft = nufft, execution = execution)
+    try
+        return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
+    finally
+        FIT.close!(ws)
+    end
 end
 
 end # module FlowInvariantTransferNUFSHTExt
