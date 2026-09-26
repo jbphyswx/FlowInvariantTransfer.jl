@@ -812,6 +812,25 @@ Test.@testset "CoarseGrainingFlux — in-place !() + diagnostics + workspace reu
     Test.@test maximum(abs.(r0d.stress_tensor .- r1d.stress_tensor)) == 0.0
     Test.@test maximum(abs.(r0d.strain_rate  .- r1d.strain_rate))  == 0.0
 
+    # A vertical component on the two-dimensional grid is CGEF's thin-layer flux, and on a masked grid the
+    # flux is CGEF's under its own default mask strategy.
+    CG = CoarseGrainingEnergyFluxes
+    cart = CG.FlowGeometries.Geometry.CartesianGeometry{Float64}()
+    w = [0.3 * cos(xs[i] + ys[j]) for i in 1:N, j in 1:N]
+    ws3 = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v, w), (xs, ys), ℓ, filt)
+    r3 = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws3, (u, v, w))
+    Π3 = zeros(N, N)
+    CG.Diagnostics.compute_Π!(Π3, u, v, w, CG.FlowGeometries.Grids.StructuredGrid(cart, xs, ys),
+        CG.Kernels.GaussianKernel(), ℓ)
+    Test.@test maximum(abs, r3.flux_field .- Π3) == 0.0
+    Test.@test maximum(abs, r3.flux_field .- r1.flux_field) > 0
+    mask = trues(N, N); mask[5:9, 12:20] .= false
+    rm = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux((u, v), (xs, ys), ℓ, filt; mask)
+    Πm = zeros(N, N)
+    CG.Diagnostics.compute_Π!(Πm, u, v, nothing, CG.FlowGeometries.Grids.StructuredGrid(cart, xs, ys; mask),
+        CG.Kernels.GaussianKernel(), ℓ)
+    Test.@test isequal(rm.flux_field, Πm)
+
     # Filter-scale sweep: the workspace is scale-specific (footprint fixed at construction), so build one
     # per scale; the reused `!` matches the allocating path.
     for l in (0.3, 0.5, 0.8, 1.2)

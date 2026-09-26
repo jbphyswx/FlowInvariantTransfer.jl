@@ -34,7 +34,7 @@ _masked_mean(Π::AbstractArray{FT}, ::CGEF.FlowGeometries.Grids.AllActive) where
 
 """
     _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; mask=nothing, return_diagnostics=false,
-                       mask_strategy=Deformable(), backend=AutoBackend(), radius=nothing)
+                       mask_strategy=ZeroFill(), backend=AutoBackend(), radius=nothing)
 
 Build the reusable CGEF `StructuredGrid`, its `ΠWorkspace`, the derivative + filter plans (fixed for
 the given `(filter, scale ℓ, mask_strategy, backend)`), the `Π_ℓ(x)` output buffer, and (when
@@ -50,12 +50,14 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
     radius::Union{Nothing, Real} = nothing,
     backend::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
-    mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.Deformable(),
+    mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.ZeroFill(),
 )
     D  = length(velocity_fields)
     nd = length(coords_vecs)
-    D == nd || throw(ArgumentError(
-        "Number of velocity components ($D) must equal number of spatial dimensions ($nd)"))
+    # Three components on two coordinates are the thin-layer (2.5-D) flow of one horizontal layer.
+    (D == nd || (nd == 2 && D == 3)) || throw(ArgumentError(
+        "got $D velocity components on $nd coordinates; pass one per coordinate, or three on a " *
+        "two-dimensional grid for the thin-layer flux"))
 
     FT  = eltype(velocity_fields[1])
 
@@ -98,7 +100,7 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
     filter::FIT.Types.AbstractFilter;
     return_diagnostics::Bool = false,
     backend::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
-    mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.Deformable(),
+    mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.ZeroFill(),
 )
     return _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagnostics, backend, mask_strategy)
 end
@@ -110,18 +112,20 @@ function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagno
     D  = length(velocity_fields)
     ns = size(velocity_fields[1])
 
-    workspace = CGEF.Diagnostics.ΠWorkspace(grid)                # dimensionality inferred from the grid
+    # A third component on a two-dimensional grid is the thin-layer vertical velocity, whose buffers the
+    # workspace holds only when asked.
+    workspace = CGEF.Diagnostics.ΠWorkspace(grid; has_w = D == 3)
     Π_out = zeros(FT, ns...)
     diagnostics = return_diagnostics ? (zeros(FT, ns..., D, D), zeros(FT, ns..., D, D)) : nothing
-    # Both CGEF plans are built ONCE here and stored as concrete typed fields (no `Any`): the derivative
-    # `StencilPlan` (grid-only) and the filter footprint for the fixed (kernel, scale, mask, backend).
+    # Both CGEF plans are built once here and stored as concrete typed fields: the derivative
+    # `StencilPlan` (grid-only) and the filter plan for the fixed (kernel, scale, mask, backend).
     # `compute_Π!` then reuses both, so a repeat call allocates nothing inside CGEF.
     deriv_plan  = _cg_deriv_plan(grid)
-    filter_plan = CGEF.Filtering.plan_filter(grid, _to_cgef_kernel(filter), FT(ℓ);
-                                             mask_strategy = mask_strategy, backend = backend)
+    kernel = _to_cgef_kernel(filter)
+    filter_plan = CGEF.Filtering.plan_filter(grid, kernel, FT(ℓ); mask_strategy = mask_strategy, backend = backend)
 
     return FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
-        grid, workspace, Π_out, diagnostics, deriv_plan, filter_plan)
+        grid, workspace, Π_out, diagnostics, deriv_plan, filter_plan, kernel, FT(ℓ))
 end
 
 # The derivative plan a grid affords, and the one its `compute_Π!` method accepts
@@ -159,33 +163,31 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     size(velocity_fields[1]) == size(Π_out) || throw(DimensionMismatch(
         "velocity field size $(size(velocity_fields[1])) does not match workspace grid $(size(Π_out))"))
 
-    plan = ws.filter_plan
     # Vertical component only for a 3-component field; the 2D flux passes `nothing` (single horizontal
     # layer). The component count is the criterion — an unstructured grid holds a 3-D field as a flat
-    # vector, so the array rank does not say how many velocity directions there are. `plan.kernel` and
-    # `plan.scale` are the fixed values the plan was built with — passed positionally (compute_Π!
-    # requires them but reuses the prebuilt plan; backend/mask_strategy are unused when all plans are given).
+    # vector, so the array rank does not say how many velocity directions there are. `compute_Π!` takes
+    # the kernel and scale positionally and reuses the prebuilt plans.
     D = length(velocity_fields)
     w_comp = D == 3 ? velocity_fields[3] : nothing
     CGEF.Diagnostics.compute_Π!(
         Π_out,
         velocity_fields[1], velocity_fields[2], w_comp,
         ws.grid,
-        plan.kernel,
-        plan.scale;
+        ws.kernel,
+        ws.scale;
         workspace   = ws.cgef_workspace,
-        filter_plan = plan,
+        filter_plan = ws.filter_plan,
         deriv_plan  = ws.deriv_plan,
     )
 
     mean_Π = _masked_mean(Π_out, ws.grid.mask)
 
     if ws.diagnostics === nothing
-        return FIT.Types.CoarseGrainingFluxResult(plan.scale, Π_out, FT(mean_Π))
+        return FIT.Types.CoarseGrainingFluxResult(ws.scale, Π_out, FT(mean_Π))
     else
         τ_arr, S_arr = ws.diagnostics
         _fill_diagnostics!(τ_arr, S_arr, ws.cgef_workspace, Val(D))
-        return FIT.Types.CoarseGrainingFluxResultWithDiagnostics(plan.scale, Π_out, FT(mean_Π), τ_arr, S_arr)
+        return FIT.Types.CoarseGrainingFluxResultWithDiagnostics(ws.scale, Π_out, FT(mean_Π), τ_arr, S_arr)
     end
 end
 
