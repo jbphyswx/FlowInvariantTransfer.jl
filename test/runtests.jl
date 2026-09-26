@@ -49,34 +49,41 @@ Test.@testset "Utils — wavenumber_grid" begin
 end
 
 # -----------------------------------------------------------------------
-Test.@testset "Utils — dealiasing_mask" begin
-    N = 12
-    mask = FIT.Utils.dealiasing_mask((N, N))
-    Test.@test size(mask) == (N, N)
-    # All modes with |k_d| >= N/3 = 4 along any dim should be zeroed
-    # k_idx=0:3 kept, 4:8 removed (FFTW order: 0..N/2 then -(N/2-1)..-1)
-    Test.@test mask[1, 1]   # (k=0,k=0) kept
-    Test.@test mask[2, 1]   # (k=1,k=0) kept
-    Test.@test !mask[5, 1]  # (k=4,k=0) removed by 2/3 rule (4 >= 12/3=4)
+Test.@testset "The 2/3 rule keeps the largest alias-free band" begin
+    # A product of two kept modes p, q reaches p + q, which the n-point grid reads as p + q − n·round((p+q)/n).
+    # The band |m| ≤ K is alias-free when no such image of an out-of-band sum lands inside it.
+    function alias_free(n, K)
+        for p in -K:K, q in -K:K
+            s = p + q
+            img = s - n * round(Int, s / n)
+            abs(s) > K && abs(img) <= K && img != s && return false
+        end
+        return true
+    end
+    for n in 4:40
+        K = FIT.SpectralLayout.dealias_cutoff(n)
+        Test.@test alias_free(n, K)
+        Test.@test !alias_free(n, K + 1)
+        a = FIT.SpectralLayout.FullAxis(n, 1.0)
+        kept = [FIT.SpectralLayout.axis_index_wavenumber(a, i) for i in 1:n
+                if !FIT.SpectralLayout.is_dealiased((a,), CartesianIndex(i))]
+        Test.@test sort(kept) == -K:K
+    end
 end
 
 # -----------------------------------------------------------------------
 Test.@testset "ShellBinning — LinearBinning" begin
     b = FIT.Types.LinearBinning(1.0)
-    edges = FIT.ShellBinning.shell_edges(b, 5.0)
-    Test.@test edges[1] == 0.0
-    Test.@test edges[end] >= 5.0
-    centers = FIT.ShellBinning.shell_centers(b, 5.0)
-    Test.@test length(centers) == length(edges) - 1
-    Test.@test all(diff(centers) .> 0)
+    Test.@test FIT.ShellBinning.shell_edges(b, 5.0) == 0.0:5.0
+    Test.@test FIT.ShellBinning.shell_edges(b, 5.5) == [0.0:5.0; 5.5]
+    Test.@test FIT.ShellBinning.shell_centers(b, 5.0) == 0.5:4.5
 end
 
 Test.@testset "ShellBinning — LogarithmicBinning" begin
     b = FIT.Types.LogarithmicBinning(1.0, 2.0)
-    edges = FIT.ShellBinning.shell_edges(b, 16.0)
-    Test.@test edges[1] == 1.0
-    Test.@test issorted(edges)
-    Test.@test all(edges[2:end] ./ edges[1:end-1] .≈ 2.0)
+    Test.@test FIT.ShellBinning.shell_edges(b, 20.0) == [0.0, 1, 2, 4, 8, 16, 32]
+    Test.@test FIT.ShellBinning.shell_edges(b, 12.0) == [0.0, 1, 2, 4, 8, 16]
+    Test.@test FIT.ShellBinning.shell_centers(b, 12.0) ≈ [0.5, √2, √8, √32, √128]
 end
 
 Test.@testset "ShellBinning — DyadicBinning vs LogarithmicBinning(2)" begin
@@ -93,16 +100,31 @@ Test.@testset "ShellBinning — CustomBinning" begin
     Test.@test FIT.ShellBinning.n_shells(b, 10.0) == 4
 end
 
-Test.@testset "ShellBinning — assign_shells" begin
-    ks = FIT.Utils.wavenumber_grid((8,), (2π,))
-    k_mag_1d = FIT.Utils.wavenumber_magnitude_grid(ks)
-    b = FIT.Types.LinearBinning(2π / 8)
-    edges = FIT.ShellBinning.shell_edges(b, maximum(k_mag_1d))
-    idx = FIT.ShellBinning.assign_shells(k_mag_1d, edges)
-    Test.@test size(idx) == size(k_mag_1d)
-    Test.@test eltype(idx) === Int
-    Test.@test all(0 .<= idx .<= length(edges) - 1)  # 0 = outside all shells
-    Test.@test any(idx .== 1)                         # shell 1 is populated
+Test.@testset "ShellBinning — every mode lies in the shell its coordinate falls in" begin
+    binnings = (FIT.Types.LinearBinning(1.0), FIT.Types.LinearBinning(0.7),
+                FIT.Types.LogarithmicBinning(1.5, 1.7), FIT.Types.DyadicBinning(2.0))
+    geometries = (FIT.Types.IsotropicShells(), FIT.Types.PerpendicularShells(), FIT.Types.ParallelShells())
+    for ns in ((8, 8, 8), (9, 7, 6)), g in geometries, b in binnings
+        ks = FIT.Utils.wavenumber_grid(ns, (2π, 2π, 2π))
+        k = FIT.ShellBinning.shell_coordinate(g, ks)
+        edges = FIT.ShellBinning.shell_edges(b, maximum(k))
+        idx = FIT.ShellBinning.assign_shells(k, edges)
+        Nsh = length(edges) - 1
+        Test.@test all(I -> 1 <= idx[I] <= Nsh &&
+                            edges[idx[I]] <= k[I] && (k[I] < edges[idx[I] + 1] || idx[I] == Nsh),
+                       CartesianIndices(k))
+    end
+    # So the flux through the last shell is the transfer density summed over every mode.
+    for ns in ((8, 8, 8), (9, 7, 6)), g in geometries, b in binnings
+        ks = FIT.Utils.wavenumber_grid(ns, (2π, 2π, 2π))
+        û = randn(Random.MersenneTwister(3), ComplexF64, ns..., 3)
+        N̂ = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; dealiasing = FIT.Types.NoDealiasing(),
+                                                     spectral = SpectralBackends.FFTSpectralBackend())
+        t = FIT.Invariants.transfer_density(FIT.Types.KineticEnergy(), û, N̂, ks)
+        r = FIT.calculate_spectral_flux(û, ks; binning = b, geometry = g, dealiasing = FIT.Types.NoDealiasing(),
+                                        spectral = SpectralBackends.FFTSpectralBackend())
+        Test.@test r.flux[end] ≈ sum(t) atol = 1e-12 * sum(abs, t)
+    end
 end
 
 # -----------------------------------------------------------------------
@@ -380,6 +402,24 @@ Test.@testset "Dealiasing — exact 3/2 padding (PaddedThreeHalves)" begin
     b  = FIT.Types.LinearBinning(2π/L)
     sf = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = b, dealiasing = FIT.Types.PaddedThreeHalves(), spectral = SpectralBackends.FFTSpectralBackend())
     Test.@test abs(sum(sf.transfer_spectrum)) < 1e-9 * sum(abs, sf.transfer_spectrum)
+
+    # Exact to Nyquist: u = (0, b cos(n x/2) cos y) gives u_y ∂_y u_y = −(b²/4)(1 + cos n x) sin 2y, whose
+    # truncation to the grid is −(b²/4) sin 2y: N̂_y = ±i b²/8 at k = (0, ±2) and zero elsewhere, the
+    # x-Nyquist entries included (cos n x is the product of the two Nyquist halves).
+    for n in (16, 12), real_layout in (false, true)
+        bq = 0.7
+        xs = range(0, 2π; length = n + 1)[1:n]
+        uy = [bq * cos(n * x / 2) * cos(y) for x in xs, y in xs]
+        ksq = FIT.Utils.wavenumber_grid((n, n), (2π, 2π); real = real_layout)
+        tr(f) = real_layout ? FFTW.rfft(f) ./ n^2 : FFTW.fft(f) ./ n^2
+        ûq = cat(tr(zeros(n, n)), tr(uy); dims = 3)
+        N̂q = FIT.NonlinearTerm.compute_nonlinear_term(ûq, ksq; dealiasing = FIT.Types.PaddedThreeHalves(),
+                                                      spectral = SpectralBackends.FFTSpectralBackend())
+        ref = zeros(ComplexF64, size(ûq))
+        ref[1, 3, 2] = im * bq^2 / 8
+        ref[1, n - 1, 2] = -im * bq^2 / 8
+        Test.@test maximum(abs, N̂q .- ref) < 1e-14 * bq^2
+    end
 
     # Padding requires the FFT path; the dependency-free SpectralBackends.DirectSumSpectralBackend errors clearly.
     Test.@test_throws ArgumentError FIT.NonlinearTerm.compute_nonlinear_term(û, ks;
@@ -809,6 +849,10 @@ Test.@testset "CoarseGrainingFlux — spherical (lon–lat) Π_ℓ == CGEF direc
     CoarseGrainingEnergyFluxes.Diagnostics.compute_Π!(Πref, u, v, nothing, grid,
         CoarseGrainingEnergyFluxes.Kernels.GaussianKernel(), FT(ℓ))
     Test.@test maximum(abs, r.flux_field .- Πref) == 0.0
+    # The mean flux is area-weighted: a cell spans R²Δλ(sin φ₊ − sin φ₋) = 2R²Δλ cos φ sin(Δφ/2).
+    Δλ = step(lon); Δφ = step(lat)
+    A = [2R^2 * Δλ * cos(φ) * sin(Δφ / 2) for λ in lon, φ in lat]
+    Test.@test r.mean_flux ≈ sum(Πref .* A) / sum(A) rtol = 1e-12
     # Spherical is a 2D lon–lat surface: a 3D request errors clearly.
     Test.@test_throws ArgumentError FIT.CoarseGrainingFlux.calculate_coarse_graining_flux(
         (u, v, u), (lon, lat, lat), ℓ, FIT.Types.GaussianFilter(); radius = R)
@@ -1224,27 +1268,26 @@ end
 
 # -----------------------------------------------------------------------
 Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
-    # 1. Spectral flux decomposition test
+    # 1. Spectral flux decomposition test: a random real field with both a rotational and a divergent
+    # part, so every channel carries transfer.
     N = 8; L = 2π
     ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
-    û = zeros(ComplexF64, N, N, 2)
-    û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5   # k=(1,0) in u
-    û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5   # k=(0,1) in v
+    rngd = Random.MersenneTwister(21)
+    û = cat((FFTW.fft(randn(rngd, N, N)) ./ N^2 for _ in 1:2)...; dims = 3)
 
     res_none = FIT.SpectralFlux.calculate_spectral_flux(û, ks; decomposition=FIT.Types.NoDecomposition(), dealiasing = FIT.Types.NoDealiasing())
     res_helm = FIT.SpectralFlux.calculate_spectral_flux(û, ks; decomposition=FIT.Types.HelmholtzDecomposition(), dealiasing = FIT.Types.NoDealiasing())
     res_rot  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; decomposition=FIT.Types.RotationalDecomposition(), dealiasing = FIT.Types.NoDealiasing())
     res_div  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; decomposition=FIT.Types.DivergentDecomposition(), dealiasing = FIT.Types.NoDealiasing())
 
-    Test.@test res_none isa FIT.Types.SpectralFluxResult
     Test.@test res_helm isa NamedTuple
     Test.@test haskey(res_helm, :rotational) && haskey(res_helm, :divergent)
-    Test.@test res_rot isa FIT.Types.SpectralFluxResult
-    Test.@test res_div isa FIT.Types.SpectralFluxResult
+    Test.@test minimum(maximum(abs, r.transfer_spectrum) for r in (res_rot, res_div)) > 1e-8
 
-    # For these divergence-free/rotational modes, verify consistency:
-    # T_none ≈ T_rot + T_div
-    Test.@test isapprox(res_none.transfer_spectrum, res_rot.transfer_spectrum + res_div.transfer_spectrum; atol=1e-12)
+    # The receiver split is linear, so the channels sum to the undecomposed transfer.
+    Test.@test isapprox(res_none.transfer_spectrum, res_rot.transfer_spectrum + res_div.transfer_spectrum;
+                        atol = 1e-12 * maximum(abs, res_none.transfer_spectrum))
+    Test.@test res_helm.rotational.transfer_spectrum ≈ res_rot.transfer_spectrum
 
     # 2. Coarse-graining flux decomposition test
     x = range(0, L; length=N+1)[1:N]
@@ -1310,17 +1353,16 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     # entries resolve `AutoSpectralBackend` on the master and hand the workers a concrete backend.
     Distributed.@everywhere using FFTW
 
-    # Create sample data
-    Random.seed!(42)
+    # A random real field: every diagnostic below carries transfer, so parity compares signal.
     N = 8; L = 2π
     ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
-    û = zeros(ComplexF64, N, N, 2)
-    û[2, 1, 1] = 0.5; û[N, 1, 1] = 0.5
-    û[1, 2, 2] = 0.5; û[1, N, 2] = 0.5
+    rngp = Random.MersenneTwister(42)
+    û = cat((FFTW.fft(randn(rngp, N, N)) ./ N^2 for _ in 1:2)...; dims = 3)
 
     # 1. Shell-to-Shell Transfer Parity
     b = FIT.Types.LinearBinning(2π / L)
     res_serial = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), verify_antisymmetry=true, execution=ComputationalBackends.SerialBackend())
+    Test.@test maximum(abs, res_serial.transfer_matrix) > 1e-8
     res_thread = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), verify_antisymmetry=true, execution=ComputationalBackends.ThreadedBackend())
     
     # For DistributedBackend, we convert velocity_hat to a SharedArray so workers can read it efficiently
@@ -1367,6 +1409,7 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     m_ser = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=ComputationalBackends.SerialBackend(), force=true)
     m_dst = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=ComputationalBackends.DistributedBackend(), force=true)
     m_hyb = FIT.calculate_mode_to_mode_transfer(û, ks; spectral=spD, execution=ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()), force=true)
+    Test.@test maximum(abs, m_ser.transfer) > 1e-8
     Test.@test isapprox(m_ser.transfer, m_dst.transfer; atol=1e-12)
     Test.@test isapprox(m_ser.net_transfer, m_dst.net_transfer; atol=1e-12)
     Test.@test isapprox(m_ser.transfer, m_hyb.transfer; atol=1e-12)
@@ -1375,19 +1418,25 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     bb_ser = FIT.BandTransfer.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=ComputationalBackends.SerialBackend())
     bb_dst = FIT.BandTransfer.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=ComputationalBackends.DistributedBackend())
     bb_hyb = FIT.BandTransfer.calculate_band_to_band_transfer(û, ks; bands=bands, spectral=spD, execution=ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()))
+    Test.@test maximum(abs, bb_ser.transfer_matrix) > 1e-8
     Test.@test isapprox(bb_ser.transfer_matrix, bb_dst.transfer_matrix; atol=1e-12)
     Test.@test isapprox(bb_ser.transfer_matrix, bb_hyb.transfer_matrix; atol=1e-12)
 
     pf_ser = FIT.calculate_partial_fluxes(û, ks; decomposition=FIT.Types.HelmholtzDecomposition(), spectral=spD, execution=ComputationalBackends.SerialBackend())
     pf_dst = FIT.calculate_partial_fluxes(û, ks; decomposition=FIT.Types.HelmholtzDecomposition(), spectral=spD, execution=ComputationalBackends.DistributedBackend())
     Test.@test Set(keys(pf_ser.channels)) == Set(keys(pf_dst.channels))
+    Test.@test maximum(abs, pf_ser.total.transfer_spectrum) > 1e-8
     Test.@test isapprox(pf_ser.total.transfer_spectrum, pf_dst.total.transfer_spectrum; atol=1e-12)
+    for k in keys(pf_ser.channels)
+        Test.@test isapprox(pf_ser.channels[k].transfer_spectrum, pf_dst.channels[k].transfer_spectrum; atol = 1e-12)
+    end
 
     ρ̂c = randn(Random.MersenneTwister(7), ComplexF64, N, N)
     p̂c = randn(Random.MersenneTwister(8), ComplexF64, N, N)
     c_ser = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=ComputationalBackends.SerialBackend(), pressure_hat=p̂c, decompose=true)
     c_dst = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=ComputationalBackends.DistributedBackend(), pressure_hat=p̂c, decompose=true)
     c_hyb = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; spectral=spD, execution=ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()), pressure_hat=p̂c, decompose=true)
+    Test.@test maximum(abs, c_ser.transfer_spectrum) > 1e-8
     Test.@test isapprox(c_ser.transfer_spectrum, c_dst.transfer_spectrum; atol=1e-12)
     Test.@test isapprox(c_ser.flux, c_dst.flux; atol=1e-12)
     Test.@test isapprox(c_ser.channels.rotational, c_dst.channels.rotational; atol=1e-12)
@@ -1814,17 +1863,20 @@ Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
     dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, ks2, (N, N), true)
     dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), ks2, (N, N), true)
     Test.@test maximum(abs, Array(dcd) .- dch) == 0
-    rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, ks2, (N, N))
+    kd2 = FIT.SpectralLayout.wavenumber_arrays(û2, Float64, ks2; derivative = true)
+    rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, kd2, (N, N))
     rd = JLArrays.JLArray(similar(û2)); cd = JLArrays.JLArray(similar(û2))
-    FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2), ks2, (N, N))
+    FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2),
+        FIT.SpectralLayout.wavenumber_arrays(JLArrays.JLArray(û2), Float64, ks2; derivative = true), (N, N))
     Test.@test maximum(abs, Array(rd) .- rh) < 1e-14 * (maximum(abs, rh) + eps())
     Test.@test maximum(abs, Array(cd) .- ch) < 1e-14 * (maximum(abs, ch) + eps())
     kmag = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2); bb = FIT.Types.LinearBinning(2π / L)
     edges = FIT.ShellBinning.shell_edges(bb, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
     Nsh = length(collect(FIT.ShellBinning.shell_centers(bb, maximum(kmag))))
-    Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, ks2, (N, N), true)
-    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, ks2, (N, N), true)
-    Test.@test maximum(abs, Td .- Th) == 0
+    Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, ks2, (N, N))
+    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, ks2, (N, N))
+    # The device sum is a tree reduction, the host one sequential: equal to round-off in the summands.
+    Test.@test maximum(abs, Td .- Th) <= 8eps() * sum(abs, td_h)
 end
 
 # -----------------------------------------------------------------------
@@ -1833,40 +1885,102 @@ end
 # conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u and Π to
 # the incompressible transfer_spectrum and flux (paper Eqs. 48–50); (c) the R/C flux channels reconstruct
 # the total flux and the compressive/cross channels vanish for incompressible flow; (d) uniform
-# pressure ⇒ zero pressure-dilatation.
+# pressure ⇒ zero pressure-dilatation. The products are cubic (ρ·u·∇u), so a field band-limited to
+# |m| ≤ ⌊(N−1)/4⌋ is exact under every dealiasing; the truncation rule keeps exactly that band.
 Test.@testset "Compressible energy transfer" begin
-    L = 2π; N = 16
-    ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
-    kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
-    # Broadband real divergence-free velocity from a random real streamfunction (nonzero net
-    # inter-shell transfer, so the incompressible reference and the tolerances are non-degenerate).
-    ψh = FFTW.fft(randn(Random.MersenneTwister(101), N, N)) ./ N^2
-    û  = cat(im .* ky .* ψh, -im .* kx .* ψh; dims=3)
+    L = 2π
     b = FIT.Types.LinearBinning(2π / L)
-    ρ̂ = zeros(ComplexF64, N, N); ρ̂[1, 1] = 1.0    # ρ(x) ≡ 1  (k=0 mode)
+    FFTB = SpectralBackends.FFTSpectralBackend()
+    grid(N) = (ks = FIT.Utils.wavenumber_grid((N, N), (L, L));
+               (ks, [ks[1][i] for i in 1:N, j in 1:N], [ks[2][j] for i in 1:N, j in 1:N]))
+    band(ks, K) = [abs(FIT.SpectralLayout.axis_index_wavenumber(ks[1], i)) <= K &&
+                   abs(FIT.SpectralLayout.axis_index_wavenumber(ks[2], j)) <= K
+                   for i in eachindex(ks[1]), j in eachindex(ks[2])]
+    real_hat(N, rng, keep) = (f = FFTW.fft(randn(rng, N, N)) ./ N^2 .* keep;
+                              FFTW.fft(real.(FFTW.bfft(f))) ./ N^2)
+    # A real divergence-free velocity from a random streamfunction, band-limited to `keep`.
+    solenoidal(N, rng, keep) = ((ks, kx, ky) = grid(N); ψh = real_hat(N, rng, keep);
+                                cat(im .* ky .* ψh, -im .* kx .* ψh; dims = 3))
+    one_hat(N) = (ρ̂ = zeros(ComplexF64, N, N); ρ̂[1, 1] = 1.0; ρ̂)
 
-    res = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning=b)
-    ref = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, spectral=SpectralBackends.FFTSpectralBackend())
-    scaleT = maximum(abs, ref.transfer_spectrum) + eps()
-    # (a) conservation
-    Test.@test abs(sum(res.transfer_spectrum)) < 1e-10 * scaleT
-    # (b) incompressible limit: T_u = ρ·(incompressible T) and Π likewise, here ρ=1
-    Test.@test isapprox(res.transfer_spectrum, ref.transfer_spectrum; atol=1e-10 * scaleT)
-    Test.@test isapprox(res.flux, ref.flux; atol=1e-10 * scaleT)
-    # (c) channels: compressive & cross vanish; the four reconstruct the total flux
-    Test.@test maximum(abs, res.channels.compressive) < 1e-10 * scaleT
-    Test.@test maximum(abs, res.channels.comp_to_rot) < 1e-10 * scaleT
-    Test.@test maximum(abs, res.channels.rot_to_comp) < 1e-10 * scaleT
-    Test.@test isapprox(res.channels.rotational .+ res.channels.compressive .+
-                        res.channels.rot_to_comp .+ res.channels.comp_to_rot, res.flux; atol=1e-10 * scaleT)
-    # (d) uniform pressure ⇒ ∇σ = 0 ⇒ zero pressure-dilatation
-    σ̂ = zeros(ComplexF64, N, N); σ̂[1, 1] = 1.0
-    resp = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning=b, pressure_hat=σ̂)
-    Test.@test resp.pressure_dilatation !== nothing
-    Test.@test maximum(abs, resp.pressure_dilatation.rotational) < 1e-10 * scaleT
-    Test.@test maximum(abs, resp.pressure_dilatation.compressive) < 1e-10 * scaleT
-    # no pressure ⇒ nothing
-    Test.@test res.pressure_dilatation === nothing
+    for N in (16, 15)
+        ks, _, _ = grid(N)
+        K = FIT.SpectralLayout.dealias_cutoff(N, 3)
+        keep = band(ks, K)
+        û = solenoidal(N, Random.MersenneTwister(101), keep)
+        ρ̂ = one_hat(N)
+        res = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning = b)
+        ref = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = b, spectral = FFTB)
+        scaleT = maximum(abs, ref.transfer_spectrum)
+        Test.@test scaleT > 1e-8
+        # (a) conservation
+        Test.@test abs(sum(res.transfer_spectrum)) < 1e-12 * scaleT
+        # (b) incompressible limit: T_u = ρ·(incompressible T) and Π likewise, here ρ=1
+        Test.@test isapprox(res.transfer_spectrum, ref.transfer_spectrum; atol = 1e-12 * scaleT)
+        Test.@test isapprox(res.flux, ref.flux; atol = 1e-12 * scaleT)
+        # (c) channels: compressive & cross vanish; the four reconstruct the total flux
+        Test.@test maximum(abs, res.channels.compressive) < 1e-12 * scaleT
+        Test.@test maximum(abs, res.channels.comp_to_rot) < 1e-12 * scaleT
+        Test.@test maximum(abs, res.channels.rot_to_comp) < 1e-12 * scaleT
+        Test.@test isapprox(res.channels.rotational .+ res.channels.compressive .+
+                            res.channels.rot_to_comp .+ res.channels.comp_to_rot, res.flux; atol = 1e-12 * scaleT)
+        # (d) uniform pressure ⇒ ∇σ = 0 ⇒ zero pressure-dilatation
+        resp = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning = b, pressure_hat = one_hat(N))
+        Test.@test resp.pressure_dilatation !== nothing
+        Test.@test maximum(abs, resp.pressure_dilatation.rotational) < 1e-12 * scaleT
+        Test.@test maximum(abs, resp.pressure_dilatation.compressive) < 1e-12 * scaleT
+        # no pressure ⇒ nothing
+        Test.@test res.pressure_dilatation === nothing
+
+        # A band-limited compressive field with variable density: every dealiasing is exact, so they
+        # agree, and the transfer conserves.
+        rng = Random.MersenneTwister(7)
+        ûc = cat(real_hat(N, rng, keep), real_hat(N, rng, keep); dims = 3)
+        ρ̂c = real_hat(N, rng, keep); ρ̂c[1, 1] += 4
+        rs = map((FIT.Types.OrszagTwoThirds(), FIT.Types.NoDealiasing(), FIT.Types.PaddedThreeHalves())) do da
+            FIT.Compressible.calculate_compressible_flux(ûc, ρ̂c, ks; binning = b, dealiasing = da)
+        end
+        sc = maximum(abs, rs[1].transfer_spectrum)
+        Test.@test sc > 1e-8
+        Test.@test abs(sum(rs[1].transfer_spectrum)) < 1e-12 * sc
+        for r in rs[2:3]
+            Test.@test isapprox(r.transfer_spectrum, rs[1].transfer_spectrum; atol = 1e-12 * sc)
+            Test.@test isapprox(r.channels.rot_to_comp, rs[1].channels.rot_to_comp; atol = 1e-12 * sc)
+        end
+
+        # A broadband field: truncation keeps the band its cubic products leave alias-free, so the
+        # transfer still conserves.
+        ûb = cat(real_hat(N, rng, trues(N, N)), real_hat(N, rng, trues(N, N)); dims = 3)
+        ρ̂b = real_hat(N, rng, trues(N, N)); ρ̂b[1, 1] += 4
+        rb = FIT.Compressible.calculate_compressible_flux(ûb, ρ̂b, ks; binning = b)
+        Test.@test abs(sum(rb.transfer_spectrum)) < 1e-12 * maximum(abs, rb.transfer_spectrum)
+
+        # Padded at constant density: the cubic grid gives the quadratic term exactly, so the transfer
+        # equals the padded incompressible one on a broadband field, Nyquist modes included.
+        ûs = solenoidal(N, Random.MersenneTwister(11), trues(N, N))
+        pad = FIT.Types.PaddedThreeHalves()
+        rp = FIT.Compressible.calculate_compressible_flux(ûs, ρ̂, ks; binning = b, dealiasing = pad)
+        rpi = FIT.SpectralFlux.calculate_spectral_flux(ûs, ks; binning = b, dealiasing = pad, spectral = FFTB)
+        sp = maximum(abs, rpi.transfer_spectrum)
+        Test.@test sp > 1e-8
+        Test.@test isapprox(rp.transfer_spectrum, rpi.transfer_spectrum; atol = 1e-12 * sp)
+        Test.@test maximum(abs, rp.channels.compressive) < 1e-12 * sp
+    end
+
+    # The direct-sum transforms on the padded grid equal the FFT ones.
+    N = 8
+    ks, _, _ = grid(N)
+    rng = Random.MersenneTwister(13)
+    ûd = cat(real_hat(N, rng, trues(N, N)), real_hat(N, rng, trues(N, N)); dims = 3)
+    ρ̂d = real_hat(N, rng, trues(N, N)); ρ̂d[1, 1] += 4
+    kw = (; binning = b, dealiasing = FIT.Types.PaddedThreeHalves(), pressure_hat = ρ̂d)
+    rf = FIT.Compressible.calculate_compressible_flux(ûd, ρ̂d, ks; kw..., spectral = FFTB)
+    rd = FIT.Compressible.calculate_compressible_flux(ûd, ρ̂d, ks; kw...,
+             spectral = SpectralBackends.DirectSumSpectralBackend())
+    sd = maximum(abs, rf.transfer_spectrum)
+    Test.@test isapprox(rd.transfer_spectrum, rf.transfer_spectrum; atol = 1e-12 * sd)
+    Test.@test isapprox(rd.pressure_dilatation.compressive, rf.pressure_dilatation.compressive;
+                        atol = 1e-12 * maximum(abs, rf.pressure_dilatation.compressive))
 end
 
 # -----------------------------------------------------------------------
@@ -2000,18 +2114,20 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
         Random.seed!(31)
         ug = randn(Nn, Nn); vg = randn(Nn, Nn)
 
-        # Samples on a uniform grid → û == fft(u)/Nᵈ exactly (drop-in for the uniform diagnostics).
+        # Samples on a uniform grid → û == fft(u)/Nᵈ to the NUFFT tolerance (drop-in for the uniform
+        # diagnostics).
         û_sc, ks_sc = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
-                                        spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln))
+                                        spectral = FTB.FINUFFTBackend(), Ls = (Ln, Ln), tol = 1e-13)
         û_man  = cat(FFTW.fft(ug), FFTW.fft(vg); dims = 3) ./ Nn^2
         ks_man = FIT.Utils.wavenumber_grid((Nn, Nn), (Ln, Ln))
-        Test.@test isapprox(û_sc, û_man; atol = 1e-8)
+        Test.@test isapprox(û_sc, û_man; atol = 1e-12)
         Test.@test all(isapprox.(ks_sc, ks_man; atol = 1e-10))
 
         # The reconstructed coefficients feed the ordinary uniform spectral flux, matching the manual path.
         Π_sc  = FIT.SpectralFlux.calculate_spectral_flux(û_sc, ks_sc; spectral = SpectralBackends.FFTSpectralBackend())
         Π_man = FIT.SpectralFlux.calculate_spectral_flux(û_man, ks_man; spectral = SpectralBackends.FFTSpectralBackend())
-        Test.@test isapprox(Π_sc.flux, Π_man.flux; atol = 1e-10)
+        Test.@test maximum(abs, Π_man.flux) > 1e-8
+        Test.@test isapprox(Π_sc.flux, Π_man.flux; atol = 1e-11 * maximum(abs, Π_man.flux))
 
         # Genuinely scattered points: a single-mode field recovers its exact wavenumber.
         Np = 4000
@@ -2166,6 +2282,7 @@ Test.@testset "Spherical spectral transfer (FastSphericalHarmonics, 2D barotropi
     res = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(), ζ)
     Test.@test res isa FIT.Types.SphericalTransferResult
     Test.@test res.degrees == collect(0.0:lmax)
+    Test.@test (res.converged, res.iterations, res.residual) == (true, 0, 0.0)   # no fit on the grid
 
     scaleE = maximum(abs, res.energy_transfer) + eps()
     scaleZ = maximum(abs, res.enstrophy_transfer) + eps()
@@ -2281,6 +2398,27 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
                                         lmax = lmax, tol = 1e-12, rtol = 1e-13)
     Test.@test res isa FIT.Types.SphericalTransferResult
     Test.@test res.degrees == collect(0.0:lmax)
+    # Both fits reached rtol, and the result says how far they went.
+    Test.@test res.converged
+    Test.@test res.iterations > 1
+    Test.@test res.residual < 1e-13
+
+    # A fit stopped at `maxiter` returns its transfer, marked unconverged, with its residual.
+    short = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), ζscat, (θs, φs);
+                                          lmax = lmax, tol = 1e-12, rtol = 1e-13, maxiter = 2)
+    Test.@test !short.converged
+    Test.@test short.iterations == 2
+    Test.@test 1e-13 < short.residual < 1
+    Test.@test all(isfinite, short.energy_transfer)
+    Test.@test short.energy_transfer != res.energy_transfer
+
+    # The default rtol is reachable in the field's precision: the fits converge in Float32.
+    r32 = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), Float32.(ζscat),
+                                        (Float32.(θs), Float32.(φs)); lmax = lmax)
+    Test.@test r32.converged
+    Test.@test eltype(r32.energy_transfer) === Float32
+    Test.@test r32.residual isa Float32
+    Test.@test maximum(abs, r32.energy_transfer .- res.energy_transfer) < 1e-3 * maximum(abs, res.energy_transfer)
 
     scaleE = maximum(abs, resF.energy_transfer) + eps()
     scaleZ = maximum(abs, resF.enstrophy_transfer) + eps()
@@ -2309,6 +2447,7 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
     ws = FIT.Spherical.ScatteredSphericalTransferWorkspace((θs, φs), lmax; radius = a, tol = 1e-12, rtol = 1e-13)
     ip = FIT.Spherical.calculate_spherical_transfer!(ws, ζscat)
     Test.@test ip isa FIT.Types.SphericalTransferResult
+    Test.@test ip.converged && ip.iterations == res.iterations
     Test.@test maximum(abs.(ip.energy_transfer .- res.energy_transfer)) < 1e-10 * scaleE
     Test.@test maximum(abs.(ip.enstrophy_transfer .- res.enstrophy_transfer)) < 1e-10 * scaleZ
     Test.@test abs(sum(ip.energy_transfer)) < 1e-8 * scaleE
@@ -2349,6 +2488,7 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
     Test.@testset "FSH regular-grid" begin
         r = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ))
         Test.@test r isa FIT.Types.DivergentSphericalTransferResult
+        Test.@test (r.converged, r.iterations, r.residual) == (true, 0, 0.0)
         Test.@test maximum(abs, r.energy_transfer .- (r.rotational_transfer .+ r.divergent_transfer)) < 1e-10
         Test.@test abs(sum(r.energy_transfer)) / maximum(abs, r.energy_transfer) < 1e-8
         Test.@test maximum(abs, r.divergent_transfer) > 1e-3
@@ -2374,6 +2514,7 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
         rn = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
                                             (θv, φv); lmax = lmax, dealias = false)
         Test.@test rn isa FIT.Types.DivergentSphericalTransferResult
+        Test.@test rn.converged && rn.iterations > 1
         Test.@test abs(sum(rn.energy_transfer)) / maximum(abs, rn.energy_transfer) < 1e-6
         rf = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ); dealias = false)
         Test.@test maximum(abs, rf.energy_transfer .- rn.energy_transfer) / maximum(abs, rf.energy_transfer) < 1e-6

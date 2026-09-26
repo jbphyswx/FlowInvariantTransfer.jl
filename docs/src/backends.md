@@ -59,8 +59,9 @@ Pseudospectral products alias high wavenumbers back onto resolved modes. Every n
 entry point takes a `dealiasing::AbstractDealiasing` strategy (a **type**, so dispatch — not a
 boolean — selects the path):
 
-- [`OrszagTwoThirds`](@ref) **(default)** — zero the upper third of every input field *before*
-  forming the product (exact on retained modes `|k| < N/3`). Works with any spectral backend.
+- [`OrszagTwoThirds`](@ref) **(default)** — keep `|m_d| ≤ ⌊(N_d−1)/3⌋` of every input field
+  *before* forming the product, the largest band whose products alias outside it (exact on the retained
+  modes). Works with any spectral backend.
 - [`PaddedThreeHalves`](@ref) — exact `3/2` zero-padding: embed into a `3/2`-sized grid, multiply,
   truncate back. No aliasing at all on any retained mode. **FFT-only** (`DirectSumSpectralBackend +
   PaddedThreeHalves` throws).
@@ -242,7 +243,8 @@ res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
 ```
 
 The two axes are complementary and compose (a batch of large grids = batch axis over pencil-axis
-groups). The pencil path covers every invariant (KE / helicity / enstrophy) and the `ShellMagnitude`
+groups). The pencil path covers every invariant (KE / helicity / enstrophy), every dealiasing
+(`PaddedThreeHalves` forms the product on a second, padded pencil plan), and the `ShellMagnitude`
 geometries (isotropic `|k|`, perpendicular `k_⊥`, parallel `k_∥`), and `execution=MPIBackend(inner)`
 sets the per-rank local backend — so `MPIBackend(GPUBackend(dev))` runs a device-resident pencil
 (multi-GPU; the local shell reduction becomes an on-device scatter-add).

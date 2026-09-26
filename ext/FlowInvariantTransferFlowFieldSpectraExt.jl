@@ -36,12 +36,12 @@ function FIT._physical_energy_transfer(
     velocity_fields::Tuple,
     grid::FFS.FlowGeometries.Grids.AbstractGrid,
     ms::Tuple;
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...
 )
     coeffs, ks = FFS.calculate_spectrum(grid, velocity_fields, ms; transform = spectral, execution = execution)
     axes_ = _core_axes(ks, ms, eltype(first(velocity_fields)))
-    return FIT.calculate_energy_transfer(method, coeffs, axes_; kwargs...)
+    return FIT.calculate_energy_transfer(method, coeffs, axes_; execution = execution, kwargs...)
 end
 
 # Coordinate-vector convenience: an all-periodic Cartesian grid over those axes. Pass each axis as a

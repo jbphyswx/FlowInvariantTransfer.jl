@@ -249,8 +249,7 @@ FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
 ```@docs
 FlowInvariantTransfer.Utils.wavenumber_grid
 FlowInvariantTransfer.Utils.wavenumber_magnitude_grid
-FlowInvariantTransfer.Utils.dealiasing_mask
-FlowInvariantTransfer.Utils.dealiasing_mask!
+FlowInvariantTransfer.SpectralLayout.dealias_cutoff
 ```
 
 ## Shell Binning & Geometry

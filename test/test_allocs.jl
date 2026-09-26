@@ -293,9 +293,9 @@ Test.@testset "Allocations" begin
         end
 
         # The NUFSHT tests name FINUFFT, which runs each execution on its plan's thread count and
-        # allocates nothing there, so the ratio counts the plans the workspace keeps.
-        # NonuniformFFTs spreads on the thread count too, but its deconvolution and zero-fill run on
-        # every Julia thread and allocate their tasks on each execution.
+        # allocates nothing there, and the workspace holds every fit's LSMR workspace, so a reused call
+        # allocates nothing. NonuniformFFTs spreads on the thread count too, but its deconvolution and
+        # zero-fill run on every Julia thread and allocate their tasks on each execution.
         Test.@testset "spherical (NUFSHT, scattered)" begin
             lmax = 8; M = (2lmax + 1)^2 + 20
             ga = π * (3 - sqrt(5.0))
@@ -309,12 +309,12 @@ Test.@testset "Allocations" begin
                 FIT.Types.SphericalTransferMethod(radius = 1.0), z, (θ, φ); lmax = lmax, tol = 1e-12, rtol = 1e-13,
                 nufft = nu)
             a_reuse, a_fresh = _reuse_spherical!(ws, ζ, fresh)
-            Test.@test a_reuse < a_fresh ÷ 3
+            Test.@test a_reuse == 0
         end
 
-        # Divergent transfer !(): the workspace preserves the FSH work path / the five NUFSHT spin plans,
-        # so a repeat call allocates less than a fresh call (only the FSH-internal transforms / NUFSHT CG
-        # scratch remain — the irreducible library floor).
+        # Divergent transfer !(): FastSphericalHarmonics has no in-place transforms, so a repeat FSH call
+        # allocates those and less than a fresh call; the NUFSHT workspace holds its five plans and four
+        # fits' LSMR workspaces.
         Test.@testset "divergent spherical (FSH, equiangular grid)" begin
             lmax = 20; Ng = lmax + 1
             uθ = randn(Ng, 2Ng - 1); uφ = randn(Ng, 2Ng - 1)
@@ -337,7 +337,7 @@ Test.@testset "Allocations" begin
                 FIT.Types.DivergentSphericalTransferMethod(radius = 1.0), (a, c), (θ, φ); lmax = lmax, tol = 1e-12,
                 rtol = 1e-13, nufft = nu)
             a_reuse, a_fresh = _reuse_divergent!(ws, uθ, uφ, fresh)
-            Test.@test a_reuse < a_fresh ÷ 2
+            Test.@test a_reuse == 0
         end
 
         Test.@testset "triadic orthogonal decomposition (reuse < fresh)" begin

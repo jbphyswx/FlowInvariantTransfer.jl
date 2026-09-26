@@ -88,9 +88,9 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
     b   = FIT.Types.LinearBinning(2π/L)   # unit shells
 
     function compute_diagnostics(uh, vh, wh)
-        # Pack into (N,N,N,3) array expected by FIT
+        # Pack into the (N,N,N,3) array FIT expects, û = fft(u)/N³
         û3 = zeros(ComplexF64, N, N, N, 3)
-        û3[:,:,:,1] .= uh; û3[:,:,:,2] .= vh; û3[:,:,:,3] .= wh
+        û3[:,:,:,1] .= uh ./ N^3; û3[:,:,:,2] .= vh ./ N^3; û3[:,:,:,3] .= wh ./ N^3
         s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û3, ks3;
             binning=b, dealiasing=FIT.Types.OrszagTwoThirds(), verify_antisymmetry=false,
             spectral=FIT.SpectralBackends.FFTSpectralBackend())
@@ -142,7 +142,7 @@ function make_frame_figure(t, E_slice, T_mat, T_net; K_max=nothing)
     T_lim = max(maximum(abs, T_sub), 1e-20)
 
     fig = CairoMakie.Figure(size=(1200, 500), fontsize=13)
-    CairoMakie.Label(fig[0, 1:3],
+    CairoMakie.Label(fig[0, 1:5],
         "3D Taylor-Green Vortex Energy Cascade  (t = $(round(t; digits=2)))",
         fontsize=16, font=:bold, tellwidth=false)
 
@@ -155,7 +155,7 @@ function make_frame_figure(t, E_slice, T_mat, T_net; K_max=nothing)
     CairoMakie.Colorbar(fig[1, 2], hm1, label="KE", width=12)
 
     # Panel 2: T(n,m) matrix
-    ax2 = CairoMakie.Axis(fig[1, 3], title="Shell-to-Shell Transfer T(n,m)  (blue: n gives to m)",
+    ax2 = CairoMakie.Axis(fig[1, 3], title="T(n,m)  (blue: n gives to m)",
         xlabel="Shell m", ylabel="Shell n",
         aspect=CairoMakie.DataAspect())
     hm2 = CairoMakie.heatmap!(ax2, collect(shells), collect(shells), T_sub,
@@ -210,7 +210,7 @@ println("Rendering animation ($(length(frames_t)) frames)...")
 fig_anim = CairoMakie.Figure(size=(1200, 500), fontsize=13)
 
 ax_E  = CairoMakie.Axis(fig_anim[1,1], title="Kinetic Energy (z=π)", xlabel="x", ylabel="y", aspect=CairoMakie.DataAspect())
-ax_T  = CairoMakie.Axis(fig_anim[1,3], title="Shell-to-Shell T(n,m)  (blue: n gives to m)", xlabel="Shell m", ylabel="Shell n", aspect=CairoMakie.DataAspect())
+ax_T  = CairoMakie.Axis(fig_anim[1,3], title="T(n,m)  (blue: n gives to m)", xlabel="Shell m", ylabel="Shell n", aspect=CairoMakie.DataAspect())
 ax_N  = CairoMakie.Axis(fig_anim[1,5], title="Net Transfer Σₘ T(n,m)", xlabel="Shell n", ylabel="−dEₙ/dt")
 
 x_phys = range(0, 2π; length=size(frames_E[1],1)+1)[1:end-1]

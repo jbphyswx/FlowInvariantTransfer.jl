@@ -103,8 +103,8 @@ end
 
 # Dispatch on (spectral transform backend, dealiasing strategy). `advecting_hat` is the velocity
 # u_j that does the advecting; `velocity_hat` is the advected field whose gradient ∂_j(·)_i is taken:
-# N_i = (u_adv)_j ∂_j (u)_i. They coincide for plain self-advection, and differ for shell-to-shell
-# mediators ((u_m·∇)u) and scalar/MHD terms. The 2/3 and no-dealias paths share one implementation
+# N_i = (u_adv)_j ∂_j (u)_i. They coincide for plain self-advection, and differ for the shell-to-shell
+# term ((u·∇)u_m, the shell-m field advected) and scalar/MHD terms. The 2/3 and no-dealias paths share one implementation
 # (a `keep`/truncate flag); the exact 3/2-padding path is a separate, FFT-only routine.
 _compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.OrszagTwoThirds; advecting_hat=velocity_hat) =
     _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=true, advecting_hat=advecting_hat)
@@ -223,8 +223,8 @@ end
 """
     _is_dealiased(ks, I) -> Bool
 
-`true` if Fourier mode `I` lies in the 2/3-rule discard zone (|k_d| ≥ N_d/3 along any dimension `d`).
-Reads the wavenumber from `ks`, so it holds for both spectral layouts.
+`true` if Fourier mode `I` lies in the 2/3-rule discard zone (`SpectralLayout.is_dealiased`). Reads the
+wavenumber from `ks`, so it holds for both spectral layouts.
 """
 @inline _is_dealiased(ks::Tuple, I::CartesianIndex) = SpectralLayout.is_dealiased(ks, I)
 

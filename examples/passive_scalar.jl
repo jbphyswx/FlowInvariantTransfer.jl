@@ -38,16 +38,18 @@ function run_passive_scalar_example(; N=32)
     CairoMakie.Label(fig[0, 1:4], "Passive-Scalar Variance Transfer — scalar stirred by a 3D Taylor–Green vortex",
         fontsize=16, font=:bold, tellwidth=false)
 
-    ax1 = CairoMakie.Axis(fig[1, 1], title="Variance transfer T_θ(k)", xlabel="k", ylabel="T_θ(k)")
+    θsub(pre, post) = CairoMakie.rich(pre, CairoMakie.subscript("θ"), post)
+    ax1 = CairoMakie.Axis(fig[1, 1], title=θsub("Variance transfer T", "(k)"), xlabel="k", ylabel=θsub("T", "(k)"))
     CairoMakie.lines!(ax1, flux.k_shells, flux.transfer_spectrum, color=:seagreen, linewidth=2.5)
     CairoMakie.hlines!(ax1, [0]; color=:black, linewidth=0.8, linestyle=:dot)
 
-    ax2 = CairoMakie.Axis(fig[1, 2], title="Variance flux Π_θ(K)  (>0 ⇒ forward)", xlabel="K", ylabel="Π_θ(K)")
+    ax2 = CairoMakie.Axis(fig[1, 2], title=θsub("Variance flux Π", "(K)  (>0 ⇒ forward)"), xlabel="K",
+        ylabel=θsub("Π", "(K)"))
     CairoMakie.band!(ax2, flux.k_shells, zero(flux.flux), flux.flux; color=(:darkorange, 0.18))
     CairoMakie.lines!(ax2, flux.k_shells, flux.flux, color=:darkorange, linewidth=2.5)
     CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=0.8, linestyle=:dot)
 
-    ax3 = CairoMakie.Axis(fig[1, 3], title="Shell-to-shell T_θ(n,m)  (blue: n gives to m)",
+    ax3 = CairoMakie.Axis(fig[1, 3], title=θsub("Shell-to-shell T", "(n,m)  (blue: n gives to m)"),
         xlabel="shell m", ylabel="shell n", aspect=CairoMakie.DataAspect())
     hm = CairoMakie.heatmap!(ax3, collect(sh), collect(sh), T[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
     CairoMakie.lines!(ax3, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.2, linestyle=:dash)

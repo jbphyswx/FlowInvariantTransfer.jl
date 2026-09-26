@@ -141,6 +141,8 @@ Test.@testset "spherical transfer on a FlowGeometries grid" begin
         sE = maximum(abs, solv.energy_transfer)
         sZ = maximum(abs, solv.enstrophy_transfer)
         Test.@test sE > 1e-12                                      # the reference carries signal
+        Test.@test (quad.converged, quad.iterations) == (true, 0)  # the projection runs no fit
+        Test.@test solv.converged && solv.iterations > 1
         Test.@test maximum(abs, quad.energy_transfer .- solv.energy_transfer) < 1e-6 * sE
         Test.@test maximum(abs, quad.enstrophy_transfer .- solv.enstrophy_transfer) < 1e-6 * sZ
         # Σ_l T = 0 is the identity the transfer conserves, and the projection meets it.

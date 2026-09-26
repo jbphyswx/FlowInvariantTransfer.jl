@@ -2,7 +2,7 @@ module Utils
 
 using ..SpectralLayout: SpectralLayout
 
-export wavenumber_grid, wavenumber_magnitude_grid, dealiasing_mask, dealiasing_mask!
+export wavenumber_grid, wavenumber_magnitude_grid
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
 export as_component_field
 
@@ -68,56 +68,6 @@ function wavenumber_magnitude_grid(ks::NTuple{D, <:AbstractVector}) where {D}
         k_mag[I] = sqrt(s)
     end
     return k_mag
-end
-
-# ---------------------------------------------------------------------------
-# Dealiasing
-# ---------------------------------------------------------------------------
-
-"""
-    dealiasing_mask(ns; rule=:twothirds) -> BitArray{D}
-
-Build a spectral dealiasing mask.
-
-# Arguments
-- `ns::NTuple{D,Int}`: Grid sizes.
-- `rule::Symbol`: `:twothirds` (2/3 rule) or `:half`.
-
-# Returns
-`BitArray` of the same shape as the spectral grid; `true` where the mode is
-*kept* (i.e., |k_d| < N_d/2 * threshold for all d).
-
-# Notes
-For the 2/3 rule, modes with |k_d| ≥ N_d/3 along any dimension are zeroed.
-"""
-function dealiasing_mask(ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
-    mask = trues(ns...)
-    dealiasing_mask!(mask, ns; rule=rule)
-    return mask
-end
-
-"""
-    dealiasing_mask!(mask, ns; rule=:twothirds) -> mask
-
-In-place version of [`dealiasing_mask`](@ref): write the keep/discard Bool mask for grid shape `ns`
-into `mask` (`rule = :twothirds` for the Orszag 2/3 cutoff, otherwise the Nyquist half).
-"""
-function dealiasing_mask!(mask::AbstractArray{Bool}, ns::NTuple{D,Int}; rule::Symbol = :twothirds) where {D}
-    threshold = rule === :twothirds ? 1.0/3.0 : 0.5
-    for I in CartesianIndices(ns)
-        keep = true
-        for d in 1:D
-            # FFTW-order index (0-based)
-            idx0 = I[d] - 1
-            k_abs = idx0 <= ns[d] ÷ 2 ? idx0 : ns[d] - idx0
-            if k_abs >= ns[d] * threshold
-                keep = false
-                break
-            end
-        end
-        mask[I] = keep
-    end
-    return mask
 end
 
 # ---------------------------------------------------------------------------

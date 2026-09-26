@@ -56,7 +56,7 @@ function FIT.Spherical.SphericalTransferWorkspace(lmax::Integer; radius::Real = 
     Av = Vector{Float64}(undef, nmode)
     result = FIT.Types.SphericalTransferResult(
         collect(Float64, 0:lmax), zeros(Float64, lmax + 1), zeros(Float64, lmax + 1),
-        zeros(Float64, lmax + 1), zeros(Float64, lmax + 1))
+        zeros(Float64, lmax + 1), zeros(Float64, lmax + 1), true, 0, 0.0)
     return FIT.Spherical.SphericalTransferWorkspace(
         Cζ, Cψ, Gψ, Gζ, J, degs, ψv, ζv, Av, result, Float64(radius), Int(lmax), dealias)
 end
@@ -204,7 +204,8 @@ function FIT.Spherical.DivergentSphericalTransferWorkspace(lmax::Integer; radius
     Nw = lwork + 1
     z() = zeros(Float64, lmax + 1)
     rw() = zeros(Float64, Nw, 2Nw - 1)
-    result = FIT.Types.DivergentSphericalTransferResult(collect(Float64, 0:lmax), z(), z(), z(), z(), z(), z())
+    result = FIT.Types.DivergentSphericalTransferResult(collect(Float64, 0:lmax), z(), z(), z(), z(), z(), z(),
+                                                        true, 0, 0.0)
     return FIT.Spherical.DivergentSphericalTransferWorkspace(
         rw(), rw(), rw(), rw(), rw(),                       # uθw, uφw, ζw, δw, K
         zeros(ComplexF64, Nw, 2Nw - 1), zeros(ComplexF64, Nw, 2Nw - 1), rw(),   # Adv, Cw1, Cw0

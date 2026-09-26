@@ -260,7 +260,8 @@ function FIT.Compressible._compressible_batch_threaded!(
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
     pool = [FIT.Compressible.CompressibleWorkspace(û1, ks; spectral = spectral, binning = binning,
-                                                   geometry = geometry, decompose = decompose,
+                                                   geometry = geometry, dealiasing = dealiasing,
+                                                   decompose = decompose,
                                                    with_pressure = pressure_hats !== nothing)
             for _ in eachindex(rngs)]
     chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci

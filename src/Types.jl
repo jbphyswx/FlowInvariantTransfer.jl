@@ -495,10 +495,10 @@ end
 """
     LogarithmicBinning(k₀, λ) <: AbstractShellBinning
 
-Geometrically-spaced shells: k_n = k₀ · λⁿ.
+Geometrically-spaced shells: edges `0, k₀, k₀λ, k₀λ², …`, the first shell `[0, k₀)`.
 
 # Fields
-- `k₀`: First shell lower edge (> 0).
+- `k₀`: Lower edge of the first geometric shell (> 0).
 - `λ`: Ratio between consecutive shell edges (> 1); λ = 2 gives dyadic.
 """
 struct LogarithmicBinning{T} <: AbstractShellBinning
@@ -510,10 +510,10 @@ LogarithmicBinning(k₀, λ) = LogarithmicBinning(promote(k₀, λ)...)
 """
     DyadicBinning(k₀) <: AbstractShellBinning
 
-Dyadic (octave) shells: k_n = k₀ · 2ⁿ.  Equivalent to `LogarithmicBinning(k₀, 2.0)`.
+Dyadic (octave) shells: edges `0, k₀, 2k₀, 4k₀, …`.  Equivalent to `LogarithmicBinning(k₀, 2.0)`.
 
 # Fields
-- `k₀`: First shell lower edge (> 0).
+- `k₀`: Lower edge of the first octave shell (> 0).
 """
 struct DyadicBinning{T} <: AbstractShellBinning
     k₀::T
@@ -522,7 +522,8 @@ end
 """
     CustomBinning(edges) <: AbstractShellBinning
 
-User-specified shell edges.  Shell n covers wavenumbers in [edges[n], edges[n+1]).
+User-specified shell edges.  Shell n covers wavenumbers in [edges[n], edges[n+1]), and the last
+shell includes `edges[end]`; modes outside `[edges[1], edges[end]]` belong to no shell.
 
 # Fields
 - `edges`: Monotonically increasing edge values (length = N_shells + 1).
@@ -556,8 +557,8 @@ SmoothBands(centers::AbstractVector; logwidth=0.6) = SmoothBands(centers, float(
 #
 # A pseudospectral product of two N-mode fields generates wavenumbers up to 2× the maximum, which
 # alias back onto the resolved band. Two standard cures (Canuto et al. 2006; Orszag 1971):
-#   • Orszag 2/3 truncation: zero modes with |k_d| ≥ N_d/3 in the INPUTS and output. Exact on the
-#     retained band |k|<N/3, but discards N/3 ≤ |k| < N/2 — the top of the field's spectrum.
+#   • Orszag 2/3 truncation: keep modes with |m_d| ≤ ⌊(N_d−1)/3⌋ in the inputs and the output. Exact on
+#     the retained band, but discards the top third of the field's spectrum.
 #   • 3/2 zero-padding: embed the N-mode field in a (3N/2)-point grid, form the product there
 #     (no aliasing), transform back and truncate. Exact for the quadratic term over ALL modes to
 #     Nyquist — nothing is discarded.
@@ -581,8 +582,9 @@ struct NoDealiasing <: AbstractDealiasing end
 """
     OrszagTwoThirds <: AbstractDealiasing
 
-Orszag 2/3-rule truncation: zero modes with `|k_d| ≥ N_d/3` in the inputs and output. Exact on the
-retained band `|k| < N/3`; the default `dealiasing`.
+Orszag 2/3-rule truncation: keep modes with `|m_d| ≤ ⌊(N_d−1)/3⌋` along every axis, in the inputs and
+the output ([`SpectralLayout.dealias_cutoff`](@ref)). Exact on the retained band; the default
+`dealiasing`.
 """
 struct OrszagTwoThirds <: AbstractDealiasing end
 
@@ -734,7 +736,7 @@ end
 SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k), typeof(T)}(k, T, f)
 
 """
-    SphericalTransferResult{V<:AbstractVector}
+    SphericalTransferResult{V<:AbstractVector, T<:Real}
 
 Result of a spherical spectral energy/enstrophy transfer ([`SphericalTransferMethod`](@ref)),
 indexed by spherical-harmonic degree `l = 0…lmax`.
@@ -745,17 +747,24 @@ indexed by spherical-harmonic degree `l = 0…lmax`.
 - `enstrophy_transfer::V`: `T_Z(l) = −dZ_l/dt` from the advection; `Σ_l T_Z ≈ 0`.
 - `energy_flux::V`: `Π_E(L) = Σ_{l≤L} T_E(l)` — cumulative energy flux, positive toward higher degree.
 - `enstrophy_flux::V`: `Π_Z(L) = Σ_{l≤L} T_Z(l)`.
+- `converged::Bool`, `iterations::Int`, `residual::T`: at scattered points the coefficients come from
+  least-squares fits; `converged` is whether every fit reached `rtol`, and `iterations` and `residual`
+  (the relative normal-equation residual `‖A†r‖/‖A†f‖`) are the largest over the fits. A transform
+  exact on the nodes (a regular grid, or quadrature weights) runs no fit: `true`, `0`, `0`.
 """
-struct SphericalTransferResult{V<:AbstractVector}
+struct SphericalTransferResult{V<:AbstractVector, T<:Real}
     degrees::V
     energy_transfer::V
     enstrophy_transfer::V
     energy_flux::V
     enstrophy_flux::V
+    converged::Bool
+    iterations::Int
+    residual::T
 end
 
 """
-    DivergentSphericalTransferResult{V<:AbstractVector}
+    DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
 
 Result of the divergent horizontal kinetic-energy spectral transfer
 ([`DivergentSphericalTransferMethod`](@ref)), indexed by spherical-harmonic degree `l = 0…lmax`.
@@ -770,11 +779,13 @@ Result of the divergent horizontal kinetic-energy spectral transfer
 - `divergent_transfer::V`: divergent-channel transfer `T_div(l)` — projection onto the spheroidal
   (velocity-potential `χ`) part.
 - `rotational_flux::V`, `divergent_flux::V`: cumulative fluxes `Σ_{l≤L} T_rot`, `Σ_{l≤L} T_div`.
+- `converged::Bool`, `iterations::Int`, `residual::T`: the least-squares fits at scattered points, as
+  in [`SphericalTransferResult`](@ref).
 
 Only the total is conserved (`Σ_l T ≈ 0`); the two channels exchange energy, so `Σ_l T_rot` and
 `Σ_l T_div` are individually nonzero (equal and opposite up to the total).
 """
-struct DivergentSphericalTransferResult{V<:AbstractVector}
+struct DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
     degrees::V
     energy_transfer::V
     energy_flux::V
@@ -782,6 +793,9 @@ struct DivergentSphericalTransferResult{V<:AbstractVector}
     divergent_transfer::V
     rotational_flux::V
     divergent_flux::V
+    converged::Bool
+    iterations::Int
+    residual::T
 end
 
 """

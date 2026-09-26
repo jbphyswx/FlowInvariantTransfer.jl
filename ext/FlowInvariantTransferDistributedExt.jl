@@ -394,7 +394,7 @@ function FIT.Compressible._compressible_distributed(
     runA = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
             spectral = spectral, binning = binning, geometry = geometry, execution = inner,
-            decompose = decompose, with_pressure = false)
+            dealiasing = dealiasing, decompose = decompose, with_pressure = false)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = decompose, pressure_hat = nothing)
     end
@@ -404,7 +404,7 @@ function FIT.Compressible._compressible_distributed(
     runB = () -> begin
         ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
             spectral = spectral, binning = binning, geometry = geometry, execution = inner,
-            decompose = false, with_pressure = true)
+            dealiasing = dealiasing, decompose = false, with_pressure = true)
         FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
             dealiasing = dealiasing, decompose = false, pressure_hat = pressure_hat)
     end

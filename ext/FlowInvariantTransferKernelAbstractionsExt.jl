@@ -103,15 +103,29 @@ end
     end
 end
 
-# Mode→shell scatter-add: T_spec[shell_idx[I]] += density[I], summed over all modes I in one pass.
-# Atomic because many modes map to the same shell. O(Nᴰ) (vs the O(N_sh·Nᴰ) per-shell broadcast+sum),
-# writes straight into the device T_spec vector — no host temporary, no scalar indexing.
-@kernel function shell_scatter_add_kernel!(T_spec, @Const(density), @Const(shell_idx))
+# Mode→shell scatter-add: T_spec[shell_idx[I]] += w1[I[1]]·density[I], summed over all modes I in one
+# pass, with `w1` the Hermitian weight along axis 1 (`SpectralLayout.hermitian_weights`), or `nothing`
+# for a density that already carries it. Atomic because many modes map to the same shell.
+@kernel function shell_scatter_add_kernel!(T_spec, @Const(density), @Const(shell_idx), w1)
     I = @index(Global, Cartesian)
     n = shell_idx[I]
     if n != 0
-        KA.@atomic T_spec[n] += density[I]
+        KA.@atomic T_spec[n] += (w1 === nothing ? density[I] : w1[I[1]] * density[I])
     end
+end
+
+# The Hermitian weight of every axis-1 index, on `dev`.
+function _hermitian_weights_dev(dev, ::Type{FT}, ks) where {FT}
+    nd = length(ks)
+    w = FT[FIT.SpectralLayout.hermitian_weight(ks, CartesianIndex(ntuple(d -> d == 1 ? i : 1, nd)))
+           for i in 1:length(ks[1])]
+    return _to_device(dev, w)
+end
+
+# The wavenumber components the vorticity kernels multiply by, on `dev`: `derivative_wavenumber`, zero at
+# the Nyquist index of an even axis, as the host densities use.
+_derivative_ks_dev(dev, ::Type{FT}, ks) where {FT} = ntuple(length(ks)) do d
+    _to_device(dev, FT[FIT.SpectralLayout.derivative_wavenumber(ks[d], i) for i in 1:length(ks[d])])
 end
 
 # ComputationalBackends.GPUBackend method of the shared `ShellBinning.shell_scatter_add!` (host scalar method lives in core):
@@ -125,7 +139,7 @@ function FIT.ShellBinning.shell_scatter_add!(T_spec, density, shell_idx, gpu_bac
     T_dev = KA.allocate(dev, eltype(T_spec), length(T_spec))
     fill!(T_dev, zero(eltype(T_spec)))
     shell_idx_dev = _on_device(dev, parent(shell_idx))
-    shell_scatter_add_kernel!(dev)(T_dev, d, shell_idx_dev; ndrange = size(d))
+    shell_scatter_add_kernel!(dev)(T_dev, d, shell_idx_dev, nothing; ndrange = size(d))
     KA.synchronize(dev)
     copyto!(T_spec, T_dev)
     return T_spec
@@ -180,12 +194,8 @@ function FIT.ShellToShellTransfer._shell_to_shell_gpu!(
     fill!(result.transfer_matrix, zero(FT))
     fill!(result.net_transfer, zero(FT))
 
-    # Wavenumber components on the device (only needed by helicity/enstrophy kernels).
-    ks_dev = ntuple(nd) do d
-        a = KA.allocate(dev, FT, length(ks[d]))
-        copyto!(a, collect(FT, ks[d]))
-        a
-    end
+    ks_dev = _derivative_ks_dev(dev, FT, ks)
+    w1 = _hermitian_weights_dev(dev, FT, ks)
 
     # Device-resident shell index (see `_to_device`) so shell masks broadcast against device fields.
     shell_idx_dev = _on_device(dev, ws.shell_idx)
@@ -207,7 +217,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_gpu!(
         #    (replaces the O(N_sh·Nᴰ) per-receiver-shell broadcast+sum), then copy the device column into
         #    the host result matrix. No scalar indexing on the device.
         fill!(col_dev, zero(FT))
-        shell_scatter_add_kernel!(dev)(col_dev, ws.transfer_density, shell_idx_dev; ndrange = ns)
+        shell_scatter_add_kernel!(dev)(col_dev, ws.transfer_density, shell_idx_dev, w1; ndrange = ns)
         KA.synchronize(dev)
         copyto!(view(result.transfer_matrix, :, m), col_dev)
     end
@@ -259,19 +269,16 @@ function FIT.SpectralFlux._spectral_flux_gpu!(
     FT  = real(eltype(velocity_hat))
     D   = size(velocity_hat, nd + 1)
 
-    ks_dev        = ntuple(nd) do d
-        a = KA.allocate(dev, FT, length(ks[d]))
-        copyto!(a, collect(FT, ks[d]))
-        a
-    end
+    ks_dev        = _derivative_ks_dev(dev, FT, ks)
     shell_idx_dev = _on_device(dev, shell_idx)
 
     # 1. Per-mode transfer density (KE/helicity/enstrophy) via the device kernel.
     _launch_transfer_density!(dev, ws.transfer_density, velocity_hat, N̂, ks, invariant, D, ns, ks_dev)
 
-    # 2. Scatter-add modes into shells → ws.T_spec (device), single pass.
+    # 2. Weighted scatter-add of modes into shells → ws.T_spec (device), single pass.
     fill!(ws.T_spec, zero(FT))
-    shell_scatter_add_kernel!(dev)(ws.T_spec, ws.transfer_density, shell_idx_dev; ndrange = ns)
+    shell_scatter_add_kernel!(dev)(ws.T_spec, ws.transfer_density, shell_idx_dev,
+                                   _hermitian_weights_dev(dev, FT, ks); ndrange = ns)
     KA.synchronize(dev)
 
     # 3. Cumulative flux Π = +cumsum(T) via the shared host-summary finalizer.
@@ -295,10 +302,12 @@ function FIT.BandTransfer._band_to_band_gpu!(
     dev = gpu_backend.backend
     nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat)); nb = length(bws.centers)
-    ks_dev = ntuple(nd) do d
-        a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
-    end
+    ks_dev = _derivative_ks_dev(dev, FT, ks)
     W_dev = [_on_device(dev, bws.W[n]) for n in 1:nb]
+    # Receiver weights carry the Hermitian weight, so Σ_I Wₙ[I]·d[I] over the stored modes is the
+    # full-spectrum sum on either layout.
+    hw = FIT.SpectralLayout.hermitian_weights(FT, ks)
+    Ww_dev = [_to_device(dev, bws.W[n] .* hw) for n in 1:nb]
     fill!(T, zero(FT))
     for m in 1:nb
         bws.f_m .= reshape(W_dev[m], ns..., 1) .* velocity_hat
@@ -307,7 +316,7 @@ function FIT.BandTransfer._band_to_band_gpu!(
         _launch_transfer_density!(dev, bws.d, velocity_hat, bws.nlt.N̂, ks, invariant, D, ns, ks_dev)
         KA.synchronize(dev)
         for n in 1:nb
-            T[n, m] = mapreduce(*, +, W_dev[n], bws.d)   # one device pass, no full-grid product buffer
+            T[n, m] = mapreduce(*, +, Ww_dev[n], bws.d)   # one device pass, no full-grid product buffer
         end
     end
     return T
@@ -331,9 +340,7 @@ function FIT.ModeToModeTransfer._mode_to_mode_gpu!(
     nd = length(ks); ns = size(velocity_hat)[1:nd]; M = size(velocity_hat, nd + 1); FT = real(eltype(velocity_hat))
     S = result.transfer; net = result.net_transfer
     fill!(net, zero(FT))
-    ks_dev = ntuple(nd) do d
-        a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
-    end
+    ks_dev = _derivative_ks_dev(dev, FT, ks)
     colons = ntuple(_ -> Colon(), nd)
     for p in CartesianIndices(ns)
         one_hot_kernel!(dev)(û_p, velocity_hat, p, M; ndrange = ns)   # isolate giver mode p
@@ -364,9 +371,8 @@ function FIT.SpectralFlux._partial_fluxes_gpu!(
     dev = gpu_backend.backend
     nd = length(ks); ns = size(velocity_hat)[1:nd]; FT = real(eltype(velocity_hat))
     D = size(velocity_hat, nd + 1)
-    ks_dev = ntuple(nd) do d
-        a = KA.allocate(dev, FT, length(ks[d])); copyto!(a, collect(FT, ks[d])); a
-    end
+    ks_dev = _derivative_ks_dev(dev, FT, ks)
+    w1 = _hermitian_weights_dev(dev, FT, ks)
     sidx_dev = _on_device(dev, sidx)
     d = similar(velocity_hat, FT, ns...)         # per-mode transfer density (device)
     Tspec = KA.allocate(dev, FT, Nsh)            # shell sums (device), reused per channel
@@ -376,7 +382,7 @@ function FIT.SpectralFlux._partial_fluxes_gpu!(
         for sk in names
             _launch_transfer_density!(dev, d, comps[sk], ws.N̂, ks, FIT.Types.KineticEnergy(), D, ns, ks_dev)
             fill!(Tspec, zero(FT))
-            shell_scatter_add_kernel!(dev)(Tspec, d, sidx_dev; ndrange = ns)
+            shell_scatter_add_kernel!(dev)(Tspec, d, sidx_dev, w1; ndrange = ns)
             KA.synchronize(dev)
             T = Array(Tspec)                     # small per-shell vector to host (inherent output)
             channels[(sk, sp, sq)] = FIT.Types.SpectralFluxResult(centers, T, cumsum(T))

@@ -202,7 +202,7 @@ function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks, fft_nt
     half = FIT.SpectralLayout.is_half(ks)
     M    = size(velocity_hat, nd + 1)
     FT   = real(eltype(velocity_hat))
-    Ms   = ntuple(d -> _padded_len(ns[d]), nd)                      # padded physical grid
+    Ms   = ntuple(d -> FIT.SpectralLayout.padded_length(ns[d]), nd)  # padded physical grid
     Msp  = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], nd)  # padded coefficient grid
     spec   = similar(velocity_hat, Msp...)
     u_phys = similar(velocity_hat, FT, Ms..., nd)
@@ -357,27 +357,14 @@ FIT.NonlinearTerm._nlt_forward_fft!(ws, ks, truncate::Bool) =
 # Exact 3/2 zero-padded nonlinear term (PaddedThreeHalves)
 # ---------------------------------------------------------------------------
 
-# Smallest padded length ≥ 3N/2 with (M − N) even (so the centred block embeds symmetrically).
-function _padded_len(n::Int)
-    m = cld(3n, 2)
-    return iseven(m - n) ? m : m + 1
-end
-
-# Coarse ↔ padded mode correspondence, precomputed once.
-#
-# Away from Nyquist each coarse mode is one padded mode and the map is a permutation. The Nyquist
-# mode of an even coarse axis is not: that one slot carries `+n/2` and `−n/2` together, and on the
-# finer grid those are two distinct modes. The unique real band-limited function it represents is
-# `û_Nyq·cos(n·x/2)`, so it embeds as `û_Nyq/2` at EACH of `±n/2` — halved, and duplicated on every
-# axis whose coarse mode sits at Nyquist. A half-layout first axis stores only `+n/2`, its conjugate
-# implied by the transform, so it takes the halving with a single target.
-#
+# Coarse ↔ padded mode correspondence (`SpectralLayout.padded_images`), precomputed once. Each coarse
+# mode is halved once per axis on which it sits at Nyquist and duplicated on every full such axis;
 # `wt` inverts that on the way back, so `truncate ∘ embed` is the identity on every mode.
-struct PaddedMap{NDIM, FT}
-    src::Vector{Int}                      # linear index into the coarse (ms) array
-    dst::Vector{CartesianIndex{NDIM}}     # padded index
-    we::Vector{FT}                        # embed weight
-    wt::Vector{FT}                        # truncate weight
+struct PaddedMap{NDIM, FT, VI <: AbstractVector{<:Integer}, VF <: AbstractVector{FT}, VC <: AbstractVector{<:CartesianIndex{NDIM}}}
+    src::VI                   # linear index into the coarse (ms) array
+    dst::VC     # padded index
+    we::VF                      # embed weight
+    wt::VF                     # truncate weight
     nyq_row::Int                          # coarse axis-1 Nyquist row to recombine, 0 when there is none
 end
 
@@ -389,19 +376,7 @@ function _padded_map(ks, ms::NTuple{nd,Int}, Msp::NTuple{nd,Int}, ::Type{FT}) wh
                iseven(FIT.SpectralLayout.full_length(ks[1]))) ? ms[1] : 0
     lin = LinearIndices(ms)
     for I in CartesianIndices(ms)
-        # Per axis: the padded index (or the two of them, at a full-axis Nyquist) and the split count.
-        opts = ntuple(nd) do d
-            km = FIT.SpectralLayout.axis_index_wavenumber(ks[d], I[d])
-            at_nyq = FIT.SpectralLayout.is_nyquist(ks[d], I[d])
-            if at_nyq && !(d == 1 && ks[d] isa FIT.SpectralLayout.HalfAxis)
-                a = abs(km)
-                (a + 1, Msp[d] - a + 1)            # +n/2 and −n/2 on the finer grid
-            elseif at_nyq
-                (abs(km) + 1,)                     # half layout: the conjugate half is implied
-            else
-                (km >= 0 ? km + 1 : Msp[d] + km + 1,)
-            end
-        end
+        opts = ntuple(d -> FIT.SpectralLayout.padded_images(ks[d], I[d], Msp[d]), nd)
         nyq_axes = count(d -> FIT.SpectralLayout.is_nyquist(ks[d], I[d]), 1:nd)
         halving = FT(1) / FT(2)^nyq_axes           # amplitude split across the Nyquist images
         ntar = prod(length, opts)
@@ -412,7 +387,7 @@ function _padded_map(ks, ms::NTuple{nd,Int}, Msp::NTuple{nd,Int}, ::Type{FT}) wh
             push!(wt, FT(1) / (FT(ntar) * halving))
         end
     end
-    return PaddedMap{nd, FT}(src, dst, we, wt, nyq_row)
+    return PaddedMap{nd, FT, typeof(src), typeof(we), typeof(dst)}(src, dst, we, wt, nyq_row)
 end
 
 # Recombine the coarse Nyquist plane of a half first axis.
@@ -703,18 +678,18 @@ end
 # and every transform in a call (created once under the plan lock). Convention matches the core:
 # synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
 # ---------------------------------------------------------------------------
-function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}; fft_nthreads::Int = 1) where {nd}
+function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft_nthreads::Int = 1) where {nd}
     FT = real(eltype(velocity_hat))
     CT = complex(FT)
     Np = FT(prod(ns))
     ms = FIT.SpectralLayout.spectral_size(ks)
     half = FIT.SpectralLayout.is_half(ks)
-    # Device-generic: buffers + wavenumber arrays are built in `velocity_hat`'s own array type and every
-    # per-component transfer writes a contiguous last-dim slice (no scalar indexing), so the compressible
-    # transform runs on CPU `Array`s (FFTW) and on device arrays (cuFFT via AbstractFFTs) unchanged.
-    # The physical side is REAL on both layouts: `brfft` on the half, `real(bfft(·))` on the full.
+    # Device-generic: buffers are built in `velocity_hat`'s own array type, `kg` (the per-axis derivative
+    # wavenumbers) is too, and every per-component transfer writes a contiguous last-dim slice (no scalar
+    # indexing), so the compressible transform runs on CPU `Array`s (FFTW) and on device arrays (cuFFT
+    # via AbstractFFTs) unchanged. The physical side is real on both layouts: `brfft` on the half,
+    # `real(bfft(·))` on the full.
     cbuf = similar(velocity_hat, CT, ms)
-    kg = FIT.SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
 
     if half
         p_rfft, p_brfft = _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads)

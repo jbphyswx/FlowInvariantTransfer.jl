@@ -4,7 +4,8 @@
 # puts a dynamic dispatch on every downstream use.
 #
 # Every comparison asserts the reference carries signal first: 2/3 dealiasing on a small 3-D grid
-# retains `|k_d| < n/3`, which on 8³ is `|k_d| < 2` and leaves a reference that is only round-off.
+# retains `|m_d| ≤ ⌊(n−1)/3⌋`, which on 8³ is `|m_d| ≤ 2` and can leave a reference that is only
+# round-off.
 # ---------------------------------------------------------------------------
 
 using Test: Test

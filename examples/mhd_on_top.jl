@@ -63,7 +63,7 @@ function run_mhd_on_top_example(; N=128)
 
     # current sheets j = ∂x b_y − ∂y b_x (the developed-state signature)
     kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
-    jph = real.(FFTW.ifft(im .* kx .* b̂[:, :, 2] .- im .* ky .* b̂[:, :, 1]))
+    jph = real.(FFTW.bfft(im .* kx .* b̂[:, :, 2] .- im .* ky .* b̂[:, :, 1]))   # b̂ = fft(b)/N²
     ax0 = CairoMakie.Axis(fig[1, 1], title="current density j (developed state)",
         xlabel="x", ylabel="y", aspect=CairoMakie.DataAspect())
     xp = range(0, 2π; length=N+1)[1:N]; cl = maximum(abs, jph)

@@ -99,6 +99,36 @@ refZ3 = FIT.SpectralFlux.calculate_spectral_flux(û3, ks3; binning = binning, de
 resZ3 = FIT.pencil_spectral_flux(upen3, plan3, ks3h; comm = comm, binning = binning,
         dealiasing = FIT.Types.OrszagTwoThirds(), invariant = FIT.Types.Enstrophy())
 
+# Exact 3/2 padding on the pencil axis: the product formed on a padded pencil plan, the coefficients
+# redistributed to it and back, equals the serial padded flux. An odd grid has no Nyquist mode; the even
+# ones exercise the Nyquist split, including the half layout's self-mirrored plane.
+function pencil_field(ns, comm; seed)
+    nd = length(ns)
+    ksf = FIT.Utils.wavenumber_grid(ns, ntuple(_ -> L, nd))
+    ksr = FIT.Utils.wavenumber_grid(ns, ntuple(_ -> L, nd); real = true)
+    rng = Random.MersenneTwister(seed)
+    us = ntuple(_ -> randn(rng, ns...), nd)
+    ûf = cat((FFTW.fft(u) ./ prod(ns) for u in us)...; dims = nd + 1)
+    pl = FIT.build_pencil_plan(ns, comm)
+    up = ntuple(nd) do c
+        a = PencilFFTs.allocate_input(pl); rl = PencilArrays.range_local(a)
+        for I in CartesianIndices(a)
+            a[I] = us[c][CartesianIndex(ntuple(d -> rl[d][I[d]], nd))]
+        end
+        a
+    end
+    return ûf, ksf, ksr, pl, up
+end
+padded = map((((16, 16), FIT.Types.KineticEnergy()), ((15, 14), FIT.Types.KineticEnergy()),
+              ((12, 12, 12), FIT.Types.Helicity()))) do (ns, inv)
+    ûf, ksf, ksr, pl, up = pencil_field(ns, comm; seed = 7)
+    rf = FIT.SpectralFlux.calculate_spectral_flux(ûf, ksf; binning = binning, invariant = inv,
+            dealiasing = FIT.Types.PaddedThreeHalves(), spectral = SpectralBackends.FFTSpectralBackend())
+    r = FIT.pencil_spectral_flux(up, pl, ksr; comm = comm, binning = binning, invariant = inv,
+            dealiasing = FIT.Types.PaddedThreeHalves())
+    ("padded $(ns) $(nameof(typeof(inv)))", r, rf)
+end
+
 # 0-alloc reuse: a workspace reused across snapshots of the same distributed grid allocates only the
 # small per-shell result vectors (Tglob + flux), not the O(field) Fourier grids/scratch each call.
 wsK = FIT.PencilWorkspace(plan, ksh, comm; binning = binning, dealiasing = FIT.Types.OrszagTwoThirds())
@@ -111,7 +141,7 @@ if rank == 0
     (maximum(abs, resWS.transfer_spectrum .- ref.transfer_spectrum) < 1e-9 * (maximum(abs, ref.transfer_spectrum) + eps())) ||
         (println("FAIL: workspace ! transfer mismatch vs serial"); global failures += 1)
     (a_reuse < 8192) || (println("FAIL: pencil ! reuse alloc too high ($a_reuse bytes)"); global failures += 1)
-    for (name, r, rf) in (("KE", res, ref), ("KE-gpu(KA.CPU)", resG, ref), ("enstrophy", resZ, refZ), ("enstrophy3D", resZ3, refZ3), ("helicity", res3, ref3), ("KE⊥", resP, refP))
+    for (name, r, rf) in (("KE", res, ref), ("KE-gpu(KA.CPU)", resG, ref), ("enstrophy", resZ, refZ), ("enstrophy3D", resZ3, refZ3), ("helicity", res3, ref3), ("KE⊥", resP, refP), padded...)
         sT = maximum(abs, rf.transfer_spectrum) + eps()
         eT = maximum(abs, r.transfer_spectrum .- rf.transfer_spectrum) / sT
         eF = maximum(abs, r.flux .- rf.flux) / (maximum(abs, rf.flux) + eps())

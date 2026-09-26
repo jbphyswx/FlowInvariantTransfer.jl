@@ -15,22 +15,27 @@ _to_cgef_kernel(::FIT.Types.SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKer
 # Override CoarseGrainingFlux._cg_flux_cgef
 # ---------------------------------------------------------------------------
 
-# Allocation-free masked mean over the included points of the flux field (N-D).
-function _masked_mean(Π::AbstractArray{FT}, active::AbstractArray{Bool}) where {FT}
-    acc = zero(FT)
-    n = 0
-    @inbounds for i in eachindex(Π, active)
-        if active[i]
-            acc += Π[i]
-            n += 1
-        end
+# The weights of CGEF's domain mean: each cell of the grid the filter writes (`output_grid`, the whole
+# grid under `ZeroFill`) contributes its area, over the area of the active cells (Storer et al. 2022).
+function _mean_weights(grid, filter_plan, ::Type{FT}, ns) where {FT}
+    og = CGEF.Diagnostics.output_grid(grid, filter_plan)
+    total = CGEF.Diagnostics.active_area(grid)
+    w = zeros(FT, ns...)
+    for (i, I) in enumerate(CartesianIndices(CGEF.FlowGeometries.Grids.size_tuple(og)))
+        t = Tuple(I)
+        CGEF.FlowGeometries.Grids.isactive(og, t...) && (w[i] = FT(CGEF.FlowGeometries.Grids.area(og, t...) / total))
     end
-    return acc / max(1, n)
+    return w
 end
 
-# An all-active grid stores its mask as a size, so the mean is over every point.
-_masked_mean(Π::AbstractArray{FT}, ::CGEF.FlowGeometries.Grids.AllActive) where {FT} =
-    sum(Π) / max(1, length(Π))
+# Σ Π·w, allocation-free.
+function _weighted_sum(Π::AbstractArray{FT}, w::AbstractArray) where {FT}
+    acc = zero(FT)
+    @inbounds for i in eachindex(Π, w)
+        acc += Π[i] * w[i]
+    end
+    return acc
+end
 
 """
     _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; mask=nothing, return_diagnostics=false,
@@ -125,7 +130,8 @@ function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagno
     filter_plan = CGEF.Filtering.plan_filter(grid, kernel, FT(ℓ); mask_strategy = mask_strategy, backend = backend)
 
     return FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
-        grid, workspace, Π_out, diagnostics, deriv_plan, filter_plan, kernel, FT(ℓ))
+        grid, workspace, Π_out, diagnostics, deriv_plan, filter_plan, kernel, FT(ℓ),
+        _mean_weights(grid, filter_plan, FT, ns))
 end
 
 # The derivative plan a grid affords, and the one its `compute_Π!` method accepts
@@ -180,7 +186,7 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
         deriv_plan  = ws.deriv_plan,
     )
 
-    mean_Π = _masked_mean(Π_out, ws.grid.mask)
+    mean_Π = _weighted_sum(Π_out, ws.weights)
 
     if ws.diagnostics === nothing
         return FIT.Types.CoarseGrainingFluxResult(ws.scale, Π_out, FT(mean_Π))

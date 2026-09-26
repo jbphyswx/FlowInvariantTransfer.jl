@@ -108,10 +108,14 @@ snapshot time series on the same points reuse them. They hold NUFFT resources th
 [`close!`](@ref FlowInvariantTransfer.close!) releases; the allocating entries close theirs. Fields
 are typed via parameters so the core names no NUFSHT type. Requires `using NUFSHT`.
 """
-struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, QW, RES, R}
+struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, L0, L0W, CM, CV, DC, PB, TC, QW, RES, R}
     plan0::P0        # spin-0 analysis plan at lmax
     plan1::P1        # spin-1 synthesis plan at lmax
     plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
+    # LSMR workspaces of the two fits (vorticity on `plan0`, advection on `plan0w`); `nothing` when
+    # `qw` makes analysis a projection.
+    lsmr0::L0
+    lsmr0w::L0W
     ζ_lm::CM         # (lmax+1, 2lmax+1) vorticity coefficients
     ψ_lm::CM         # streamfunction coefficients
     ðψ::CM           # spin-1 gradient coefficients of ψ
@@ -121,7 +125,8 @@ struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, CM, CV, DC, PB, TC, QW, 
     Gζ::CV           # (M,) ðζ at the scattered points
     ζdata::CV        # (M,) vorticity as complex (solve input)
     Jc::CV           # (M,) Jacobian A = J(ψ,ζ) as complex (solve input)
-    degcol::DC       # (lmax+1, 1) degrees 0:lmax — row-broadcast for the coefficient-space ops
+    ladl::DC         # (lmax+1, 1) eth ladder √(ℓ(ℓ+1)) per degree row
+    invll1::DC       # (lmax+1, 1) 1/(ℓ(ℓ+1)), 0 at ℓ = 0
     Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
     Tcol::TC         # (lmax+1, 1) real per-degree column-sum scratch
     # (M,) quadrature weights, `Σw = 4π`, when the nodes carry a rule exact at degree `2·lwork`.
@@ -163,9 +168,31 @@ function spherical_transfer_reduce(
     FT = real(eltype(A_lm))
     result = Types.SphericalTransferResult(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
-        zeros(FT, lmax + 1), zeros(FT, lmax + 1))
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1), true, 0, zero(FT))
     return spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm)
 end
+
+"""
+    with_fit(result, fit) -> result′
+
+`result` with its vectors shared and `fit = (; converged, iterations, residual)`, the outcome of this
+call's fits, in place of its own.
+"""
+with_fit(r::Types.SphericalTransferResult, fit::NamedTuple) = Types.SphericalTransferResult(
+    r.degrees, r.energy_transfer, r.enstrophy_transfer, r.energy_flux, r.enstrophy_flux,
+    fit.converged, fit.iterations, fit.residual)
+
+with_fit(r::Types.DivergentSphericalTransferResult, fit::NamedTuple) = Types.DivergentSphericalTransferResult(
+    r.degrees, r.energy_transfer, r.energy_flux, r.rotational_transfer, r.divergent_transfer,
+    r.rotational_flux, r.divergent_flux, fit.converged, fit.iterations, fit.residual)
+
+"""
+    merge_fits(a, b) -> (; converged, iterations, residual)
+
+The outcome of two fits of one call: converged if both are, the larger iteration count and residual.
+"""
+merge_fits(a::NamedTuple, b::NamedTuple) = (; converged = a.converged & b.converged,
+    iterations = max(a.iterations, b.iterations), residual = max(a.residual, b.residual))
 
 """
     spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm) -> result
@@ -286,12 +313,15 @@ buffer and the result. The plans are the dominant reusable cost, and hold NUFFT 
 [`close!`](@ref FlowInvariantTransfer.close!) releases. Fields are typed via parameters so the core
 names no NUFSHT type. Requires `using NUFSHT`.
 """
-struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, CM, CMW, CV, RV, RVW, PB, TC, QW, RES, R}
+struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, LP, LM, L0W, LPW, CM, CMW, CV, RV, RVW, PB, TC, QW, RES, R}
     planp::PP        # spin+1 analysis plan at lmax
     planm::PM        # spin−1 analysis plan at lmax
     plan0::P0        # spin-0 synthesis plan at lmax (vorticity/divergence)
     plan0w::P0W      # spin-0 analysis plan at lwork (K)
     planpw::PPW      # spin+1 plan at lwork (∇K synthesis, advection analysis)
+    # LSMR workspaces of the four fits, on `planp`, `planm`, `plan0w`, `planpw`; `nothing` when `qw`
+    # makes analysis a projection.
+    lsmrp::LP; lsmrm::LM; lsmr0w::L0W; lsmrpw::LPW
     ap::CM; am::CM; sym::CM; anti::CM      # (lmax+1, 2lmax+1) spin-1 coefficient work arrays
     ζc::CM; δc::CM                          # vorticity/divergence spin-0 coefficients
     Khat::CMW                               # (lwork+1, 2lwork+1) K spin-0 coefficients

@@ -16,22 +16,16 @@ FIT.Types._is_device(::GPUArraysCore.AbstractGPUArray) = true
 # no `synchronize` — so they run under `allowscalar(false)` and are verifiable on JLArrays.
 # ---------------------------------------------------------------------------
 
-# Dealias keep-mask (mode kept iff |k_d| < n_d÷3 for all d), device-resident. Built from per-dimension
-# keep vectors (host Int test) moved to the device and broadcast-AND'd into the (ns) grid.
-function _dealias_keep(proto, ns::NTuple{nd,Int}) where {nd}
-    vs = ntuple(nd) do d
-        n = ns[d]
-        kv = Bool[(i0 = i - 1; kabs = i0 <= n ÷ 2 ? i0 : n - i0; kabs < n ÷ 3) for i in 1:n]
-        vd = similar(proto, Bool, n); copyto!(vd, kv)
-        reshape(vd, ntuple(j -> j == d ? n : 1, nd))
-    end
-    return (&).(vs...)   # one fused pass over the grid, one `(ns)` Bool result
-end
+# The keep-mask of the band the compressible transfer's cubic products keep alias-free, device-resident:
+# the product of the per-axis keep factors of `SpectralLayout.dealias_factors`, which read each axis's
+# wavenumbers from `ks` and so hold for either spectral layout.
+_dealias_keep(proto, ::Type{FT}, ks) where {FT} =
+    reduce((a, b) -> a .* b, FIT.SpectralLayout.dealias_factors(proto, FT, ks, true; order = 3))
 
-# dst = src, zeroing the Orszag 2/3 discard band (|k| ≥ n_d÷3) when `trunc`.
+# dst = src, zeroing the modes outside that band when `trunc`.
 function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src, ks, ns::NTuple{nd,Int}, trunc::Bool) where {nd}
     if trunc
-        keep = _dealias_keep(dst, ns)
+        keep = _dealias_keep(dst, real(eltype(dst)), ks)
         dst .= reshape(keep, ns..., 1) .* src
     else
         copyto!(dst, src)
@@ -40,15 +34,9 @@ function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src,
 end
 
 # Helmholtz split (rot ⊥ k, comp ∥ k) via broadcasts with a guarded 1/k² (0 at the DC mode → comp=0).
-function FIT.Compressible._helmholtz_split!(rot::GPUArraysCore.AbstractGPUArray, comp, field_hat, ks, ns::NTuple{nd,Int}) where {nd}
+# `kg` holds the per-axis derivative wavenumbers, reshaped to broadcast along their own axis.
+function FIT.Compressible._helmholtz_split!(rot::GPUArraysCore.AbstractGPUArray, comp, field_hat, kg, ns::NTuple{nd,Int}) where {nd}
     FT = real(eltype(field_hat)); colons = ntuple(_ -> Colon(), nd)
-    # `derivative_wavenumber` per axis, matching the host method: the Nyquist component of an even
-    # axis contributes nothing to the grid divergence the split is built from.
-    kg = ntuple(nd) do d
-        h = FT[FIT.SpectralLayout.derivative_wavenumber(ks[d], i) for i in 1:ns[d]]
-        v = similar(rot, FT, ns[d]); copyto!(v, h)
-        reshape(v, ntuple(i -> i == d ? ns[d] : 1, nd))
-    end
     k2 = similar(rot, FT, ns); fill!(k2, zero(FT))
     for d in 1:nd; k2 .+= kg[d] .^ 2; end
     kdotu = similar(rot, ns); fill!(kdotu, zero(eltype(kdotu)))   # Σ_c k_c·field_c (complex, ns)
@@ -65,23 +53,17 @@ function FIT.Compressible._helmholtz_split!(rot::GPUArraysCore.AbstractGPUArray,
     return nothing
 end
 
-# Shell-bin a per-mode density into shell sums (device reductions → host vector); the keep-mask excludes
-# the 2/3 band when `dealias`. Mode → shell 0 (unassigned) is excluded since `n` runs 1:N_sh.
-function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ks, ns::NTuple{nd,Int}, dealias::Bool) where {nd, FT}
+# Shell-bin a per-mode density into shell sums (device reductions → host vector), as the host `_bin`:
+# each mode weighted by its Hermitian weight. Mode → shell 0 (unassigned) is excluded since `n` runs
+# 1:N_sh.
+function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ks, ns::NTuple{nd,Int}) where {nd, FT}
     sidx_d = sidx isa GPUArraysCore.AbstractGPUArray ? sidx : copyto!(similar(td, Int, ns), sidx)
+    hw = FIT.SpectralLayout.hermitian_weights(FT, ks)
+    # The weight on the whole mode grid, once; each shell sum is then one fused reduction.
+    wk = copyto!(similar(td, FT, size(hw)), hw) .* fill!(similar(td, FT, ns), one(FT))
     T = Vector{FT}(undef, N_sh)
-    # Each shell sum is one fused device reduction over the mode grid: the membership test and the
-    # dealias predicate are evaluated per mode inside the reduction, so no `(ns)` mask or product is
-    # materialized for any of the `N_sh` shells.
-    if dealias
-        keep = _dealias_keep(td, ns)
-        for n in 1:N_sh
-            T[n] = mapreduce((s, t, k) -> (s == n) & k ? t : zero(FT), +, sidx_d, td, keep; init = zero(FT))
-        end
-    else
-        for n in 1:N_sh
-            T[n] = mapreduce((s, t) -> s == n ? t : zero(FT), +, sidx_d, td; init = zero(FT))
-        end
+    for n in 1:N_sh
+        T[n] = mapreduce((s, t, c) -> s == n ? c * t : zero(FT), +, sidx_d, td, wk; init = zero(FT))
     end
     return T
 end

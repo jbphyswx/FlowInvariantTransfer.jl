@@ -71,7 +71,7 @@ new workspace (the footprint has to be rebuilt per scale regardless).
 
 Requires `CoarseGrainingEnergyFluxes` to be loaded.
 """
-struct CoarseGrainingFluxWorkspace{G, W, P, D, DP, FP, K, S}
+struct CoarseGrainingFluxWorkspace{G, W, P, D, DP, FP, K, S, A}
     grid::G                       # FlowGeometries.Grids.StructuredGrid (via the CGEF extension)
     cgef_workspace::W             # CGEF.Diagnostics.ΠWorkspace
     Π_out::P                      # reused Π_ℓ(x) output buffer (N-D: Matrix in 2D, Array{,3} in 3D)
@@ -80,6 +80,7 @@ struct CoarseGrainingFluxWorkspace{G, W, P, D, DP, FP, K, S}
     filter_plan::FP               # CGEF filter plan for the fixed (kernel, scale, mask, backend)
     kernel::K                     # the CGEF kernel the filter plan was built with
     scale::S                      # the filter scale ℓ it was built for
+    weights::A                    # per cell: its area over the active area, 0 where not averaged
 end
 
 function CoarseGrainingFluxWorkspace(

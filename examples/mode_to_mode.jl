@@ -47,16 +47,18 @@ function run_mode_to_mode_example(; N=24)
     kmax = findlast(n -> any(>(0.01Tlim), abs.(TKQ[n, :])) || any(>(0.01Tlim), abs.(TKQ[:, n])), 1:Nsh)
     kmax = something(kmax, Nsh); sh = 1:kmax
 
-    fig = CairoMakie.Figure(size=(1050, 470), fontsize=14)
-    CairoMakie.Label(fig[0, 1:2], "Mode-to-Mode S(k|p) reduces to Shell-to-Shell T(K,Q) — 2D turbulence",
+    fig = CairoMakie.Figure(size=(1100, 470), fontsize=14)
+    CairoMakie.Label(fig[0, 1:3], "Mode-to-Mode S(k|p) reduces to Shell-to-Shell T(K,Q) — 2D turbulence",
         fontsize=16, font=:bold, tellwidth=false)
+    hm = nothing
     for (col, (data, ttl)) in enumerate(((TKQ, "Σ over shells of resolved S(k|p)"),
                                          (Tdir, "direct shell-to-shell T(n,m)")))
         ax = CairoMakie.Axis(fig[1, col], title=ttl, xlabel="shell m", ylabel="shell n",
             aspect=CairoMakie.DataAspect())
-        CairoMakie.heatmap!(ax, collect(sh), collect(sh), data[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
+        hm = CairoMakie.heatmap!(ax, collect(sh), collect(sh), data[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
         CairoMakie.lines!(ax, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.2, linestyle=:dash)
     end
+    CairoMakie.Colorbar(fig[1, 3], hm, label="T(n,m)  (blue: n gives to m)", width=12)
 
     outpath = joinpath(@__DIR__, "mode_to_mode.png")
     CairoMakie.save(outpath, fig)

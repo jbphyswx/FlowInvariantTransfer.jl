@@ -196,8 +196,8 @@ channels are the **rotational↔divergent cross-flux** (zero for incompressible 
 replaces the sharp shell indicator with a graded log-Gaussian partition of unity (Eyink & Aluie
 2009); it is antisymmetric, conserves, and reduces to the band-summed transfer spectrum.
 
-**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; exact
-on ``|k|<N/3``), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
+**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; keeps
+``|m_d| \le \lfloor (N_d-1)/3 \rfloor``, exact there), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
 that is alias-free over every retained mode to Nyquist (FFT path).
 
 ---
@@ -220,7 +220,8 @@ computed pseudospectrally.
 2. ``\partial_j u_i(x) = \text{IFFT}(i k_j \hat{u}_i)``
 3. ``N_i(x) = \sum_j u_j(x)\,\partial_j u_i(x)``
 4. ``\hat{N}_i(\mathbf{k}) = \text{FFT}(N_i) \,/\, N_p`` (where ``N_p = \prod_d N_d``)
-5. 2/3 dealiasing: zero all modes with ``|k_d| \ge N_d/3`` along any dimension.
+5. 2/3 dealiasing: zero all modes with ``|m_d| > \lfloor (N_d-1)/3 \rfloor`` along any dimension, the
+   largest band whose quadratic products alias outside it.
 
 ---
 

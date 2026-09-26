@@ -498,7 +498,6 @@ PrecompileTools.@setup_workload begin
         _ = calculate_shell_to_shell_transfer(û, ks; binning=Types.LinearBinning(2π/L),
                 dealiasing=Types.NoDealiasing(), verify_antisymmetry=false, spectral=ds)
         _ = Utils.wavenumber_grid((N,N), (L,L))
-        _ = Utils.dealiasing_mask((N,N))
     end
 end
 
