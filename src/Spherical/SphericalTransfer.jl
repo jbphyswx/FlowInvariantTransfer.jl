@@ -76,7 +76,7 @@ Reusable buffers for [`calculate_spherical_transfer!`](@ref). Constructed by the
 (regular grid) or NUFSHT (scattered) extension; loading one provides the constructor. The buffer
 fields are typed via parameters so the core names no extension type.
 """
-struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, RES, R}
+struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, PC, RES, R}
     Cζ::CW           # spectral work array — vorticity coefficients (extension layout)
     Cψ::CW           # spectral work array — streamfunction coefficients
     Gψ::GC           # complex spin-1 gradient ðψ on the grid (reused)
@@ -86,6 +86,7 @@ struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, RES, R}
     ψv::RV           # per-mode ψ̂ (reduction input)
     ζv::RV           # per-mode ζ̂
     Av::RV           # per-mode Â
+    plans::PC        # the transforms' plans (extension type), built with the workspace
     result::RES      # reused Types.SphericalTransferResult (TE/TZ/ΠE/ΠZ)
     radius::R
     lmax::Int
@@ -275,13 +276,12 @@ function calculate_divergent_spherical_transfer! end
     DivergentSphericalTransferWorkspace(lmax; ...)
 
 Reusable buffers for the regular-grid divergent KE transfer `!()` (FastSphericalHarmonics extension;
-loading it provides the constructor). FastSphericalHarmonics has no in-place transform API, so the
-spin-weighted transforms/eth allocate internally on every call (an irreducible floor); the workspace
-therefore just carries the reused [`DivergentSphericalTransferResult`](@ref) and the resolution
-parameters. Fields are typed via parameters so the core names no extension type. Requires
-`using FastSphericalHarmonics`.
+loading it provides the constructor): the work-grid fields, the embed targets, the transforms' plans
+and the reused [`DivergentSphericalTransferResult`](@ref). FastSphericalHarmonics has no in-place
+transform API, so the spin-weighted transforms/eth allocate their outputs on every call. Fields are
+typed via parameters so the core names no extension type. Requires `using FastSphericalHarmonics`.
 """
-struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC}
+struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC, PC}
     uθw::RW          # (lwork) velocity components on the work grid
     uφw::RW
     ζw::RW           # (lwork) vorticity / divergence on the work grid
@@ -291,6 +291,7 @@ struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC}
     Cw1::CW          # (lwork) spin+1 embed target
     Cw0::RW          # (lwork) spin-0 embed target
     χc::RC           # (lmax) velocity-potential coefficients χ = ∇⁻²δ
+    plans::PC        # the transforms' plans (extension type), built with the workspace
     result::RES      # reused Types.DivergentSphericalTransferResult
     radius::R
     lmax::Int

@@ -15,30 +15,15 @@ end
 # FFT plan/scratch bundle + allocation-free nonlinear term
 # ---------------------------------------------------------------------------
 
-# FFTW plan creation is NOT thread-safe and the threaded backend builds a workspace per task,
-# so serialize planning behind a lock.
-const _PLAN_LOCK = ReentrantLock()
-
-# Build forward/backward FFT plans for `x` with an EXPLICIT FFTW thread count (FFTW bakes the count into
-# the plan at creation, so execution uses exactly this many threads regardless of the process-global
-# `FFTW.set_num_threads(...)` a sibling like FlowFieldSpectra/NUFSHT may have set). Performance model:
-# we own threading and saturate the coarsest parallel axis, never nesting. So `nthreads = 1` is the
-# default — correct and 0-alloc for the loop-heavy methods (shell/mode/band/channel loop threaded, one
-# single-threaded FFT per task) and for the serial path; the single-FFT-dominant methods (spectral flux,
-# compressible) pass `nthreads > 1` when their outer loop is narrower than the core count, so the FFT
-# itself soaks up the remaining cores (its per-transform scratch is negligible/amortized there). The
-# global count is saved/restored under the lock so we don't perturb other packages' transforms.
-function _plan_fft_bfft(x; nthreads::Int = 1)
-    lock(_PLAN_LOCK) do
-        old_nt = FFTW.get_num_threads()
-        FFTW.set_num_threads(nthreads)
-        try
-            return (FFTW.plan_fft(x), FFTW.plan_bfft(x))
-        finally
-            FFTW.set_num_threads(old_nt)
-        end
-    end
-end
+# Forward/backward FFT plans for `x` at `nthreads` FFTW threads, built under FFTW.jl's planner lock
+# with the planner count set for the build and restored after (`FFTW.set_num_threads(f, n)`). FFTW
+# reads the count into a plan when it is built, so the plan executes at exactly this many threads.
+# The array type picks the library (FFTW for a host `Array`, cuFFT for a `CuArray`), and a device
+# library ignores the count. `nthreads = 1` suits the loop-heavy methods, whose shell/mode/band/channel
+# loop is threaded with one single-threaded FFT per task, and the serial path; spectral flux and the
+# compressible transfer pass more when their outer loop is narrower than the core count.
+_plan_fft_bfft(x; nthreads::Int = 1) =
+    FFTW.set_num_threads(() -> (FFTW.plan_fft(x), FFTW.plan_bfft(x)), nthreads)
 
 # Reusable scratch + preplanned transforms on the padded (≈3N/2) grid, built at workspace
 # construction ONLY when PaddedThreeHalves is requested (so the common 2/3 path never allocates the
@@ -168,9 +153,8 @@ function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, 
 end
 
 # Real-to-complex pair for the half layout: `rfft` on a real `(ns...)` component and the
-# unnormalized inverse `brfft` back. Planned under the same lock and explicit thread count as the
-# c2c pair; `plan_brfft` is planned on a scratch copy because FFTW's multi-dimensional c2r planning
-# overwrites the array it is given.
+# unnormalized inverse `brfft` back. Planned as the c2c pair is; `plan_brfft` is planned on a scratch
+# copy because FFTW's multi-dimensional c2r planning overwrites the array it is given.
 function _plan_r2c_c2r(proto, ::Type{FT}, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}; nthreads::Int = 1) where {FT, nd}
     # `proto` supplies the array kind only; each buffer names its own element type, since callers pass
     # either a complex coefficient array or a real physical one.
@@ -182,14 +166,8 @@ function _plan_r2c_c2r(proto, ::Type{FT}, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}
     # it, which those slices do not. Writing through the slice keeps the transform's result where it
     # is used; the alternative costs a full-grid copy per component.
     flags = FFTW.ESTIMATE | FFTW.UNALIGNED
-    lock(_PLAN_LOCK) do
-        old_nt = FFTW.get_num_threads()
-        FFTW.set_num_threads(nthreads)
-        try
-            return (FFTW.plan_rfft(rbuf; flags = flags), FFTW.plan_brfft(cbuf, ns[1]; flags = flags))
-        finally
-            FFTW.set_num_threads(old_nt)
-        end
+    return FFTW.set_num_threads(nthreads) do
+        (FFTW.plan_rfft(rbuf; flags = flags), FFTW.plan_brfft(cbuf, ns[1]; flags = flags))
     end
 end
 
@@ -617,14 +595,17 @@ function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(
     nDFT, nx, isreal_data::Bool, ::SpectralBackends.FFTSpectralBackend, ::Type{RT}, proto,
 ) where {RT}
     CT = Complex{RT}
+    # One FFTW thread: the block transforms run inside the per-block loop.
     if isreal_data
         windowed = similar(proto, RT, nDFT, nx)
         spec = similar(proto, CT, nDFT ÷ 2 + 1, nx)
-        return (plan = FFTW.plan_rfft(windowed, 1), windowed = windowed, spec = spec, half = true)
+        plan = FFTW.set_num_threads(() -> FFTW.plan_rfft(windowed, 1), 1)
+        return (plan = plan, windowed = windowed, spec = spec, half = true)
     end
     windowed = similar(proto, CT, nDFT, nx)
     spec = similar(proto, CT, nDFT, nx)
-    return (plan = FFTW.plan_fft(windowed, 1), windowed = windowed, spec = spec, half = false)
+    plan = FFTW.set_num_threads(() -> FFTW.plan_fft(windowed, 1), 1)
+    return (plan = plan, windowed = windowed, spec = spec, half = false)
 end
 
 """
@@ -675,7 +656,7 @@ end
 # O(Nᵈ log Nᵈ) analysis/synthesis/gradient primitives the compressible core assembly calls through
 # `FIT.Compressible.TransformContext`, replacing its dependency-free explicit-DFT (SpectralBackends.DirectSumSpectralBackend).
 # One forward + one backward plan and two (ns...) scratch buffers are shared across every component
-# and every transform in a call (created once under the plan lock). Convention matches the core:
+# and every transform in a call (created once, under FFTW.jl's planner lock). Convention matches the core:
 # synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
 # ---------------------------------------------------------------------------
 function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft_nthreads::Int = 1) where {nd}
