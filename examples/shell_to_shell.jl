@@ -2,9 +2,10 @@
 Shell-to-Shell Transfer Example — FlowInvariantTransfer.jl
 
 Computes the directed shell-to-shell energy transfer T(n,m) for a developed 3D Taylor–Green
-vortex. The matrix is antisymmetric (T(n,m) = −T(m,n)) and dominated by near-diagonal
-local transfer; the net transfer Σₘ T(n,m) shows the large scales losing energy and the
-small scales gaining it — a forward cascade.
+vortex. T(n,m) is the rate at which shell n gives energy to shell m; the matrix is antisymmetric
+(T(n,m) = −T(m,n)) and dominated by near-diagonal local transfer. The net transfer
+Σₘ T(n,m) = −dEₙ/dt is positive at the large scales, which give energy, and negative at the small
+scales, which receive it — a forward cascade.
 
 Run from the repo root:
     julia --project=examples examples/shell_to_shell.jl
@@ -39,8 +40,8 @@ function run_shell_to_shell_example(; N=32)
     CairoMakie.Label(fig[0, 1:3], "Shell-to-Shell Energy Transfer — 3D Taylor–Green Vortex",
         fontsize=17, font=:bold, tellwidth=false)
 
-    ax1 = CairoMakie.Axis(fig[1, 1], title="T(n,m)  (blue: gain, red: loss)",
-        xlabel="source shell m", ylabel="receiver shell n", aspect=CairoMakie.DataAspect())
+    ax1 = CairoMakie.Axis(fig[1, 1], title="T(n,m)  (blue: shell n gives to shell m)",
+        xlabel="shell m", ylabel="shell n", aspect=CairoMakie.DataAspect())
     hm = CairoMakie.heatmap!(ax1, collect(sh), collect(sh), T[sh, sh],
         colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
     CairoMakie.lines!(ax1, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.5, linestyle=:dash)
@@ -48,7 +49,7 @@ function run_shell_to_shell_example(; N=32)
 
     netsub = result.net_transfer[sh]
     ax2 = CairoMakie.Axis(fig[1, 3], title="Net transfer Σₘ T(n,m)",
-        xlabel="shell n", ylabel="net energy gain")
+        xlabel="shell n", ylabel="−dEₙ/dt")
     cols = [v >= 0 ? CairoMakie.RGBf(0.27,0.51,0.71) : CairoMakie.RGBf(0.84,0.15,0.16) for v in netsub]
     CairoMakie.barplot!(ax2, collect(sh), netsub, color=cols)
     CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=1.0)

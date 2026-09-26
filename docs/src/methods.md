@@ -12,52 +12,53 @@ wavenumber threshold K from large to small scales.
 Starting from the spectral energy equation for incompressible flow,
 
 ```math
-\frac{\partial E(\mathbf{k})}{\partial t} = T(\mathbf{k}) + \text{dissipation} + \text{forcing}
+\frac{\partial E(\mathbf{k})}{\partial t} = -T(\mathbf{k}) + \text{dissipation} + \text{forcing}
 ```
 
-the *transfer spectrum* accumulated per isotropic shell ``S_n = \{|\mathbf{k}| \in [\kappa_n, \kappa_{n+1})\}``
-is
+the *transfer spectrum* of each isotropic shell ``S_n = \{|\mathbf{k}| \in [\kappa_n, \kappa_{n+1})\}``,
+``T(k_n) = -dE(k_n)/dt`` from the nonlinear term (positive when shell ``n`` gives energy to the
+others), is
 
 ```math
 T(k_n) = \sum_{|\mathbf{k}| \in S_n} \sum_i \text{Re}\bigl[\hat{u}_i^*(\mathbf{k})\,\hat{N}_i(\mathbf{k})\bigr]
 ```
 
 where ``\hat{N}_i(\mathbf{k}) = \widehat{(u \cdot \nabla) u_i}`` is the nonlinear advection term
-and ``\hat{u}_i^*`` its complex conjugate.  The cumulative flux is
+and ``\hat{u}_i^*`` its complex conjugate (Alexakis & Biferale 2018, Eq. 12). The flux through
+``K_{n+1}``, the energy the shells up to ``n`` pass to larger wavenumbers per unit time, is
 
 ```math
-\Pi(K_n) = -\sum_{m \le n} T(k_m).
+\Pi(K_{n+1}) = \sum_{m \le n} T(k_m).
 ```
 
 Positive Π indicates a **forward (downscale) energy cascade**; negative Π an inverse
-(upscale) cascade.
+(upscale) cascade. Every transfer in the package is ``-dE/dt`` of the shell, degree or mode it is
+indexed by, and every flux is its running sum, on Cartesian, spherical and compressible fields alike.
 
-**References:** Verma et al. (2002) [arXiv:nlin/0204027](https://arxiv.org/abs/nlin/0204027)
+**References:** Verma et al. (2002) [arXiv:nlin/0204027](https://arxiv.org/abs/nlin/0204027);
+Alexakis & Biferale (2018), Phys. Rep. 767–769, 1–101.
 
 ---
 
 ## Shell-to-Shell Transfer T(n, m)
 
-The shell-to-shell transfer matrix resolves *which* donor shell m sends energy to *which*
-receiver shell n.  Using the Alexakis et al. (2005) antisymmetrized definition:
+The shell-to-shell transfer matrix resolves how much energy each shell n loses to each shell m:
 
 ```math
-T(n,m) = \frac{1}{2}\left[
-    \sum_{\mathbf{k} \in S_n} \text{Re}\bigl[\hat{u}^*(\mathbf{k}) \cdot \hat{N}_m(\mathbf{k})\bigr]
-  - \sum_{\mathbf{k} \in S_m} \text{Re}\bigl[\hat{u}^*(\mathbf{k}) \cdot \hat{N}_n(\mathbf{k})\bigr]
-\right]
+T(n,m) = \sum_{\mathbf{k} \in S_n} \text{Re}\bigl[\hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{N}_m(\mathbf{k})\bigr],
+\qquad \hat{N}_m = \widehat{(\mathbf{u} \cdot \nabla)\,\mathbf{u}_m},
 ```
 
-where ``\hat{N}_m`` is the nonlinear term computed with the velocity **band-filtered to shell m**
-as the advecting field.  This construction guarantees exact antisymmetry
+where ``\mathbf{u}_m`` is the velocity **band-filtered to shell m** and the full velocity advects it
+(Verma et al. 2002; Alexakis, Mininni & Pouquet 2005). For a divergence-free velocity
+``\int \mathbf{u}_n \cdot (\mathbf{u}\cdot\nabla)\mathbf{u}_m = -\int \mathbf{u}_m \cdot (\mathbf{u}\cdot\nabla)\mathbf{u}_n``,
+so
 
 ```math
-T(n,m) + T(m,n) = 0
+T(n,m) + T(m,n) = 0.
 ```
 
-by construction for divergence-free (incompressible) velocity fields.
-
-The net energy gain of shell n is ``\sum_m T(n,m)``.
+A positive ``T(n,m)`` is energy leaving shell n for shell m, and ``\sum_m T(n,m) = T(k_n)``.
 
 **References:** Alexakis, Mininni & Pouquet (2005) Phys. Rev. E 72, 046301.
 
@@ -65,8 +66,8 @@ The net energy gain of shell n is ``\sum_m T(n,m)``.
 
 ## Mode-to-Mode Triad Transfer S(k|p)
 
-The scale-to-scale transfer is the **finest** scale-to-scale object: the rate at which the invariant
-is delivered *to* receiver mode ``\mathbf{k}`` *from* giver mode ``\mathbf{p}`` (mediated by
+The scale-to-scale transfer is the **finest** scale-to-scale object: the rate at which mode
+``\mathbf{k}`` gives the invariant to mode ``\mathbf{p}`` (mediated by
 ``\mathbf{q}=\mathbf{k}-\mathbf{p}``). It is built directly from the validated pseudospectral
 nonlinear term — for each giver mode ``\mathbf{p}``, ``\hat{N}_{\mathbf p}=\widehat{(u\cdot\nabla)u_{\mathbf p}}``
 (the full velocity advecting the single-mode field ``u_{\mathbf p}``), and

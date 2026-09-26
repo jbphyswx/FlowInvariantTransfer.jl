@@ -17,10 +17,10 @@ export calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_tra
                                     spectral=SpectralBackends.DirectSumSpectralBackend(), max_scales=1024, force=false)
         -> ModeToModeTriadResult
 
-Fully **mode-resolved** triad transfer `S(k|p)` — the rate at which the chosen quadratic
-invariant is delivered to receiver scale `k` from giver scale `p` (mediated by `q = k−p`), the
-finest object in the reduction hierarchy `S(k|p)` → `T(K,Q)` (shell-to-shell) → `T(k)`, `Π(K)`
-(spectral flux).
+Fully **mode-resolved** triad transfer `S(k|p)` — the rate at which mode `k` gives the chosen
+quadratic invariant to the giver field `u_p` (mediated by `q = k−p`), the part of `−dE(k)/dt` that
+advection of `u_p` accounts for. It is the finest object in the reduction hierarchy `S(k|p)` →
+`T(K,Q)` (shell-to-shell) → `T(k)`, `Π(K)` (spectral flux).
 
 It is built from the validated pseudospectral nonlinear term — for each giver scale `p`,
 `N̂_p = (u·∇)u_p` (the full velocity advecting the single-scale field `u_p`), and
@@ -214,8 +214,8 @@ _mode_to_mode_gpu!(args...; kwargs...) = throw(ArgumentError(
 """
     calculate_scalar_mode_to_mode_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ModeToModeTriadResult
 
-Fully mode-resolved passive-scalar **variance** transfer `S_θ(k|p)` — variance delivered to
-scalar scale `k` from scalar scale `p` (mediated by the velocity, `q = k−p`). Thin wrapper over
+Fully mode-resolved passive-scalar **variance** transfer `S_θ(k|p)` — the rate at which scalar
+mode `k` gives variance to scalar mode `p` (mediated by the velocity, `q = k−p`). Thin wrapper over
 [`calculate_mode_to_mode_transfer`](@ref) with `invariant = PassiveScalar()` and
 `advecting_hat = velocity_hat`; the scalar may be `(ns...)` or `(ns..., 1)`.
 """

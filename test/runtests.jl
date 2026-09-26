@@ -208,17 +208,46 @@ Test.@testset "SpectralFlux — energy conservation Σ T(k) ≈ 0 (dealiased, di
 end
 
 # -----------------------------------------------------------------------
-Test.@testset "SpectralFlux — flux-sign convention Π = +cumsum(T)" begin
-    # Pins the Alexakis–Biferale convention (Π>0 forward): flux is the *positive*
-    # cumulative sum of the transfer spectrum (not negated).
-    Random.seed!(11)
-    N = 8; L = 2π
+Test.@testset "An analytic triad fixes the transfer and the flux sign" begin
+    # ψ = Σ_j (A_j e^{ik_j·x} + c.c.) with k₁ + k₂ = k₃ and u = ẑ×∇ψ = (−∂_yψ, ∂_xψ). Mode j holds
+    # E_j = |k_j|²|A_j|², and the vorticity equation ζ_t + u·∇ζ = 0 (ζ = ∇²ψ) gives, with S = k₁×k₂ and
+    # R = Re{A₁A₂Ā₃},
+    #   dE₁/dt = 2S(|k₃|² − |k₂|²)R,  dE₂/dt = 2S(|k₁|² − |k₃|²)R,  dE₃/dt = 2S(|k₂|² − |k₁|²)R.
+    # Every transfer is T = −dE/dt and the flux through K is Π(K) = Σ_{|k|<K} T.
+    N = 16; L = 2π
+    kk = ((1, 1), (1, -3), (2, -2))                 # |k|² = 2, 10, 8: one mode per unit shell
+    A = (0.7, 0.5, 0.4)
+    S = kk[1][1] * kk[2][2] - kk[1][2] * kk[2][1]
+    R = prod(A)
+    n2(k) = k[1]^2 + k[2]^2
+    dE = (2S * (n2(kk[3]) - n2(kk[2])) * R, 2S * (n2(kk[1]) - n2(kk[3])) * R, 2S * (n2(kk[2]) - n2(kk[1])) * R)
     x = range(0, L; length = N + 1)[1:N]
-    u = cos.(x) .+ 0.3 .* sin.(2 .* x) .+ 0.1 .* cos.(3 .* x)
-    û = ComplexF64.(reshape(FFTW.fft(u) ./ N, N, 1))
-    ks = FIT.Utils.wavenumber_grid((N,), (L,))
-    r = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = FIT.Types.LinearBinning(2π/L), dealiasing = FIT.Types.NoDealiasing())
-    Test.@test isapprox(r.flux, cumsum(r.transfer_spectrum); atol = 1e-12)
+    ψ = [2 * sum(A[j] * cos(kk[j][1] * xi + kk[j][2] * yj) for j in 1:3) for xi in x, yj in x]
+    ψh = FFTW.fft(ψ) ./ N^2
+    ks = FIT.Utils.wavenumber_grid((N, N), (L, L))
+    kx = [ks[1][i] for i in 1:N, j in 1:N]
+    ky = [ks[2][j] for i in 1:N, j in 1:N]
+    û = cat(-im .* ky .* ψh, im .* kx .* ψh; dims = 3)
+    idx(k) = CartesianIndex(mod(k[1], N) + 1, mod(k[2], N) + 1)
+    for spectral in (SpectralBackends.DirectSumSpectralBackend(), SpectralBackends.FFTSpectralBackend())
+        N̂ = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; dealiasing = FIT.Types.NoDealiasing(), spectral)
+        t = FIT.Invariants.transfer_density(FIT.Types.KineticEnergy(), û, N̂, ks)
+        for j in 1:3
+            Test.@test t[idx(kk[j])] + t[idx(.-kk[j])] ≈ -dE[j] rtol = 1e-12
+        end
+    end
+    # The middle mode gives 16R down to |k| = √2 and 48R up to |k| = √10, so the flux is −16R through
+    # K = 2 and +48R, a forward cascade, through K = 3. The compressible transfer at ρ ≡ 1 is the same.
+    b = FIT.Types.LinearBinning(1.0)
+    r = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = b, dealiasing = FIT.Types.NoDealiasing())
+    ρ̂ = zeros(ComplexF64, N, N); ρ̂[1, 1] = 1
+    rc = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning = b, decompose = false,
+        dealiasing = FIT.Types.NoDealiasing())
+    for res in (r, rc)
+        through(K) = res.flux[findfirst(c -> K - 1 < c < K, res.k_shells)]
+        Test.@test through(2) ≈ -16R rtol = 1e-12
+        Test.@test through(3) ≈ 48R rtol = 1e-12
+    end
 end
 
 # -----------------------------------------------------------------------
@@ -1801,8 +1830,8 @@ end
 # -----------------------------------------------------------------------
 # Compressible KE spectral transfer (Singh–Tiwari–Sharma–Verma 2025). Validated by the
 # analytic identities that make it trustworthy: (a) the momentum-weighted nonlinear transfer
-# conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u to
-# −(incompressible transfer_spectrum) (paper Eqs. 48–50); (c) the R/C flux channels reconstruct
+# conserves total KE, Σ_k T_u = 0; (b) the incompressible limit ρ≡1, ∇·u=0 reduces T_u and Π to
+# the incompressible transfer_spectrum and flux (paper Eqs. 48–50); (c) the R/C flux channels reconstruct
 # the total flux and the compressive/cross channels vanish for incompressible flow; (d) uniform
 # pressure ⇒ zero pressure-dilatation.
 Test.@testset "Compressible energy transfer" begin
@@ -1821,8 +1850,9 @@ Test.@testset "Compressible energy transfer" begin
     scaleT = maximum(abs, ref.transfer_spectrum) + eps()
     # (a) conservation
     Test.@test abs(sum(res.transfer_spectrum)) < 1e-10 * scaleT
-    # (b) incompressible limit: T_u = −ρ·(incompressible T), here ρ=1
-    Test.@test isapprox(res.transfer_spectrum, -ref.transfer_spectrum; atol=1e-10 * scaleT)
+    # (b) incompressible limit: T_u = ρ·(incompressible T) and Π likewise, here ρ=1
+    Test.@test isapprox(res.transfer_spectrum, ref.transfer_spectrum; atol=1e-10 * scaleT)
+    Test.@test isapprox(res.flux, ref.flux; atol=1e-10 * scaleT)
     # (c) channels: compressive & cross vanish; the four reconstruct the total flux
     Test.@test maximum(abs, res.channels.compressive) < 1e-10 * scaleT
     Test.@test maximum(abs, res.channels.comp_to_rot) < 1e-10 * scaleT
@@ -2145,8 +2175,9 @@ Test.@testset "Spherical spectral transfer (FastSphericalHarmonics, 2D barotropi
     # Exact conservation (dealiased) — the physical anchor.
     Test.@test abs(sum(res.energy_transfer))    < 1e-12 * scaleE
     Test.@test abs(sum(res.enstrophy_transfer)) < 1e-12 * scaleZ
-    # Flux convention Π(L) = -Σ_{l≤L} T; total flux out of the whole spectrum ≈ 0.
-    Test.@test res.energy_flux ≈ -cumsum(res.energy_transfer)
+    # Π(L) = Σ_{l≤L} T(l); total flux out of the whole spectrum ≈ 0.
+    Test.@test res.energy_flux ≈ cumsum(res.energy_transfer)
+    Test.@test res.enstrophy_flux ≈ cumsum(res.enstrophy_transfer)
     Test.@test abs(res.energy_flux[end]) < 1e-12 * scaleE
     # l = 0 (mean) carries no transfer (energy exactly, enstrophy to machine precision since
     # A₀₀ = mean(J) = ∫∇·(ζu) dΩ ≈ 0).
@@ -2184,6 +2215,43 @@ Test.@testset "Spherical spectral transfer (FastSphericalHarmonics, 2D barotropi
     # (workspace-reuse allocation ratio asserted in test_allocs.jl)
     # Workspace grid must match the field.
     Test.@test_throws ArgumentError FIT.Spherical.calculate_spherical_transfer!(ws, randn(N, N))
+end
+
+Test.@testset "Spherical transfer equals −dE_l/dt from the closed-form Jacobian" begin
+    # ζ = Z₂ + Z₃ + Z₄, each Z_l a harmonic homogeneous polynomial of degree l (a pure degree-l field on
+    # the unit sphere), so ψ = −Σ_l Z_l/(l(l+1)). With u = r̂×∇ψ the advection is
+    # J = u·∇ζ = r̂·(∇ψ × ∇ζ), and ζ_t = −J gives −dE_l/dt = −∫ψ_l J dΩ and −dZ_l/dt = ∫ζ_l J dΩ.
+    Z = (x -> x[1] * x[2] + 0.4x[2] * x[3] - 0.7(x[1]^2 - x[2]^2),
+         x -> x[1]^3 - 3x[1] * x[2]^2 + 0.6x[1] * x[2] * x[3],
+         x -> x[1]^4 - 6x[1]^2 * x[2]^2 + x[2]^4 + 0.5(x[1]^3 * x[3] - 3x[1] * x[2]^2 * x[3]))
+    ∇Z = (x -> (x[2] - 1.4x[1], x[1] + 0.4x[3] + 1.4x[2], 0.4x[2]),
+          x -> (3x[1]^2 - 3x[2]^2 + 0.6x[2] * x[3], -6x[1] * x[2] + 0.6x[1] * x[3], 0.6x[1] * x[2]),
+          x -> (4x[1]^3 - 12x[1] * x[2]^2 + 1.5(x[1]^2 - x[2]^2) * x[3],
+                -12x[1]^2 * x[2] + 4x[2]^3 - 3x[1] * x[2] * x[3], 0.5(x[1]^3 - 3x[1] * x[2]^2)))
+    λ = (6, 12, 20)
+    cross(a, b) = (a[2]b[3] - a[3]b[2], a[3]b[1] - a[1]b[3], a[1]b[2] - a[2]b[1])
+    function J(x)
+        gζ = reduce(.+, (g(x) for g in ∇Z))
+        gψ = reduce(.+, (.-∇Z[i](x) ./ λ[i] for i in 1:3))
+        return sum(x .* cross(gψ, gζ))
+    end
+    lmax = 12; N = lmax + 1; M = 2N - 1
+    θs, φs = FSH.sph_points(N)
+    # Fejér's first rule on θ_j = π(j − ½)/N, exact for polynomials in cos θ of degree < N.
+    w = [(2 / N) * (1 - 2sum(cos(2k * θ) / (4k^2 - 1) for k in 1:(N ÷ 2))) for θ in θs]
+    Test.@test sum(w) ≈ 2
+    pts = [(sin(θ) * cos(φ), sin(θ) * sin(φ), cos(θ)) for θ in θs, φ in φs]
+    sphere_integral(f) = sum(w[j] * (2π / M) * f(pts[j, k]) for j in 1:N, k in 1:M)
+    TE = zeros(lmax + 1); TZ = zeros(lmax + 1)
+    for (i, l) in enumerate(2:4)
+        TE[l + 1] = sphere_integral(x -> Z[i](x) / λ[i] * J(x))
+        TZ[l + 1] = sphere_integral(x -> Z[i](x) * J(x))
+    end
+    Test.@test maximum(abs, TE) > 1e-2
+    res = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(), [sum(z(p) for z in Z) for p in pts])
+    Test.@test isapprox(res.energy_transfer, TE; atol = 1e-12 * maximum(abs, TE))
+    Test.@test isapprox(res.enstrophy_transfer, TZ; atol = 1e-12 * maximum(abs, TZ))
+    Test.@test res.energy_flux ≈ cumsum(TE) atol = 1e-12 * maximum(abs, TE)
 end
 
 # -----------------------------------------------------------------------

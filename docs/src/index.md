@@ -83,8 +83,8 @@ result = calculate_spectral_flux(û, ks;
     spectral = FFTSpectralBackend())
 
 result.k_shells           # shell-centre wavenumbers
-result.transfer_spectrum  # T(k)
-result.flux               # Π(K) — >0 forward, <0 inverse
+result.transfer_spectrum  # T(k) = −dE(k)/dt from the nonlinear term
+result.flux               # Π(K) = Σ_{k≤K} T(k) — >0 forward, <0 inverse
 ```
 
 ## Quickstart: shell-to-shell T(n,m)
@@ -155,13 +155,15 @@ calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral = FFTSpectralBac
 Every figure is produced by a script in `examples/` run on a **canonical evolved flow** (not random
 noise), so the physics is verifiable by eye. Run any with `julia --project=examples examples/<name>.jl`.
 
-**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
-`k`; the cumulative flux `Π(K) > 0` across the inertial range is the 3D forward cascade.
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k) = −dE(k)/dt` is
+positive at low `k`, where the large scales give energy; the cumulative flux `Π(K) > 0` across the
+inertial range is the 3D forward cascade.
 
 ![Spectral energy transfer](assets/spectral_flux.png)
 
-**Shell-to-shell `T(n,m)` (3D TGV).** Antisymmetric near-diagonal band (blue gain / red loss) and the
-low-shell-gain / high-shell-loss net transfer — the cascade resolved scale-by-scale.
+**Shell-to-shell `T(n,m)` (3D TGV).** `T(n,m)` is the energy shell `n` gives to shell `m` per unit
+time: an antisymmetric near-diagonal band, and a net transfer `Σₘ T(n,m) = −dEₙ/dt` positive at low
+shells and negative at high shells — the cascade resolved scale-by-scale.
 
 ![Shell-to-shell transfer](assets/shell_to_shell.png)
 

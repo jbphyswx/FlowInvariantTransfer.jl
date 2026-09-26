@@ -38,7 +38,8 @@ end
 # Streamfunction ψ, vorticity ζ = ∇²ψ  ⟹  ζ̂_lm = -l(l+1)/a² ψ̂_lm.
 # Advection A = J(ψ,ζ) = u·∇ζ,  u = k̂×∇ψ  (nondivergent), computed pseudospectrally from the
 # horizontal gradients ∇ψ, ∇ζ (spin-1 "eth" fields) as  A = (1/a²) Im{ conj(∇̂ψ)·∇̂ζ }.
-# Degree-spectrum transfers, both conserving (Σ_l T = 0 since ∫ψ J(ψ,ζ) dΩ = 0):
+# Degree-spectrum transfers, both conserving (Σ_l T = 0 since ∫ψ J(ψ,ζ) dΩ = 0). With ζ_t = −A,
+# E_l = −½Σ_m ψ̂*_lm ζ̂_lm and Z_l = ½Σ_m |ζ̂_lm|², the transfers are −dE_l/dt and −dZ_l/dt:
 #
 #     T_E(l) = -Σ_m Re{ψ̂*_lm Â_lm},   T_Z(l) = Σ_m Re{ζ̂*_lm Â_lm}.
 #
@@ -146,11 +147,11 @@ Shared degree-spectrum reduction (extension-agnostic). Given, over every `(l,m)`
 the mode's degree `degree_of_mode[i]` and the spectral coefficients `ψ_lm`, `ζ_lm`, `A_lm`
 (the streamfunction, vorticity, and advection `A = J(ψ,ζ)`), accumulate
 
-    T_E(l) = -Σ_m Re{ψ*_lm A_lm},   T_Z(l) =  Σ_m Re{ζ*_lm A_lm}
+    T_E(l) = -Σ_m Re{ψ*_lm A_lm},   T_Z(l) =  Σ_m Re{ζ*_lm A_lm},
 
-and the cumulative fluxes `Π(L) = -Σ_{l≤L} T(l)` (package convention: positive Π ⇒ up-degree
-cascade). `conj`/`real` make the reduction correct for both the real-harmonic (regular-grid) and
-complex spin-0 (scattered) coefficient conventions.
+the rates `−dE_l/dt` and `−dZ_l/dt` from the advection, and the cumulative fluxes
+`Π(L) = Σ_{l≤L} T(l)`, positive for a cascade to higher degree, as the Cartesian flux is. `conj`/`real` make the reduction correct for both the
+real-harmonic (regular-grid) and complex spin-0 (scattered) coefficient conventions.
 """
 function spherical_transfer_reduce(
     degree_of_mode::AbstractVector{<:Integer},
@@ -189,19 +190,9 @@ function spherical_transfer_reduce!(
         TE[l + 1] += -real(conj(ψ_lm[i]) * a)
         TZ[l + 1] +=  real(conj(ζ_lm[i]) * a)
     end
-    _neg_cumsum!(result.energy_flux, TE)
-    _neg_cumsum!(result.enstrophy_flux, TZ)
+    cumsum!(result.energy_flux, TE)
+    cumsum!(result.enstrophy_flux, TZ)
     return result
-end
-
-# Π(L) = -Σ_{l≤L} T(l)  (matches the Cartesian SpectralFlux flux convention), into a preallocated Π.
-function _neg_cumsum!(Π::AbstractVector, T::AbstractVector)
-    acc = zero(eltype(Π))
-    @inbounds for i in eachindex(T)
-        acc += T[i]
-        Π[i] = -acc
-    end
-    return Π
 end
 
 # One-line show (these hold FSH / NUFSHT (NUFFT-backed) plans → default field-dump show can segfault).
@@ -222,10 +213,11 @@ Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = 
 #     ζ_lm = −i √(l(l+1)) sym_lm,   δ_lm = +√(l(l+1)) anti_lm.
 # The advection is taken in the energy-conserving skew-symmetric Lamb form
 #     A = (u·∇)u + ½ u (∇·u) = ∇(½|u|²) + ζ (k̂×u) + ½ δ u = ∇K + (i ζ + ½ δ) U₊,
-# with the scalar gradient ∇f = −ð f (eth) and k̂×u ↔ i U₊. The transfer into degree l is the
-# spin-1 vector-harmonic projection, split into the two channels:
+# with the scalar gradient ∇f = −ð f (eth) and k̂×u ↔ i U₊. The transfer of degree l, −dE_l/dt from
+# the advection, is the spin-1 vector-harmonic projection, split into the two channels:
 #     T_rot(l) = Σ_m Re{ sym*_lm Â_lm},   T_div(l) = Σ_m Re{ anti*_lm Â_lm},   T = T_rot + T_div,
-# and Π(L) = −Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for divergent flow too;
+# and Π(L) = Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for
+# divergent flow too;
 # in the non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy
 # transfer. Products are quadratic, so the advection is analysed at the dealiased degree lwork = 2·lmax
 # and truncated back to l ≤ lmax. (Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013.)
@@ -332,7 +324,7 @@ end
 
 Shared finalisation (extension-agnostic): given the per-degree rotational and divergent channel
 transfers already written into `result.rotational_transfer` / `result.divergent_transfer`, fill the
-total `energy_transfer = T_rot + T_div` and all three cumulative fluxes `Π(L) = −Σ_{l≤L} T(l)`.
+total `energy_transfer = T_rot + T_div` and all three cumulative fluxes `Π(L) = Σ_{l≤L} T(l)`.
 """
 function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferResult)
     Trot = result.rotational_transfer
@@ -341,9 +333,9 @@ function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferRe
     @inbounds for i in eachindex(T)
         T[i] = Trot[i] + Tdiv[i]
     end
-    _neg_cumsum!(result.energy_flux, T)
-    _neg_cumsum!(result.rotational_flux, Trot)
-    _neg_cumsum!(result.divergent_flux, Tdiv)
+    cumsum!(result.energy_flux, T)
+    cumsum!(result.rotational_flux, Trot)
+    cumsum!(result.divergent_flux, Tdiv)
     return result
 end
 

@@ -29,9 +29,12 @@ flux Π(K) from Fourier-space velocity data.
 - `ks`: Tuple of 1D physical-wavenumber vectors (matching FFTW fftfreq convention).
 
 # Keyword Arguments
-- `binning::AbstractShellBinning`: Shell binning strategy; default `LinearBinning(1.0)`.
+- `binning::AbstractShellBinning`: Shell binning strategy; default `LinearBinning(Δk)` with `Δk` the
+  smallest nonzero `|k|` on any axis.
 - `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 dealiasing rule when computing (u·∇)u.
-- `spectral::SpectralBackends.AbstractSpectralBackend`: transform backend — `SpectralBackends.DirectSumSpectralBackend()` (default, no deps) or `SpectralBackends.FFTSpectralBackend()` (requires FFTW extension).
+- `spectral::SpectralBackends.AbstractSpectralBackend`: transform backend — `SpectralBackends.AutoSpectralBackend()`
+  (default; `FFTSpectralBackend()` when FFTW is loaded), `SpectralBackends.FFTSpectralBackend()`, or
+  `SpectralBackends.DirectSumSpectralBackend()` (no dependencies).
 - `execution::ComputationalBackends.AbstractExecutionBackend=ComputationalBackends.SerialBackend()`: how the transfer-density write and the
   mode→shell reduction are parallelised (orthogonal to `spectral`, which threads the FFT itself):
     - `ComputationalBackends.SerialBackend()` (default) — host scalar reduction.
@@ -46,12 +49,13 @@ flux Π(K) from Fourier-space velocity data.
 # Returns
 `SpectralFluxResult` with fields:
 - `k_shells`: Representative wavenumber per shell.
-- `transfer_spectrum`: T(k_n) — energy input to shell n per unit time.
-- `flux`: Π(K_n) — cumulative upscale flux (energy transferred to k > K_n).
+- `transfer_spectrum`: T(k_n) = −dE_n/dt from the nonlinear term, the energy shell n gives to the
+  other shells per unit time.
+- `flux`: Π(K_n) — the energy shells 1…n pass to larger wavenumbers per unit time.
 
 # Physics
   T(k_n) = Σ_{|k| ∈ shell_n} Re{ û*(k) · N̂(k) }
-  Π(K_n) = −Σ_{m ≤ n} T(k_m)
+  Π(K_n) = Σ_{m ≤ n} T(k_m)
 
 Positive Π: forward (downscale) cascade; negative Π: inverse (upscale) cascade.
 
@@ -291,9 +295,8 @@ end
 # Shared tail: copy T(k) out and accumulate the cumulative flux Π(K). Called by every backend once
 # `ws.T_spec` holds the shell transfer spectrum, so the flux convention lives in exactly one place.
 # Flux convention (Alexakis & Biferale 2018, Eqs. 12–17):
-#   T(k) = Re{û*·N̂} is the net energy *loss* from shell k, and
-#   Π(K) = +Σ_{k≤K} T(k)  ⇒  Π>0 forward (down-scale) cascade, Π<0 inverse.
-# (Earlier code negated this, returning −Π — i.e. forward cascades read as negative.)
+#   T(k) = Re{û*·N̂} = −dE(k)/dt from the nonlinear term, and
+#   Π(K) = Σ_{k≤K} T(k)  ⇒  Π>0 forward (down-scale) cascade, Π<0 inverse.
 function _finalize_spectral_flux!(result::Types.SpectralFluxResult, ws::Workspaces.SpectralFluxWorkspace)
     # Bring the (small, N_sh) shell spectrum to the host result and form Π = cumsum(T) there. Doing the
     # cumsum on the result vectors keeps this device-agnostic: a device `ws.T_spec` is copied to the host

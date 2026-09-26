@@ -38,7 +38,7 @@ end
 """
     calculate_shell_to_shell_transfer(velocity_hat, ks;
         binning, dealiasing=OrszagTwoThirds(), verify_antisymmetry=true,
-        spectral=SpectralBackends.DirectSumSpectralBackend(), execution=ComputationalBackends.SerialBackend())
+        spectral=SpectralBackends.AutoSpectralBackend(), execution=ComputationalBackends.SerialBackend())
         -> ShellToShellResult
 
 Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
@@ -49,25 +49,27 @@ Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 - `ks`: Tuple of D 1D physical-wavenumber vectors.
 
 # Keyword Arguments
-- `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(1.0)`.
+- `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(Δk)` with `Δk` the smallest
+  nonzero `|k|` on any axis.
 - `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 rule dealiasing.
 - `verify_antisymmetry::Bool=true`: Compute `max|T(n,m)+T(m,n)|` and store in result.
-- `spectral::SpectralBackends.AbstractSpectralBackend`: transform — `SpectralBackends.DirectSumSpectralBackend()` (default) or `SpectralBackends.FFTSpectralBackend()` (FFTW).
+- `spectral::SpectralBackends.AbstractSpectralBackend`: transform — `SpectralBackends.AutoSpectralBackend()`
+  (default; `FFTSpectralBackend()` when FFTW is loaded), `SpectralBackends.FFTSpectralBackend()`, or
+  `SpectralBackends.DirectSumSpectralBackend()`.
 - `execution::ComputationalBackends.AbstractExecutionBackend`: outer (mediator-loop) parallelism — `ComputationalBackends.SerialBackend()` (default),
   `ComputationalBackends.ThreadedBackend()` (OhMyThreads), `ComputationalBackends.DistributedBackend()`, or `ComputationalBackends.GPUBackend(...)`.
 
 # Returns
 `ShellToShellResult` with:
-- `transfer_matrix[n,m]`: Energy transferred from shell m to shell n.
-- `net_transfer[n]` = Σ_m T(n,m): net energy gain of shell n.
+- `transfer_matrix[n,m]`: the rate at which shell n gives energy to shell m.
+- `net_transfer[n]` = Σ_m T(n,m) = −dE_n/dt, the spectral transfer of shell n.
 - `max_antisymmetry_error`: validation diagnostic.
 
-# Algorithm (Verma 2002 formulation)
-For each pair of receiver shell n and mediator shell m:
-  T(n,m) = Σ_{k∈S_n} Re{ û_n*(k) · N̂_m(k) }
-where N̂_m(k) = FFT[(u_m · ∇)u], u_m = IFFT(û · χ_m).
-
-This formulation uses the mediator velocity restricted to shell m, so:
+# Algorithm (Alexakis–Mininni–Pouquet 2005 formulation)
+For each pair of shells n and m:
+  T(n,m) = Σ_{k∈S_n} Re{ û*(k) · N̂_m(k) }
+where N̂_m(k) = FFT[(u · ∇)u_m], u_m = IFFT(û · χ_m): the full velocity advects the shell-m field.
+For a divergence-free u, ∫u_n·(u·∇)u_m = −∫u_m·(u·∇)u_n, so
   T(n,m) + T(m,n) = 0  exactly (antisymmetry).
 
 # Cost
@@ -98,7 +100,6 @@ function calculate_shell_to_shell_transfer(
     FT      = real(eltype(velocity_hat))
     T_mat   = Matrix{FT}(undef, N_sh, N_sh)
     net     = Vector{FT}(undef, N_sh)
-    # Use a mutable wrapper so ! variants can write max_asym back
     result_mut = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
     max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, Types.resolve_execution(execution), spectral;
         dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
@@ -227,8 +228,8 @@ _shell_to_shell_batch!(be::ComputationalBackends.AbstractExecutionBackend, resul
 """
     calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ShellToShellResult
 
-Shell-to-shell transfer of passive-scalar **variance** `T_θ(n,m)`: the rate at which scalar
-variance is transferred from scalar-shell `m` to scalar-shell `n`, mediated by the velocity:
+Shell-to-shell transfer of passive-scalar **variance** `T_θ(n,m)`: the rate at which scalar-shell
+`n` gives variance to scalar-shell `m`, mediated by the velocity:
 
     T_θ(n,m) = Σ_{k∈S_n} Re{ θ̂*(k) · 𝒩̂_m(k) },   𝒩̂_m = FFT[(u·∇)θ_m],   θ_m = θ̂·χ_m.
 
@@ -293,7 +294,7 @@ workspace buffers from `ws` — no heap allocation in the hot path.
 
 For each mediator shell m:
   1. Build û_m = û restricted to shell m (using ws.shell_idx)
-  2. Compute N̂_m = FFT[(u_m·∇)u] using ws.nonlinear buffers
+  2. Compute N̂_m = FFT[(u·∇)u_m] using ws.nonlinear buffers
   3. Accumulate T(n,m) for all receiver shells n
 """
 function _calculate_shell_to_shell_direct!(
@@ -342,7 +343,7 @@ function _calculate_shell_to_shell_direct!(
         end
     end
 
-    # Net energy gain of each shell: Σ_m T(n,m)
+    # net_transfer[n] = Σ_m T(n,m) = −dE_n/dt
     for n in 1:N_sh
         s = zero(FT)
         for m in 1:N_sh

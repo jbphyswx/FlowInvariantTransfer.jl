@@ -168,7 +168,7 @@ function FIT.Spherical.calculate_spherical_transfer!(
 
     # Per-degree transfer = sum over m (matrix columns). A_lw (degree lwork) aligns to the lmax layout by a
     # contiguous column slice (m offset lwork−lmax); |m|>ℓ corners are 0 (ζ/ψ/A = 0), so the full row-sum
-    # equals the sum over valid m. T_E(ℓ) = −Σ_m Re{ψ* A}, T_Z(ℓ) = +Σ_m Re{ζ* A}; then Π(L) = −Σ_{l≤L}T(l).
+    # equals the sum over valid m. T_E(ℓ) = −Σ_m Re{ψ* A}, T_Z(ℓ) = +Σ_m Re{ζ* A}; then Π(L) = Σ_{l≤L}T(l).
     A_al = @view ws.A_lw[1:lmax + 1, (lwork - lmax + 1):(lwork + lmax + 1)]
     @. ws.Pr = real(conj(ws.ψ_lm) * A_al)          # T_E(ℓ) = -Σ_m Re{ψ* A}  (fused, into preallocated Pr)
     sum!(ws.Tcol, ws.Pr)
@@ -176,8 +176,8 @@ function FIT.Spherical.calculate_spherical_transfer!(
     @. ws.Pr = real(conj(ws.ζ_lm) * A_al)          # T_Z(ℓ) = +Σ_m Re{ζ* A}
     sum!(ws.Tcol, ws.Pr)
     copyto!(ws.result.enstrophy_transfer, vec(ws.Tcol))
-    FIT.Spherical._neg_cumsum!(ws.result.energy_flux,    ws.result.energy_transfer)
-    FIT.Spherical._neg_cumsum!(ws.result.enstrophy_flux, ws.result.enstrophy_transfer)
+    cumsum!(ws.result.energy_flux,    ws.result.energy_transfer)
+    cumsum!(ws.result.enstrophy_flux, ws.result.enstrophy_transfer)
     return ws.result
 end
 

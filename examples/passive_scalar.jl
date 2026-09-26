@@ -47,8 +47,8 @@ function run_passive_scalar_example(; N=32)
     CairoMakie.lines!(ax2, flux.k_shells, flux.flux, color=:darkorange, linewidth=2.5)
     CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=0.8, linestyle=:dot)
 
-    ax3 = CairoMakie.Axis(fig[1, 3], title="Shell-to-shell T_θ(n,m)",
-        xlabel="source m", ylabel="receiver n", aspect=CairoMakie.DataAspect())
+    ax3 = CairoMakie.Axis(fig[1, 3], title="Shell-to-shell T_θ(n,m)  (blue: n gives to m)",
+        xlabel="shell m", ylabel="shell n", aspect=CairoMakie.DataAspect())
     hm = CairoMakie.heatmap!(ax3, collect(sh), collect(sh), T[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
     CairoMakie.lines!(ax3, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.2, linestyle=:dash)
     CairoMakie.Colorbar(fig[1, 4], hm, width=12)

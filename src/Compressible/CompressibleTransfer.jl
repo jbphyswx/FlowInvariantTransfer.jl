@@ -17,12 +17,12 @@ export calculate_compressible_flux, calculate_compressible_flux!, calculate_comp
 # total KE (Σ_k T_u = 0); the KE↔internal-energy exchange is the *separate* pressure-dilatation
 # term Q_{I}, gated on a supplied pressure field.
 #
-# Net per-mode transfer, reduced from the scale-to-scale form (paper Eq. 20/28) to a
-# pseudospectral O(Nᴰ) expression (validated by Σ_k T_u = 0 and the
-# incompressible limit ρ=const, ∇·u=0 ⇒ T_u = −ρ·Re{û*·(u·∇)u}, i.e. −ρ × the incompressible
-# transfer_spectrum):
+# Per-mode transfer, reduced from the scale-to-scale form (paper Eq. 20/28) to a pseudospectral
+# O(Nᴰ) expression. The nonlinear terms give ∂_t v̂ = −𝒩̂₁ and ∂_t û = −𝒩̂₂, so T_u(k) = −dE_u(k)/dt
+# (positive when mode k gives energy to other modes); for ρ = const and ∇·u = 0,
+# T_u = ρ·Re{û*·(u·∇)u}, ρ × the incompressible transfer_spectrum:
 #
-#     T_u(k) = −½ Re{ û*(k)·𝒩̂₁(k) } − ½ Re{ v̂*(k)·𝒩̂₂(k) }
+#     T_u(k) = ½ Re{ û*(k)·𝒩̂₁(k) } + ½ Re{ v̂*(k)·𝒩̂₂(k) }
 #     𝒩₁ = (u·∇)v + v(∇·u) = ∂_j(v ⊗ u)_j ,   𝒩₂ = (u·∇)u ,   v = ρu.
 #
 # This reference works entirely by explicit DFT/IDFT (dependency-free, exact), mirroring the
@@ -356,7 +356,9 @@ Compressible kinetic-energy spectral transfer `T_u(k)` and cumulative flux `Π(K
 Sharma–Verma 2025): momentum `v = ρu`, `E_u(k) = ½Re[v·u*]`; the nonlinear transfer conserves total KE
 (`Σ_k T_u ≈ 0`), and the KE↔internal-energy pressure-dilatation is returned separately when
 `pressure_hat` is supplied. `decompose=true` also returns the Helmholtz rotational/compressive flux
-channels. In the incompressible limit `T_u` reduces to `−ρ ×` the incompressible transfer spectrum.
+channels. `T_u(k) = −dE_u(k)/dt` from the nonlinear terms (positive when shell `k` gives energy to
+other shells) and `Π(K) = Σ_{k≤K} T_u(k)`; in the incompressible limit `T_u` reduces to `ρ ×` the
+incompressible transfer spectrum.
 This allocates a [`CompressibleWorkspace`](@ref) and delegates to [`calculate_compressible_flux!`](@ref);
 build the workspace once and use the in-place form to loop over snapshots allocation-free.
 """
@@ -536,13 +538,13 @@ function calculate_compressible_flux!(
     tf.dft!(ws.N̂1, ws.N1_phys)
     tf.dft!(ws.N̂2, ws.N2_phys)
 
-    # Per-mode net transfer T_u(k) = −½Re{û*·𝒩̂₁} − ½Re{v̂*·𝒩̂₂}
+    # Per-mode transfer T_u(k) = −dE_u(k)/dt = ½Re{û*·𝒩̂₁} + ½Re{v̂*·𝒩̂₂}
     fill!(ws.td, zero(FT))
     for c in 1:nd
         ws.td .+= real.(conj.(view(ws.vel, colons..., c)) .* view(ws.N̂1, colons..., c) .+
                         conj.(view(ws.v̂, colons..., c)) .* view(ws.N̂2, colons..., c))
     end
-    ws.td .*= -FT(0.5)
+    ws.td .*= FT(0.5)
 
     # Shell binning — precomputed in the workspace (0-alloc across snapshots)
     sidx    = ws.sidx
@@ -618,14 +620,14 @@ function _rc_channels!(ws, ks, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}, sidx, N_s
     giver_N!(ch.N̂1C, ch.N̂2C, ch.uC, ch.vC)
 
     # Transfer density: receiver β-part at k, giver α-part carried through the nonlinear term
-    #   T^{βα}(k) = −½ Re{ û_β*(k)·𝒩̂₁[α] } − ½ Re{ v̂_β*(k)·𝒩̂₂[α] }  (into the reused ws.td)
+    #   T^{βα}(k) = ½ Re{ û_β*(k)·𝒩̂₁[α] } + ½ Re{ v̂_β*(k)·𝒩̂₂[α] }  (into the reused ws.td)
     Π(û_recv, v̂_recv, N̂1, N̂2) = begin
         fill!(ws.td, zero(FT))
         for c in 1:nd
             ws.td .+= real.(conj.(view(û_recv, colons..., c)) .* view(N̂1, colons..., c) .+
                             conj.(view(v̂_recv, colons..., c)) .* view(N̂2, colons..., c))
         end
-        ws.td .*= -FT(0.5)
+        ws.td .*= FT(0.5)
         _flux_from_transfer(_bin(ws.td, sidx, N_sh, FT, ks, ms, trunc))
     end
     rr = Π(ch.ûR, ch.v̂R, ch.N̂1R, ch.N̂2R)   # R receiver, R giver
@@ -714,19 +716,8 @@ function _bin(td, sidx, N_sh, ::Type{FT}, ks, ns::NTuple{nd,Int}, dealias::Bool)
     return T
 end
 
-# Cumulative flux Π(K) = Σ_{k>K} T_u(k) (energy passing beyond shell K); with Σ_k T_u = 0 this equals
-# −Σ_{k≤K} T_u(k). Returned as a per-shell vector aligned with the shell centers.
-function _flux_from_transfer(T_spec)
-    n = length(T_spec)
-    Π = similar(T_spec)
-    acc = zero(eltype(T_spec))
-    tot = sum(T_spec)
-    @inbounds for i in 1:n
-        acc += T_spec[i]
-        Π[i] = tot - acc          # Σ_{k>i}
-    end
-    return Π
-end
+# Π(K) = Σ_{k≤K} T_u(k); the last entry is Σ_k T_u, the conservation residual.
+_flux_from_transfer(T_spec) = cumsum(T_spec)
 
 function _default_binning(ks)
     min_dk = Inf

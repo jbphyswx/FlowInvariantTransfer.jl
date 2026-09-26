@@ -52,7 +52,7 @@ function run_mode_to_mode_example(; N=24)
         fontsize=16, font=:bold, tellwidth=false)
     for (col, (data, ttl)) in enumerate(((TKQ, "Σ over shells of resolved S(k|p)"),
                                          (Tdir, "direct shell-to-shell T(n,m)")))
-        ax = CairoMakie.Axis(fig[1, col], title=ttl, xlabel="source shell m", ylabel="receiver shell n",
+        ax = CairoMakie.Axis(fig[1, col], title=ttl, xlabel="shell m", ylabel="shell n",
             aspect=CairoMakie.DataAspect())
         CairoMakie.heatmap!(ax, collect(sh), collect(sh), data[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
         CairoMakie.lines!(ax, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.2, linestyle=:dash)

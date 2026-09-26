@@ -311,9 +311,8 @@ end
 """
     ShellToShellTransferMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod
 
-Compute the directed shell-to-shell transfer matrix T(n,m), where T(n,m) is the
-rate of energy transfer from shell S_m into shell S_n mediated by the nonlinear
-advection term.
+Compute the directed shell-to-shell transfer matrix T(n,m), the rate at which shell S_n
+gives energy to shell S_m through the nonlinear advection term.
 
 # Fields
 - `binning::B`: Shell binning strategy.
@@ -329,11 +328,10 @@ end
 """
     ModeToModeTransferMethod{B, I<:AbstractInvariant} <: AbstractEnergyTransferMethod
 
-Compute the exact **mode-to-mode triad transfer** `S(k|p|q)` — energy (or other
-invariant) given *to* receiver mode `k` *from* giver `p`, mediated by `q`, with
-triad closure `k = p + q`:
+Compute the exact **mode-to-mode triad transfer** `S(k|p)` — the rate at which mode `k`
+gives energy (or another invariant) to mode `p`, mediated by `q = k − p`:
 
-    S(k|p|q) = −Im{ [k · û(q)] [û*(k) · û(p)] }.
+    S(k|p) = Re{ û*(k) · N̂_p(k) },   N̂_p = FFT[(u·∇)u_p].
 
 This is the most fundamental (delta-in-`k`) mode-to-mode object; it reduces to
 the shell-to-shell matrix and the spectral transfer `T(k)` under summation.
@@ -419,7 +417,8 @@ velocity field carrying divergence, and reduces to it exactly in the non-diverge
 The input is the horizontal velocity `u = (u_θ, u_φ)` (colatitude, longitude components), Helmholtz-
 decomposed as `u = k̂×∇ψ + ∇χ` (rotational streamfunction `ψ`, divergent velocity potential `χ`).
 Writing the advection in Lamb (rotational) form `(u·∇)u = ∇(½|u|²) + ζ (k̂×u)` with vorticity
-`ζ = k̂·(∇×u)`, the nonlinear KE transfer into degree `l` is the vector-harmonic projection
+`ζ = k̂·(∇×u)`, the nonlinear KE transfer of degree `l`, `−dE_l/dt` from the advection, is the
+vector-harmonic projection
 
     T(l) = Σ_m Re{ û*_lm · Â_lm},   Â = [(u·∇)u]^  (spin-1 vector-harmonic coefficients),
 
@@ -718,7 +717,8 @@ Result of a spectral energy flux computation.
 
 # Fields
 - `k_shells::KS`: Representative wavenumber for each shell (midpoint of bin edges).
-- `transfer_spectrum::V`: T(k) — energy transfer rate per shell.
+- `transfer_spectrum::V`: T(k) = −dE(k)/dt from the nonlinear term, positive where shell k gives
+  energy to the others.
 - `flux::V`: Π(K) = +cumsum(T(k)) — cumulative energy flux (Π>0 forward/down-scale cascade,
   Π<0 inverse; Alexakis–Biferale 2018).
 
@@ -741,10 +741,10 @@ indexed by spherical-harmonic degree `l = 0…lmax`.
 
 # Fields
 - `degrees::V`: the degrees `l`.
-- `energy_transfer::V`: `T_E(l)` — nonlinear kinetic-energy transfer into degree `l`; `Σ_l T_E ≈ 0`.
-- `enstrophy_transfer::V`: `T_Z(l)` — enstrophy transfer into degree `l`; `Σ_l T_Z ≈ 0`.
-- `energy_flux::V`: `Π_E(L) = -Σ_{l≤L} T_E(l)` — cumulative up-degree energy flux.
-- `enstrophy_flux::V`: `Π_Z(L) = -Σ_{l≤L} T_Z(l)`.
+- `energy_transfer::V`: `T_E(l) = −dE_l/dt` from the advection; `Σ_l T_E ≈ 0`.
+- `enstrophy_transfer::V`: `T_Z(l) = −dZ_l/dt` from the advection; `Σ_l T_Z ≈ 0`.
+- `energy_flux::V`: `Π_E(L) = Σ_{l≤L} T_E(l)` — cumulative energy flux, positive toward higher degree.
+- `enstrophy_flux::V`: `Π_Z(L) = Σ_{l≤L} T_Z(l)`.
 """
 struct SphericalTransferResult{V<:AbstractVector}
     degrees::V
@@ -762,14 +762,14 @@ Result of the divergent horizontal kinetic-energy spectral transfer
 
 # Fields
 - `degrees::V`: the degrees `l`.
-- `energy_transfer::V`: total horizontal-KE transfer `T(l) = T_rot(l) + T_div(l)` into degree `l`;
-  the skew-symmetric (energy-conserving) advection makes `Σ_l T ≈ 0`.
-- `energy_flux::V`: `Π(L) = -Σ_{l≤L} T(l)` — cumulative up-degree KE flux.
+- `energy_transfer::V`: `T(l) = T_rot(l) + T_div(l) = −dE_l/dt` of the horizontal KE from the
+  advection; the skew-symmetric (energy-conserving) advection makes `Σ_l T ≈ 0`.
+- `energy_flux::V`: `Π(L) = Σ_{l≤L} T(l)` — cumulative KE flux, positive toward higher degree.
 - `rotational_transfer::V`: rotational-channel transfer `T_rot(l)` — projection of the advection onto
   the toroidal (streamfunction `ψ`) part of the velocity.
 - `divergent_transfer::V`: divergent-channel transfer `T_div(l)` — projection onto the spheroidal
   (velocity-potential `χ`) part.
-- `rotational_flux::V`, `divergent_flux::V`: cumulative fluxes `-Σ_{l≤L} T_rot`, `-Σ_{l≤L} T_div`.
+- `rotational_flux::V`, `divergent_flux::V`: cumulative fluxes `Σ_{l≤L} T_rot`, `Σ_{l≤L} T_div`.
 
 Only the total is conserved (`Σ_l T ≈ 0`); the two channels exchange energy, so `Σ_l T_rot` and
 `Σ_l T_div` are individually nonzero (equal and opposite up to the total).
@@ -793,9 +793,11 @@ diagnostics it needs the density field and — for the KE↔internal-energy exch
 
 # Fields
 - `k_shells::KS`: representative wavenumber per shell.
-- `transfer_spectrum::TS`: `T_u(k)` — net momentum-weighted KE transfer into shell `k` (energy *gain*
-  rate; sign is opposite the incompressible loss convention). Conserves total KE: `Σ_k T_u(k) ≈ 0`.
-- `flux::FL`: `Π(K)` — cumulative flux, `Π(K) = Σ_{k>K} T_u(k)`.
+- `transfer_spectrum::TS`: `T_u(k) = −dE_u(k)/dt` of the momentum-weighted KE from the nonlinear
+  terms, the sign of the incompressible transfer. Conserves total KE where the products are
+  dealiased: `Σ_k T_u(k) ≈ 0`.
+- `flux::FL`: `Π(K) = Σ_{k≤K} T_u(k)` — cumulative flux; its last entry is `Σ_k T_u`, the residual
+  of conservation.
 - `channels::CH`: rotational/compressive (Helmholtz `u = u_R + u_C`) flux channels as a `NamedTuple`
   `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested.
 - `pressure_dilatation::PD`: KE↔IE conversion `(rotational = Q_{I,R}(k), compressive = Q_{I,C}(k))`
@@ -865,8 +867,9 @@ Result of a shell-to-shell energy transfer computation.
 # Fields
 - `shell_centers::V`: Representative wavenumber for each shell.
 - `shell_edges::V`: Shell boundary wavenumbers (length = N_shells + 1).
-- `transfer_matrix::M`: T(n,m) — N_shells × N_shells matrix; T[n,m] is energy from shell m to shell n.
-- `net_transfer::V`: Σ_m T(n,m) for each receiver shell n (net energy gain of shell n).
+- `transfer_matrix::M`: T(n,m) — N_shells × N_shells matrix; T[n,m] is the rate at which shell n
+  gives energy to shell m.
+- `net_transfer::V`: Σ_m T(n,m) = −dE_n/dt, equal to the spectral transfer `T(k_n)`.
 - `max_antisymmetry_error::E`: max |T(n,m) + T(m,n)| — antisymmetry validation metric.
 
 Parametric on vector type `V`, matrix type `M`, and scalar type `E = eltype(M)`.
@@ -891,8 +894,8 @@ Result of a fully mode-resolved triad transfer computation.
 - `ks::KS`: The wavenumber vectors `(kx, ky[, kz])` defining the spectral grid.
 - `net_transfer::A`: `T(k) = Σ_p S(k|p)` — net per-mode transfer (shape `ns`); equals the
   spectral transfer from `calculate_spectral_flux`.
-- `transfer::S`: the resolved `S(k|p)` — energy delivered to receiver mode `k` from giver mode
-  `p` (mediated by `q=k−p`), shape `(ns..., ns...)` (receiver indices then giver indices).
+- `transfer::S`: the resolved `S(k|p)` — the rate at which mode `k` gives energy to mode `p`
+  (mediated by `q=k−p`), shape `(ns..., ns...)` (mode `k`'s indices then mode `p`'s).
   Antisymmetric (`S(k|p)=−S(p|k)`); summed over `p` gives `net_transfer`; summed over shells
   gives the shell-to-shell matrix.
 

@@ -78,7 +78,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(
         end
     end
 
-    # Net energy gain of each shell: Σ_m T(n,m)
+    # net_transfer[n] = Σ_m T(n,m) = −dE_n/dt
     for n in 1:N_sh
         s = zero(FT)
         for m in 1:N_sh

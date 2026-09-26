@@ -92,11 +92,11 @@ ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
 
 result = calculate_spectral_flux(û, ks;
     binning  = LinearBinning(2π / L),
-    spectral = FFTSpectralBackend())               # transform backend (DirectSumSpectralBackend default)
+    spectral = FFTSpectralBackend())               # transform backend (AutoSpectralBackend default)
 
 result.k_shells           # shell-centre wavenumbers
-result.transfer_spectrum  # T(k)
-result.flux               # Π(K) — >0 forward cascade, <0 inverse
+result.transfer_spectrum  # T(k) = −dE(k)/dt from the nonlinear term
+result.flux               # Π(K) = Σ_{k≤K} T(k) — >0 forward cascade, <0 inverse
 ```
 
 `spectral`/`execution` are the two orthogonal backend axes — e.g.
@@ -175,13 +175,15 @@ Every figure below is produced by a script in [`examples/`](examples/) run on a 
 flow** (not random noise) — so the physics is verifiable by eye. Run any of them with
 `julia --project=examples examples/<name>.jl`.
 
-**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
-`k`; the cumulative flux `Π(K) > 0` across the inertial range is the textbook 3D forward cascade.
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k) = −dE(k)/dt` is
+positive at low `k`, where the large scales give energy; the cumulative flux `Π(K) > 0` across the
+inertial range is the textbook 3D forward cascade.
 
 ![Spectral energy transfer](docs/src/assets/spectral_flux.png)
 
-**Shell-to-shell `T(n,m)` (3D TGV).** The antisymmetric near-diagonal band (blue gain / red loss)
-and the low-shell-gain / high-shell-loss net transfer are the cascade resolved scale-by-scale.
+**Shell-to-shell `T(n,m)` (3D TGV).** `T(n,m)` is the energy shell `n` gives to shell `m` per unit
+time. The antisymmetric near-diagonal band and the net transfer `Σₘ T(n,m) = −dEₙ/dt`, positive at
+low shells and negative at high shells, are the cascade resolved scale-by-scale.
 
 ![Shell-to-shell transfer](docs/src/assets/shell_to_shell.png)
 
