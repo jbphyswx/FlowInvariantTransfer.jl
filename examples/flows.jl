@@ -121,10 +121,10 @@ end
     evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
 
 Evolve 2D decaying turbulence from a divergence-free, band-limited random initial condition
-(energy seeded on shells ~3–5). Develops a 2D cascade with well-populated intermediate shells —
-a good small-`N` flow for the (cost-limited) mode-to-mode diagnostic. Returns `(û, ks, L)` with
-the velocity packed `(N, N, 2)`. Phases come from a fixed linear-congruential sequence keyed by
-`seed`, so no RNG dependency.
+(energy seeded on shells ~3–5, unit rms speed). Develops a 2D cascade with well-populated
+intermediate shells — a good small-`N` flow for the (cost-limited) mode-to-mode diagnostic. Returns
+`(û, ks, L)` with the velocity packed `(N, N, 2)`. Phases come from a fixed linear-congruential
+sequence keyed by `seed`, so no RNG dependency.
 """
 function evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
     L = 2π
@@ -153,6 +153,9 @@ function evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
     K2[1,1] = 0.0
     uh =  im .* KY .* ψh    # u =  ∂ψ/∂y
     vh = -im .* KX .* ψh    # v = -∂ψ/∂x
+    # Unit rms speed: Σₓ|u|² = Σₖ|uh|²/N² for the unnormalised FFT, so rms = √(Σₖ|uh|² + |vh|²)/N².
+    a = N^2 / sqrt(sum(abs2, uh) + sum(abs2, vh))
+    uh .*= a; vh .*= a
 
     dealias!(f) = (f .*= dmask2; f)
     proj2(Fx, Fy) = begin
