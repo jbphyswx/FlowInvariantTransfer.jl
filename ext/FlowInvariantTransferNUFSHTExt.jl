@@ -1,6 +1,7 @@
 module FlowInvariantTransferNUFSHTExt
 
 using NUFSHT: NUFSHT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
@@ -103,7 +104,7 @@ function FIT.close!(ws::FIT.Spherical.ScatteredSphericalTransferWorkspace)
     return ws
 end
 
-_fit_workspace(::Nothing, plan) = NUFSHT.LSMRWorkspace(plan)
+_fit_workspace(::Nothing, plan) = FTB.LSMRWorkspace(plan)
 _fit_workspace(::AbstractVector, _) = nothing
 
 """
