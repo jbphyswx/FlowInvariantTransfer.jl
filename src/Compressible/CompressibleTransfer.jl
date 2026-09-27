@@ -1,7 +1,7 @@
 module Compressible
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..ShellBinning: ShellBinning
@@ -35,17 +35,17 @@ export calculate_compressible_flux, calculate_compressible_flux!, calculate_comp
 # The physical side of every transform below is REAL: these fields (velocity, density, momentum,
 # their gradients, the nonlinear terms) are real by construction, and the synthesis of a Hermitian
 # spectrum is real. Synthesis sums the stored coefficients with the Hermitian weight, which equals
-# the full-spectrum sum on either layout (`SpectralLayout.hermitian_weight`).
+# the full-spectrum sum on either layout (`FlowTransformBindings.mode_fold`).
 @inline function _synth_at(field_hat, c, ks, xI, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}, kfac) where {nd}
     FT = real(eltype(field_hat))
     acc = zero(complex(FT))
     @inbounds for kI in CartesianIndices(ms)
         phase = zero(FT)
         for d in 1:nd
-            phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], kI[d]) *
+            phase += FT(2π) * FTB.mode_frequency(ks[d], kI[d]) *
                      FT(xI[d] - 1) / FT(ns[d])
         end
-        acc += SpectralLayout.hermitian_weight(ks, kI) * kfac(kI) * field_hat[kI, c] * cis(phase)
+        acc += FTB.mode_fold(ks, kI) * kfac(kI) * field_hat[kI, c] * cis(phase)
     end
     return real(acc)
 end
@@ -69,7 +69,7 @@ function _dft!(out, field_phys, ks, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}) wher
         for xI in CartesianIndices(ns)
             phase = zero(FT)
             for d in 1:nd
-                phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], kI[d]) *
+                phase += FT(2π) * FTB.mode_frequency(ks[d], kI[d]) *
                          FT(xI[d] - 1) / FT(ns[d])
             end
             acc += field_phys[xI, c] * cis(-phase)
@@ -80,7 +80,7 @@ function _dft!(out, field_phys, ks, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}) wher
 end
 
 # In-place gradient (folds i k_d into the synthesis sum) writing into g (ns...,C,nd). `kd` holds each
-# axis's derivative wavenumbers (`SpectralLayout.wavenumber_arrays(...; derivative = true)`, or the
+# axis's derivative wavenumbers (`FlowTransformBindings.wavenumber_arrays(...; derivative = true)`, or the
 # padded-grid table), zero where the grid derivative of a mode vanishes.
 function _grad_phys!(g, field_hat, ks, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}, kd) where {nd}
     C = size(field_hat, nd + 1)
@@ -117,7 +117,7 @@ struct TransformContext{ID, DF, GR, IDB, DFB, GRB}
 end
 
 function _directsum_tf(ks, ns::NTuple{nd,Int}, kd) where {nd}
-    ms = SpectralLayout.spectral_size(ks)
+    ms = FTB.spectral_size(ks)
     FT = float(eltype(ks[1]))
     CT = complex(FT)
     return TransformContext(
@@ -173,7 +173,7 @@ struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM,
     gradu::RG; gradv::RG
     channels::CH                  # R/C-channel scratch, or `nothing` when the workspace excludes them
     pressure::PD                  # pressure-dilatation scratch, or `nothing`
-    maps::PM                      # `SpectralLayout.PaddedMaps` under padding, else `nothing`
+    maps::PM                      # `FlowTransformBindings.PaddedMaps` under padding, else `nothing`
     coarse::CO                    # (v̂, N̂1, N̂2) on the caller's grid
     td::RM                        # per-mode density on the caller's grid
     sidx::SI; centers::CE         # shell structure of the caller's grid
@@ -205,9 +205,9 @@ end
                           dealiasing = OrszagTwoThirds(), decompose = true, with_pressure = false)
 
 `dealiasing` fixes the working grid. The transfer's products are cubic (`ρ·u·∇u`), so
-`OrszagTwoThirds()` keeps `|m_d| ≤ ⌊(N_d−1)/4⌋` (`SpectralLayout.dealias_cutoff(N, 3)`), where every
-term is exact and `Σ_k T_u = 0`; `PaddedThreeHalves()` forms the products on the grid padded for them
-(`SpectralLayout.padded_length(N, 3)`) and returns every spectral output to the caller's grid;
+`OrszagTwoThirds()` keeps `|m_d| ≤ ⌊(N_d−1)/4⌋` (`FlowTransformBindings.dealias_cutoff(N, 3)`), where
+every term is exact and `Σ_k T_u = 0`; `PaddedThreeHalves()` forms the products on the grid padded for
+them (`FlowTransformBindings.padded_length(N, 3)`) and returns every spectral output to the caller's grid;
 `NoDealiasing()` takes the raw products. `decompose` and `with_pressure` fix which optional terms the
 workspace can compute, and their scratch is allocated only when selected.
 """
@@ -221,7 +221,7 @@ function CompressibleWorkspace(velocity_hat, ks;
                                with_pressure::Bool = false)
     spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
     nd = length(ks)
-    mc = SpectralLayout.spectral_size(ks)      # the caller's coefficient grid
+    mc = FTB.spectral_size(ks)      # the caller's coefficient grid
     FT = real(eltype(velocity_hat)); CT = complex(FT)
     size(velocity_hat)[1:nd] == mc || throw(DimensionMismatch(
         "field spatial size $(size(velocity_hat)[1:nd]) does not match the wavenumber grid $mc."))
@@ -229,13 +229,13 @@ function CompressibleWorkspace(velocity_hat, ks;
     # FFTs themselves — plans baked at nthreads (no per-call scratch alloc, no oversubscription).
     fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     padded = dealiasing isa Types.PaddedThreeHalves
-    Ms  = padded ? map(n -> SpectralLayout.padded_length(n, 3), SpectralLayout.full_size(ks)) :
-                   SpectralLayout.full_size(ks)
-    ksw = padded ? SpectralLayout.padded_axes(ks, Ms) : ks
-    ns  = SpectralLayout.full_size(ksw); ms = SpectralLayout.spectral_size(ksw)
-    kdc = SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
-    kd  = padded ? SpectralLayout.padded_derivative_wavenumbers(velocity_hat, FT, ks, Ms) : kdc
-    maps = padded ? SpectralLayout.PaddedMaps(velocity_hat, FT, ks, Ms) : nothing
+    Ms  = padded ? map(n -> FTB.padded_length(n, 3), FTB.full_size(ks)) :
+                   FTB.full_size(ks)
+    ksw = padded ? FTB.padded_axes(ks, Ms) : ks
+    ns  = FTB.full_size(ksw); ms = FTB.spectral_size(ksw)
+    kdc = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
+    kd  = padded ? FTB.padded_derivative_wavenumbers(velocity_hat, FT, ks, Ms) : kdc
+    maps = padded ? FTB.PaddedMaps(velocity_hat, FT, ks, Ms) : nothing
     # Buffers built in `velocity_hat`'s own array type → device-resident for device input (the whole
     # pipeline is device-generic broadcasts), plain `Array`s for host input. Coefficient buffers are
     # sized by `ms`, physical ones by `ns`, and every physical buffer is REAL.
@@ -439,7 +439,7 @@ function calculate_compressible_flux!(
 )
     nd = length(ks)
     ns = ws.ns          # working physical grid
-    mc = SpectralLayout.spectral_size(ks)   # the caller's coefficient grid
+    mc = FTB.spectral_size(ks)   # the caller's coefficient grid
     FT = real(eltype(velocity_hat))
     tf = ws.tf
     colons = ntuple(_ -> Colon(), nd)   # component-slice views for device-generic broadcasts
@@ -521,19 +521,19 @@ end
 # Coefficients of the caller's grid onto the working grid: embedded in the padded grid, truncated to
 # the band the cubic products keep alias-free, or copied.
 function _load!(dst, src, ws, ks)
-    ws.maps === nothing || return SpectralLayout.padded_embed!(dst, src, ws.maps)
+    ws.maps === nothing || return FTB.padded_embed!(dst, src, ws.maps)
     return _copy_trunc!(dst, src, ks, ws.ms, ws.dealiasing isa Types.OrszagTwoThirds)
 end
 
 # The working grid's coefficients returned to the caller's grid; the same array when they are one.
-_unload!(dst, src, ws) = ws.maps === nothing ? dst : SpectralLayout.padded_truncate!(dst, src, ws.maps)
+_unload!(dst, src, ws) = ws.maps === nothing ? dst : FTB.padded_truncate!(dst, src, ws.maps)
 
 # Copy `src` (ms...,C) into `dst`, zeroing the modes outside the band the transfer's cubic products keep
-# alias-free (`SpectralLayout.dealias_cutoff(n, 3)` on every axis) if `trunc`.
+# alias-free (`FlowTransformBindings.dealias_cutoff(n, 3)` on every axis) if `trunc`.
 function _copy_trunc!(dst, src, ks, ms::NTuple{nd,Int}, trunc::Bool) where {nd}
     C = size(src, nd + 1)
     @inbounds for c in 1:C, I in CartesianIndices(ms)
-        dst[I, c] = (trunc && SpectralLayout.is_dealiased(ks, I, 3)) ? zero(eltype(dst)) : src[I, c]
+        dst[I, c] = (trunc && FTB.is_dealiased(ks, I, 3)) ? zero(eltype(dst)) : src[I, c]
     end
     return dst
 end
@@ -684,7 +684,7 @@ function _bin(td, sidx, N_sh, ::Type{FT}, ks, ms::NTuple{nd,Int}) where {nd, FT}
     T = zeros(FT, N_sh)
     @inbounds for I in CartesianIndices(ms)
         n = sidx[I]; n == 0 && continue
-        T[n] += SpectralLayout.hermitian_weight(ks, I) * td[I]
+        T[n] += FTB.mode_fold(ks, I) * td[I]
     end
     return T
 end

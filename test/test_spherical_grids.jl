@@ -179,8 +179,8 @@ Test.@testset "to_spectral on a FlowGeometries grid" begin
     Test.@test maximum(abs, ûg[:, :, 2] .- FFTW.rfft(v) ./ N^2) == 0.0
     Test.@test maximum(abs, ûg .- ûc) < 1e-14 * maximum(abs, ûc)
     Test.@test all(maximum(abs, collect(ksg[d]) .- collect(ksc[d])) < 1e-12 for d in 1:2)
-    Test.@test FIT.SpectralLayout.is_half(ksg)
-    Test.@test FIT.SpectralLayout.full_size(ksg) == (N, N)
+    Test.@test FTB.is_halved(ksg)
+    Test.@test FTB.full_size(ksg) == (N, N)
 
     ws = FIT.ToSpectralWorkspace((u, v), grid)
     Test.@test FIT.to_spectral!(ws, (u, v))[1] == ûg

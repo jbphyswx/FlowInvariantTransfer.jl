@@ -1,6 +1,6 @@
 module Utils
 
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 export wavenumber_grid, wavenumber_magnitude_grid
 export validate_velocity_input, validate_uniform_grid, domain_size_from_coords
@@ -34,19 +34,14 @@ end
 The physical wavenumber axes of an `ns`-point periodic grid of side lengths `Ls`, `k = 2πm/L`, in the
 FFTW `fftfreq` order (`m = 0, 1, …, ⌊(N−1)/2⌋, −⌊N/2⌋, …, −1`). With `real = true` the first axis is
 the `rfftfreq` half `m = 0…N₁÷2` — the layout of a real field's `rfft` — and the remaining axes stay
-`fftfreq`. The axes are analytic ([`SpectralLayout.FullAxis`](@ref) / [`SpectralLayout.HalfAxis`](@ref)):
-no wavenumber array is stored, and they carry the field's spectral layout for every diagnostic.
+`fftfreq`. The axes are `FlowTransformBindings.RFFTAxis` / `FlowTransformBindings.FFTAxis`: no
+wavenumber array is stored, and they carry the field's spectral layout for every diagnostic.
 """
-function wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D}; real::Bool = false) where {D}
-    FT = promote_type(map(x -> typeof(float(x)), Ls)...)
-    return ntuple(Val(D)) do d
-        dk = FT(2π) / FT(Ls[d])
-        (real && d == 1) ? SpectralLayout.HalfAxis(ns[d], dk) : SpectralLayout.FullAxis(ns[d], dk)
-    end
-end
+wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D,Real}; real::Bool = false) where {D} =
+    real ? FTB.wavenumber_axes(Ls, ns, Val(true)) : FTB.wavenumber_axes(Ls, ns, Val(false))
 
 """
-    wavenumber_magnitude_grid(ks) -> Array{Float64, D}
+    wavenumber_magnitude_grid(ks) -> Array{T, D}
 
 Compute the isotropic wavenumber magnitude |k| at every grid point.
 
@@ -54,7 +49,8 @@ Compute the isotropic wavenumber magnitude |k| at every grid point.
 - `ks::NTuple{D, AbstractVector}`: Tuple of 1D wavenumber vectors (e.g., from `wavenumber_grid`).
 
 # Returns
-`D`-dimensional array of the same size as the full grid, with entry `[i₁,…,i_D] = sqrt(ks[1][i₁]² + … + ks[D][i_D]²)`.
+`D`-dimensional array of the same size as the full grid, with entry `[i₁,…,i_D] = sqrt(ks[1][i₁]² + … + ks[D][i_D]²)`
+and element type `T`, the promotion of the axes' element types.
 """
 function wavenumber_magnitude_grid(ks::NTuple{D, <:AbstractVector}) where {D}
     FT    = promote_type(map(eltype, ks)...)

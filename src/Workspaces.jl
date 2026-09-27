@@ -2,7 +2,7 @@ module Workspaces
 
 using ..Types: Types
 using ..ShellBinning: ShellBinning
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace
 
 # ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ components and the advected field `f` has `M` components. For the momentum term 
 
 Physical-space buffers are sized `ns`, the grid the field lives on; the spectral buffer is sized
 `ms`, the shape of the coefficient array. The two differ on the half (real-field) layout, where
-`ms₁ = ns₁÷2+1` — see [`SpectralLayout`](@ref).
+`ms₁ = ns₁÷2+1` — see `FlowTransformBindings.RFFTAxis`.
 
 # Fields
 - `u_phys::RA`:  `(ns..., nd)` real physical-space advecting velocity (rank `nd+1`); only the
@@ -75,8 +75,8 @@ function NonlinearTermWorkspace(advected_hat, ks; dealiasing::Types.AbstractDeal
                                 fft_nthreads::Int = 1)
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
-    ns  = SpectralLayout.full_size(ks)            # physical grid
-    ms  = SpectralLayout.spectral_size(ks)        # coefficient grid
+    ns  = FTB.full_size(ks)            # physical grid
+    ms  = FTB.spectral_size(ks)        # coefficient grid
     M   = size(advected_hat, nd + 1)              # advected-field component count
     size(advected_hat)[1:nd] == ms || throw(DimensionMismatch(
         "field spatial size $(size(advected_hat)[1:nd]) does not match the wavenumber grid $ms."))
@@ -129,7 +129,7 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
     edges  = ShellBinning.shell_edges(binning, ShellBinning.max_shell_coordinate(geometry, ks))
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
-    ns     = SpectralLayout.spectral_size(ks)
+    ns     = FTB.spectral_size(ks)
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing, fft_nthreads=fft_nthreads),
         similar(velocity_hat, FT, N_sh),     # T_spec
@@ -180,7 +180,7 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
     k_mag     = ShellBinning.shell_coordinate(geometry, ks)
     edges     = ShellBinning.shell_edges(binning, ShellBinning.max_shell_coordinate(geometry, ks))
     N_sh      = length(edges) - 1
-    ns        = SpectralLayout.spectral_size(ks)
+    ns        = FTB.spectral_size(ks)
     # On the field's own array kind: the shell index is a constant of the workspace, so a device-resident
     # field carries a device-resident index grid and the reduction kernels read it directly.
     shell_idx = similar(velocity_hat, Int, ns...)

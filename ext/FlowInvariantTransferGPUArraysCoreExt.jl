@@ -2,6 +2,7 @@ module FlowInvariantTransferGPUArraysCoreExt
 
 using GPUArraysCore: GPUArraysCore
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using LinearAlgebra: LinearAlgebra as LA
 
 FIT.Types._is_device(::GPUArraysCore.AbstractGPUArray) = true
@@ -17,10 +18,10 @@ FIT.Types._is_device(::GPUArraysCore.AbstractGPUArray) = true
 # ---------------------------------------------------------------------------
 
 # The keep-mask of the band the compressible transfer's cubic products keep alias-free, device-resident:
-# the product of the per-axis keep factors of `SpectralLayout.dealias_factors`, which read each axis's
-# wavenumbers from `ks` and so hold for either spectral layout.
+# the product of the per-axis keep factors of `FlowTransformBindings.dealias_factors`, which read each
+# axis's wavenumbers from `ks` and so hold for either spectral layout.
 _dealias_keep(proto, ::Type{FT}, ks) where {FT} =
-    reduce((a, b) -> a .* b, FIT.SpectralLayout.dealias_factors(proto, FT, ks, true; order = 3))
+    reduce((a, b) -> a .* b, FTB.dealias_factors(proto, FT, ks, true; order = 3))
 
 # dst = src, zeroing the modes outside that band when `trunc`.
 function FIT.Compressible._copy_trunc!(dst::GPUArraysCore.AbstractGPUArray, src, ks, ns::NTuple{nd,Int}, trunc::Bool) where {nd}
@@ -58,7 +59,7 @@ end
 # 1:N_sh.
 function FIT.Compressible._bin(td::GPUArraysCore.AbstractGPUArray, sidx, N_sh, ::Type{FT}, ks, ns::NTuple{nd,Int}) where {nd, FT}
     sidx_d = sidx isa GPUArraysCore.AbstractGPUArray ? sidx : copyto!(similar(td, Int, ns), sidx)
-    hw = FIT.SpectralLayout.hermitian_weights(FT, ks)
+    hw = FTB.fold_weights(FT, ks)
     # The weight on the whole mode grid, once; each shell sum is then one fused reduction.
     wk = copyto!(similar(td, FT, size(hw)), hw) .* fill!(similar(td, FT, ns), one(FT))
     T = Vector{FT}(undef, N_sh)

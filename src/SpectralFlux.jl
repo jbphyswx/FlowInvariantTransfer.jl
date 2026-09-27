@@ -1,7 +1,7 @@
 module SpectralFlux
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -482,7 +482,7 @@ function _partial_binflux(td, sidx, ks, centers, Nsh)
     T = zeros(FT, Nsh)
     @inbounds for I in CartesianIndices(td)
         n = sidx[I]; n == 0 && continue
-        T[n] += SpectralLayout.hermitian_weight(ks, I) * td[I]
+        T[n] += FTB.mode_fold(ks, I) * td[I]
     end
     return Types.SpectralFluxResult(centers, T, cumsum(T))
 end

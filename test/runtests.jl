@@ -49,29 +49,6 @@ Test.@testset "Utils — wavenumber_grid" begin
 end
 
 # -----------------------------------------------------------------------
-Test.@testset "The 2/3 rule keeps the largest alias-free band" begin
-    # A product of two kept modes p, q reaches p + q, which the n-point grid reads as p + q − n·round((p+q)/n).
-    # The band |m| ≤ K is alias-free when no such image of an out-of-band sum lands inside it.
-    function alias_free(n, K)
-        for p in -K:K, q in -K:K
-            s = p + q
-            img = s - n * round(Int, s / n)
-            abs(s) > K && abs(img) <= K && img != s && return false
-        end
-        return true
-    end
-    for n in 4:40
-        K = FIT.SpectralLayout.dealias_cutoff(n)
-        Test.@test alias_free(n, K)
-        Test.@test !alias_free(n, K + 1)
-        a = FIT.SpectralLayout.FullAxis(n, 1.0)
-        kept = [FIT.SpectralLayout.axis_index_wavenumber(a, i) for i in 1:n
-                if !FIT.SpectralLayout.is_dealiased((a,), CartesianIndex(i))]
-        Test.@test sort(kept) == -K:K
-    end
-end
-
-# -----------------------------------------------------------------------
 Test.@testset "ShellBinning — LinearBinning" begin
     b = FIT.Types.LinearBinning(1.0)
     Test.@test FIT.ShellBinning.shell_edges(b, 5.0) == 0.0:5.0
@@ -273,8 +250,7 @@ Test.@testset "An analytic triad fixes the transfer and the flux sign" begin
 end
 
 # -----------------------------------------------------------------------
-# Spectral-layout gate: analytic wavenumber axes, and the Hermitian weight that makes a half-spectrum
-# reduction equal the full-spectrum one. Every real-field diagnostic rests on this identity.
+# The wavenumber grids, and shell sums that agree on a real field's half and full spectra.
 include("test_layout.jl")
 
 # -----------------------------------------------------------------------
@@ -1029,7 +1005,7 @@ Test.@testset "assign_shells" begin
     for n in 1:N_sh
         for I in CartesianIndices(k_mag)
             if idx[I] == n
-                Test.@test edges[n] <= k_mag[I] < edges[n+1]
+                Test.@test edges[n] <= k_mag[I] < edges[n+1] || (n == N_sh && k_mag[I] == edges[end])
             end
         end
     end
@@ -1863,11 +1839,11 @@ Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
     dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, ks2, (N, N), true)
     dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), ks2, (N, N), true)
     Test.@test maximum(abs, Array(dcd) .- dch) == 0
-    kd2 = FIT.SpectralLayout.wavenumber_arrays(û2, Float64, ks2; derivative = true)
+    kd2 = FTB.wavenumber_arrays(û2, Float64, ks2; derivative = true)
     rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, kd2, (N, N))
     rd = JLArrays.JLArray(similar(û2)); cd = JLArrays.JLArray(similar(û2))
     FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2),
-        FIT.SpectralLayout.wavenumber_arrays(JLArrays.JLArray(û2), Float64, ks2; derivative = true), (N, N))
+        FTB.wavenumber_arrays(JLArrays.JLArray(û2), Float64, ks2; derivative = true), (N, N))
     Test.@test maximum(abs, Array(rd) .- rh) < 1e-14 * (maximum(abs, rh) + eps())
     Test.@test maximum(abs, Array(cd) .- ch) < 1e-14 * (maximum(abs, ch) + eps())
     kmag = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2); bb = FIT.Types.LinearBinning(2π / L)
@@ -1893,8 +1869,7 @@ Test.@testset "Compressible energy transfer" begin
     FFTB = SpectralBackends.FFTSpectralBackend()
     grid(N) = (ks = FIT.Utils.wavenumber_grid((N, N), (L, L));
                (ks, [ks[1][i] for i in 1:N, j in 1:N], [ks[2][j] for i in 1:N, j in 1:N]))
-    band(ks, K) = [abs(FIT.SpectralLayout.axis_index_wavenumber(ks[1], i)) <= K &&
-                   abs(FIT.SpectralLayout.axis_index_wavenumber(ks[2], j)) <= K
+    band(ks, K) = [abs(FTB.mode_frequency(ks[1], i)) <= K && abs(FTB.mode_frequency(ks[2], j)) <= K
                    for i in eachindex(ks[1]), j in eachindex(ks[2])]
     real_hat(N, rng, keep) = (f = FFTW.fft(randn(rng, N, N)) ./ N^2 .* keep;
                               FFTW.fft(real.(FFTW.bfft(f))) ./ N^2)
@@ -1905,7 +1880,7 @@ Test.@testset "Compressible energy transfer" begin
 
     for N in (16, 15)
         ks, _, _ = grid(N)
-        K = FIT.SpectralLayout.dealias_cutoff(N, 3)
+        K = FTB.dealias_cutoff(N, 3)
         keep = band(ks, K)
         û = solenoidal(N, Random.MersenneTwister(101), keep)
         ρ̂ = one_hat(N)

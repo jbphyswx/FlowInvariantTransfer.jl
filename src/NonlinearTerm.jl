@@ -1,7 +1,7 @@
 module NonlinearTerm
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ..Workspaces: Workspaces
 using SpectralBackends: SpectralBackends
 
@@ -157,7 +157,7 @@ nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.FFTSpectralBacken
 
 function nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.DirectSumSpectralBackend;
                               truncate::Bool = true)
-    nd = length(ks); ns = SpectralLayout.full_size(ks)
+    nd = length(ks); ns = FTB.full_size(ks)
     for j in 1:nd
         û_j = selectdim(advecting_hat, nd + 1, j)
         for phys_I in CartesianIndices(ns)
@@ -177,7 +177,7 @@ nlt_forward!(ws, ks, ::SpectralBackends.FFTSpectralBackend; truncate::Bool = tru
 
 function nlt_forward!(ws, ks, ::SpectralBackends.DirectSumSpectralBackend; truncate::Bool = true)
     nd = length(ks)
-    ns = SpectralLayout.full_size(ks); ms = SpectralLayout.spectral_size(ks)
+    ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
     M  = size(ws.N̂, nd + 1); FT = real(eltype(ws.N̂))
     Np = prod(ns)
     for comp in 1:M
@@ -192,7 +192,7 @@ function nlt_forward!(ws, ks, ::SpectralBackends.DirectSumSpectralBackend; trunc
             @inbounds for phys_I in CartesianIndices(ns)
                 phase = zero(FT)
                 for d in 1:nd
-                    phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                    phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
                              FT(phys_I[d] - 1) / FT(ns[d])
                 end
                 val += Nc[phys_I] * exp(-im * phase)
@@ -205,17 +205,17 @@ end
 
 # Synthesis of one component at one physical point, with `kfac` multiplying each mode's coefficient.
 @inline function _direct_synth(û_c, ks, phys_I, truncate::Bool, kfac)
-    nd = length(ks); ns = SpectralLayout.full_size(ks); ms = SpectralLayout.spectral_size(ks)
+    nd = length(ks); ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
     FT = real(eltype(û_c))
     val = zero(complex(FT))
     @inbounds for spec_I in CartesianIndices(ms)
         truncate && _is_dealiased(ks, spec_I) && continue
         phase = zero(FT)
         for d in 1:nd
-            phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+            phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
                      FT(phys_I[d] - 1) / FT(ns[d])
         end
-        val += SpectralLayout.hermitian_weight(ks, spec_I) * kfac(spec_I) * û_c[spec_I] * exp(im * phase)
+        val += FTB.mode_fold(ks, spec_I) * kfac(spec_I) * û_c[spec_I] * exp(im * phase)
     end
     return real(val)
 end
@@ -223,10 +223,10 @@ end
 """
     _is_dealiased(ks, I) -> Bool
 
-`true` if Fourier mode `I` lies in the 2/3-rule discard zone (`SpectralLayout.is_dealiased`). Reads the
+`true` if Fourier mode `I` lies in the 2/3-rule discard zone (`FlowTransformBindings.is_dealiased`). Reads the
 wavenumber from `ks`, so it holds for both spectral layouts.
 """
-@inline _is_dealiased(ks::Tuple, I::CartesianIndex) = SpectralLayout.is_dealiased(ks, I)
+@inline _is_dealiased(ks::Tuple, I::CartesianIndex) = FTB.is_dealiased(ks, I)
 
 # ---------------------------------------------------------------------------
 # Direct-sum reference implementation
@@ -258,8 +258,8 @@ function _compute_nonlinear_term_direct!(
     advecting_hat = velocity_hat,
 )
     nd  = length(ks)
-    ns  = SpectralLayout.full_size(ks)        # physical grid
-    ms  = SpectralLayout.spectral_size(ks)    # coefficient grid
+    ns  = FTB.full_size(ks)        # physical grid
+    ms  = FTB.spectral_size(ks)    # coefficient grid
     M   = size(velocity_hat, nd+1)   # advected-field components (D for momentum, 1 for scalar)
     FT  = real(eltype(velocity_hat))
     Np  = prod(ns)
@@ -276,10 +276,10 @@ function _compute_nonlinear_term_direct!(
             truncate && _is_dealiased(ks, spec_I) && continue      # truncate input
             phase = zero(FT)
             for d in 1:nd
-                phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
                          FT(phys_I[d] - 1) / FT(ns[d])
             end
-            val += SpectralLayout.hermitian_weight(ks, spec_I) * f(spec_I) * exp(im * phase)
+            val += FTB.mode_fold(ks, spec_I) * f(spec_I) * exp(im * phase)
         end
         return real(val)
     end
@@ -303,7 +303,7 @@ function _compute_nonlinear_term_direct!(
             # vanishes at that axis's Nyquist mode.
             for phys_I in phys_idxs
                 ws.g_phys[phys_I] = _synth(
-                    I -> (im * FT(SpectralLayout.derivative_wavenumber(ks[grad_d], I[grad_d]))) * û_c[I],
+                    I -> (im * FT(FTB.derivative_wavenumber(ks[grad_d], I[grad_d]))) * û_c[I],
                     phys_I)
             end
             uj = selectdim(ws.u_phys, nd+1, grad_d)
@@ -324,7 +324,7 @@ function _compute_nonlinear_term_direct!(
             @inbounds for phys_I in phys_idxs
                 phase = zero(FT)
                 for d in 1:nd
-                    phase += FT(2π) * SpectralLayout.axis_index_wavenumber(ks[d], spec_I[d]) *
+                    phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
                              FT(phys_I[d] - 1) / FT(ns[d])
                 end
                 val += Nc[phys_I] * exp(-im * phase)

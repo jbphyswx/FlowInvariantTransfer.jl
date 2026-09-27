@@ -2,6 +2,7 @@ module FlowInvariantTransferFFTWExt
 
 using FFTW: FFTW
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using SpectralBackends: SpectralBackends
 using LinearAlgebra: LinearAlgebra
 
@@ -68,7 +69,7 @@ const AnyPaddedScratch = Union{ComplexPaddedScratch, RealPaddedScratch}
 # consumes its input, so `spec` holds no live value across a backward transform.
 #
 # Both keep the wavenumber components and the dealias keep-mask as `nd` per-axis arrays reshaped to
-# broadcast along their own axis (`SpectralLayout.wavenumber_arrays` / `dealias_factors`): the hot
+# broadcast along their own axis (`FlowTransformBindings.wavenumber_arrays` / `dealias_factors`): the hot
 # broadcasts fuse against `Σ_d m_d` stored numbers.
 struct ComplexFFTPlans{PF, PB, CA, KC, KM, PS}
     p_fft::PF      # unnormalized forward c2c plan on a single (ms...) component
@@ -108,18 +109,18 @@ Base.show(io::IO, ::MIME"text/plain", b::AnyFFTPlans) = show(io, b)
 # `plans.pad` access type-stable with no allocation on the common 2/3 path.
 function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing, fft_nthreads::Int)
     nd = length(ks)
-    ns = FIT.SpectralLayout.full_size(ks)        # physical grid
-    ms = FIT.SpectralLayout.spectral_size(ks)    # coefficient grid
+    ns = FTB.full_size(ks)        # physical grid
+    ms = FTB.spectral_size(ks)    # coefficient grid
     FT = real(eltype(velocity_hat))
     twothirds = dealiasing isa FIT.Types.OrszagTwoThirds
     # `derivative = true`: axis d's array carries 0 at ITS OWN Nyquist mode, where the grid
     # derivative along d vanishes. A mode at Nyquist on some OTHER axis keeps a well-defined (and
     # Hermitian) derivative along d, so the zero belongs in the wavenumber, not in a product mask.
-    kg   = FIT.SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
-    keep = FIT.SpectralLayout.dealias_factors(velocity_hat, FT, ks, twothirds)
+    kg   = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
+    keep = FTB.dealias_factors(velocity_hat, FT, ks, twothirds)
     pad  = dealiasing isa FIT.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks, fft_nthreads) : nothing
 
-    if FIT.SpectralLayout.is_half(ks)
+    if FTB.is_halved(ks)
         rp = try
             _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads)
         catch err
@@ -175,12 +176,12 @@ end
 # propagates the array kind + eltype (fully generic — no hardcoded Float64).
 function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks, fft_nthreads::Int)
     nd   = length(ks)
-    ns   = FIT.SpectralLayout.full_size(ks)
-    ms   = FIT.SpectralLayout.spectral_size(ks)
-    half = FIT.SpectralLayout.is_half(ks)
+    ns   = FTB.full_size(ks)
+    ms   = FTB.spectral_size(ks)
+    half = FTB.is_halved(ks)
     M    = size(velocity_hat, nd + 1)
     FT   = real(eltype(velocity_hat))
-    Ms   = ntuple(d -> FIT.SpectralLayout.padded_length(ns[d]), nd)  # padded physical grid
+    Ms   = ntuple(d -> FTB.padded_length(ns[d]), nd)  # padded physical grid
     Msp  = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], nd)  # padded coefficient grid
     spec   = similar(velocity_hat, Msp...)
     u_phys = similar(velocity_hat, FT, Ms..., nd)
@@ -302,7 +303,7 @@ end
 # --- leg 3: 𝒩̂_i = fft(𝒩_i)/Np, zeroed above the 2/3 cutoff ---
 function _forward_nhat!(pb::ComplexFFTPlans, ws, ks, truncate::Bool)
     nd = length(ks); M = size(ws.N̂, nd + 1)
-    Np = real(eltype(ws.N̂))(prod(FIT.SpectralLayout.full_size(ks)))
+    Np = real(eltype(ws.N̂))(prod(FTB.full_size(ks)))
     keep = _keepmask(pb.keep, Val(nd))
     for c in 1:M
         pb.spec .= selectdim(ws.N_phys, nd + 1, c)
@@ -315,7 +316,7 @@ end
 
 function _forward_nhat!(pb::RealFFTPlans, ws, ks, truncate::Bool)
     nd = length(ks); M = size(ws.N̂, nd + 1)
-    Np = real(eltype(ws.N̂))(prod(FIT.SpectralLayout.full_size(ks)))
+    Np = real(eltype(ws.N̂))(prod(FTB.full_size(ks)))
     keep = _keepmask(pb.keep, Val(nd))
     for c in 1:M
         LinearAlgebra.mul!(pb.spec, pb.p_rfft, selectdim(ws.N_phys, nd + 1, c))
@@ -335,7 +336,7 @@ FIT.NonlinearTerm._nlt_forward_fft!(ws, ks, truncate::Bool) =
 # Exact 3/2 zero-padded nonlinear term (PaddedThreeHalves)
 # ---------------------------------------------------------------------------
 
-# Coarse ↔ padded mode correspondence (`SpectralLayout.padded_images`), precomputed once. Each coarse
+# Coarse ↔ padded mode correspondence (`FlowTransformBindings.padded_images`), precomputed once. Each coarse
 # mode is halved once per axis on which it sits at Nyquist and duplicated on every full such axis;
 # `wt` inverts that on the way back, so `truncate ∘ embed` is the identity on every mode.
 struct PaddedMap{NDIM, FT, VI <: AbstractVector{<:Integer}, VF <: AbstractVector{FT}, VC <: AbstractVector{<:CartesianIndex{NDIM}}}
@@ -350,12 +351,11 @@ function _padded_map(ks, ms::NTuple{nd,Int}, Msp::NTuple{nd,Int}, ::Type{FT}) wh
     src = Int[]; dst = CartesianIndex{nd}[]; we = FT[]; wt = FT[]
     # On a half first axis the coarse Nyquist plane is stored once and is its own image under k ↦ −k,
     # so truncation has to recombine it (see `_sym_nyquist_row!`). Any other layout needs nothing.
-    nyq_row = (ks[1] isa FIT.SpectralLayout.HalfAxis &&
-               iseven(FIT.SpectralLayout.full_length(ks[1]))) ? ms[1] : 0
+    nyq_row = (FTB.is_halved(ks) && iseven(FTB.full_length(ks[1]))) ? ms[1] : 0
     lin = LinearIndices(ms)
     for I in CartesianIndices(ms)
-        opts = ntuple(d -> FIT.SpectralLayout.padded_images(ks[d], I[d], Msp[d]), nd)
-        nyq_axes = count(d -> FIT.SpectralLayout.is_nyquist(ks[d], I[d]), 1:nd)
+        opts = ntuple(d -> FTB.padded_images(ks[d], I[d], Msp[d]), nd)
+        nyq_axes = count(d -> FTB.is_nyquist(ks[d], I[d]), 1:nd)
         halving = FT(1) / FT(2)^nyq_axes           # amplitude split across the Nyquist images
         ntar = prod(length, opts)
         for choice in Iterators.product(opts...)
@@ -450,7 +450,7 @@ function _nlt_padded!(pad::ComplexPaddedScratch, ws, velocity_hat, ks, advecting
     FT   = real(eltype(velocity_hat))
     emap = pad.emap
     kg   = ws.plans.kg
-    ms   = FIT.SpectralLayout.spectral_size(ks)
+    ms   = FTB.spectral_size(ks)
     invM = FT(1) / FT(_padded_points(pad))     # 1/Mtot forward normalization
 
     for j in 1:nd
@@ -485,7 +485,7 @@ function _nlt_padded!(pad::RealPaddedScratch, ws, velocity_hat, ks, advecting_ha
     FT   = real(eltype(velocity_hat))
     emap = pad.emap
     kg   = ws.plans.kg
-    ms   = FIT.SpectralLayout.spectral_size(ks)
+    ms   = FTB.spectral_size(ks)
     invM = FT(1) / FT(_padded_points(pad))
 
     for j in 1:nd
@@ -663,8 +663,8 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft
     FT = real(eltype(velocity_hat))
     CT = complex(FT)
     Np = FT(prod(ns))
-    ms = FIT.SpectralLayout.spectral_size(ks)
-    half = FIT.SpectralLayout.is_half(ks)
+    ms = FTB.spectral_size(ks)
+    half = FTB.is_halved(ks)
     # Device-generic: buffers are built in `velocity_hat`'s own array type, `kg` (the per-axis derivative
     # wavenumbers) is too, and every per-component transfer writes a contiguous last-dim slice (no scalar
     # indexing), so the compressible transform runs on CPU `Array`s (FFTW) and on device arrays (cuFFT

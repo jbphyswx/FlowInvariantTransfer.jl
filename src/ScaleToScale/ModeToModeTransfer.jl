@@ -1,7 +1,7 @@
 module ModeToModeTransfer
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -128,22 +128,22 @@ into the caller and the `M·nd` gradient transforms are gone.
 """
 function _mode_to_mode_giver!(ws, velocity_hat, ks, p, ph, truncate::Bool, spectral)
     nd = length(ks)
-    ns = SpectralLayout.full_size(ks)
+    ns = FTB.full_size(ks)
     M  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     # Per-axis phase factors of e^{ip·x}. `wgt` is the giver slot's Hermitian weight: on a half layout
     # the stored mode carries its own amplitude and its mirror's.
     for d in 1:nd
-        pd = SpectralLayout.axis_index_wavenumber(ks[d], p[d])
+        pd = FTB.mode_frequency(ks[d], p[d])
         @inbounds for i in 1:ns[d]
             ph[d][i] = cis(2 * FT(π) * pd * FT(i - 1) / FT(ns[d]))
         end
     end
-    wgt = FT(SpectralLayout.hermitian_weight(ks, p))
+    wgt = FT(FTB.mode_fold(ks, p))
     # w(x) = Σ_j k_j(p) u_j(x)
     fill!(ws.g_phys, zero(FT))
     for j in 1:nd
-        kj = FT(SpectralLayout.derivative_wavenumber(ks[j], p[j]))
+        kj = FT(FTB.derivative_wavenumber(ks[j], p[j]))
         kj == 0 && continue
         ws.g_phys .+= kj .* selectdim(ws.u_phys, nd + 1, j)
     end
@@ -171,7 +171,7 @@ end
 function _mode_to_mode_loop!(::ComputationalBackends.SerialBackend, result, ws, û_p, velocity_hat, ks;
                              invariant, dealiasing, spectral, advecting_hat)
     nd = length(ks)
-    ms = SpectralLayout.spectral_size(ks)
+    ms = FTB.spectral_size(ks)
     S   = result.transfer
     net = result.net_transfer
     fill!(net, zero(eltype(net)))

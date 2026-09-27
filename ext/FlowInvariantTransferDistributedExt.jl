@@ -2,6 +2,7 @@ module FlowInvariantTransferDistributedExt
 
 using Distributed: Distributed
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
@@ -107,7 +108,7 @@ function FIT.SpectralFlux._spectral_flux_distributed!(
         @inbounds for i in w:nw:Np
             n = sidx[i]
             n == 0 && continue
-            t[n] += FIT.SpectralLayout.hermitian_weight(ks, cis[i]) * td[i]
+            t[n] += FTB.mode_fold(ks, cis[i]) * td[i]
         end
         t
     end
@@ -296,7 +297,7 @@ function _band_to_band_worker_T(ms, W, velocity_hat, ks, ns, D, FT, nb, invarian
             for n in 1:nb
                 s = zero(FT)
                 for I in CartesianIndices(ns)
-                    s += FIT.SpectralLayout.hermitian_weight(ks, I) * W[n][I] * d[I]
+                    s += FTB.mode_fold(ks, I) * W[n][I] * d[I]
                 end
                 local_T[n, m] = s                                # disjoint per m → thread-safe
             end

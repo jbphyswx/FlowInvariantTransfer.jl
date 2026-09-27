@@ -1,7 +1,7 @@
 module ShellBinning
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 
 export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate, max_shell_coordinate
@@ -54,7 +54,7 @@ function max_shell_coordinate(g::Types.ShellMagnitude, ks)
     FT = float(eltype(ks[1]))
     s = zero(FT)
     for d in _shell_dims(g, nd)
-        kd = FT(SpectralLayout.max_abs(ks[d]))
+        kd = FT(FTB.max_abs(ks[d]))
         s += kd * kd
     end
     return sqrt(s)

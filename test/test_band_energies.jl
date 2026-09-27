@@ -13,6 +13,7 @@ using Statistics: Statistics
 using FFTW: FFTW
 using FlowGeometries: FlowGeometries as FG
 using FlowFieldSpectra: FlowFieldSpectra
+using FlowTransformBindings: FlowTransformBindings as FTB
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 Test.@testset "band energies — invariant content per band" begin
@@ -27,8 +28,8 @@ Test.@testset "band energies — invariant content per band" begin
 
     û_h, ks_h = FIT.to_spectral((u, v), grid)                          # half layout
     û_f, ks_f = FIT.to_spectral((u, v), grid; real_layout = false)     # full layout
-    Test.@test FIT.SpectralLayout.is_half(ks_h)
-    Test.@test !FIT.SpectralLayout.is_half(ks_f)
+    Test.@test FTB.is_halved(ks_h)
+    Test.@test !FTB.is_halved(ks_f)
 
     # Sharp bands over a partition whose last edge clears the corner mode, so every mode is assigned
     # and the sum is the whole field. (The package's half-open `[kₙ, kₙ₊₁)` shells otherwise drop the

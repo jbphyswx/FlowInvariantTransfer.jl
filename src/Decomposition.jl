@@ -1,7 +1,7 @@
 module Decomposition
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 export decompose_field, decompose_field!, helmholtz_project_spectral!
 
@@ -126,7 +126,7 @@ function decompose_field!(out::NamedTuple, ::Types.HelicalDecomposition,
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     up = out.positive; um = out.negative
-    kg = SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)
@@ -195,7 +195,7 @@ function decompose_field!(out::NamedTuple, ::Types.ToroidalPoloidalDecomposition
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     tor = out.toroidal; pol = out.poloidal
-    kg = SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)

@@ -3,6 +3,7 @@ module FlowInvariantTransferOhMyThreadsExt
 using OhMyThreads: OhMyThreads
 using LinearAlgebra: LinearAlgebra
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using SpectralBackends: SpectralBackends
 
 # ---------------------------------------------------------------------------
@@ -140,7 +141,7 @@ function FIT.SpectralFlux._spectral_flux_threaded!(
         @inbounds for i in rng
             n = shell_idx[i]
             n == 0 && continue
-            t[n] += FIT.SpectralLayout.hermitian_weight(ks, cis[i]) * td[i]
+            t[n] += FTB.mode_fold(ks, cis[i]) * td[i]
         end
         t
     end
@@ -488,7 +489,7 @@ function FIT.BandTransfer._band_to_band_threaded!(
             for n in 1:nb
                 s = zero(FT)
                 for I in CartesianIndices(ns)
-                    s += FIT.SpectralLayout.hermitian_weight(ks, I) * W[n][I] * p.d[I]
+                    s += FTB.mode_fold(ks, I) * W[n][I] * p.d[I]
                 end
                 T[n, m] = s
             end

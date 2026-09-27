@@ -12,7 +12,6 @@ using SpectralBackends: SpectralBackends
 # ---------------------------------------------------------------------------
 
 include("Types.jl")
-include("SpectralLayout.jl")
 include("Utils.jl")
 include("Invariants.jl")
 include("Decomposition.jl")

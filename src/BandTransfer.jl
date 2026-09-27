@@ -1,7 +1,7 @@
 module BandTransfer
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 using ..Invariants: Invariants
@@ -127,7 +127,7 @@ function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::Band
         for n in 1:nb
             s = zero(FT)
             for I in CartesianIndices(ns)
-                s += SpectralLayout.hermitian_weight(ks, I) * W[n][I] * d[I]
+                s += FTB.mode_fold(ks, I) * W[n][I] * d[I]
             end
             T[n, m] = s
         end
@@ -335,7 +335,7 @@ function _band_energies(velocity_hat, ks, bands::Types.SmoothBands, invariant, g
     W = _band_weights(bands.centers, bands.logwidth, ShellBinning.shell_coordinate(geometry, ks))
     E = zeros(FT, length(bands.centers))
     @inbounds for I in CartesianIndices(ms)
-        e = SpectralLayout.hermitian_weight(ks, I) *
+        e = FTB.mode_fold(ks, I) *
             Invariants._density_at(invariant, velocity_hat, velocity_hat, ks, I, M)
         for n in eachindex(E)
             E[n] += W[n][I] * e

@@ -246,10 +246,14 @@ FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
 
 ## Wavenumber Utilities
 
+The wavenumber axes, their fold weights and the dealiasing cutoffs are the packed layout of
+[`FlowTransformBindings`](https://github.com/jbphyswx/FlowTransformBindings.jl) (documented there):
+`FlowTransformBindings.RFFTAxis`, `FlowTransformBindings.FFTAxis`, `FlowTransformBindings.mode_fold`,
+`FlowTransformBindings.dealias_cutoff`.
+
 ```@docs
 FlowInvariantTransfer.Utils.wavenumber_grid
 FlowInvariantTransfer.Utils.wavenumber_magnitude_grid
-FlowInvariantTransfer.SpectralLayout.dealias_cutoff
 ```
 
 ## Shell Binning & Geometry

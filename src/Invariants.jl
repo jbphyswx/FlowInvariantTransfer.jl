@@ -1,7 +1,7 @@
 module Invariants
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 export transfer_density, transfer_density!, transfer_density_scatter!
 
@@ -92,9 +92,9 @@ function transfer_density!(t, ::Types.Helicity, velocity_hat, N̂, ks)
     nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
     ns = size(velocity_hat)[1:nd]
     @inbounds for I in CartesianIndices(ns)
-        kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-        ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
-        kz = SpectralLayout.derivative_wavenumber(ks[3], I[3])
+        kx = FTB.derivative_wavenumber(ks[1], I[1])
+        ky = FTB.derivative_wavenumber(ks[2], I[2])
+        kz = FTB.derivative_wavenumber(ks[3], I[3])
         ux = velocity_hat[I, 1]; uy = velocity_hat[I, 2]; uz = velocity_hat[I, 3]
         ωx = im * (ky * uz - kz * uy)
         ωy = im * (kz * ux - kx * uz)
@@ -111,17 +111,17 @@ function transfer_density!(t, ::Types.Enstrophy, velocity_hat, N̂, ks)
     ns = size(velocity_hat)[1:nd]
     if nd == 2
         @inbounds for I in CartesianIndices(ns)
-            kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-            ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
+            kx = FTB.derivative_wavenumber(ks[1], I[1])
+            ky = FTB.derivative_wavenumber(ks[2], I[2])
             ω̂   = im * (kx * velocity_hat[I, 2] - ky * velocity_hat[I, 1])
             N̂_ω = im * (kx * N̂[I, 2] - ky * N̂[I, 1])
             t[I] = real(conj(ω̂) * N̂_ω)
         end
     elseif nd == 3
         @inbounds for I in CartesianIndices(ns)
-            kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-            ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
-            kz = SpectralLayout.derivative_wavenumber(ks[3], I[3])
+            kx = FTB.derivative_wavenumber(ks[1], I[1])
+            ky = FTB.derivative_wavenumber(ks[2], I[2])
+            kz = FTB.derivative_wavenumber(ks[3], I[3])
             ux = velocity_hat[I, 1]; uy = velocity_hat[I, 2]; uz = velocity_hat[I, 3]
             Nx = N̂[I, 1];           Ny = N̂[I, 2];           Nz = N̂[I, 3]
             ωx  = im * (ky * uz - kz * uy); ωy  = im * (kz * ux - kx * uz); ωz  = im * (kx * uy - ky * ux)
@@ -146,7 +146,7 @@ end
 Shell sums of the transfer density, without materialising the density. `T_spec[n]` accumulates
 `w(I)·t[I]` over the modes `I` with `shell_idx[I] == n`, for the same per-mode density `t` as
 [`transfer_density!`](@ref) and the Hermitian weight `w` of the spectral layout
-(`SpectralLayout.hermitian_weight`) — 1 throughout on a full spectrum, and on a half spectrum the
+(`FlowTransformBindings.mode_fold`) — 1 throughout on a full spectrum, and on a half spectrum the
 factor by which each stored mode accounts for the ones it stands in for.
 
 The mediator/band/giver drivers call this once per iteration, so skipping the density grid saves a
@@ -163,7 +163,7 @@ function transfer_density_scatter!(T_spec, invariant::Types.AbstractInvariant, c
     @inbounds for I in CartesianIndices(ms)
         n = shell_idx[I]
         n == 0 && continue
-        T_spec[n] += SpectralLayout.hermitian_weight(ks, I) * _density_at(invariant, carrier_hat, N̂, ks, I, M)
+        T_spec[n] += FTB.mode_fold(ks, I) * _density_at(invariant, carrier_hat, N̂, ks, I, M)
     end
     return T_spec
 end
@@ -180,9 +180,9 @@ end
 @inline function _density_at(::Types.Helicity, û, N̂, ks, I, M)
     length(ks) == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$(length(ks)))."))
     @inbounds begin
-        kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-        ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
-        kz = SpectralLayout.derivative_wavenumber(ks[3], I[3])
+        kx = FTB.derivative_wavenumber(ks[1], I[1])
+        ky = FTB.derivative_wavenumber(ks[2], I[2])
+        kz = FTB.derivative_wavenumber(ks[3], I[3])
         ux = û[I, 1]; uy = û[I, 2]; uz = û[I, 3]
         ωx = im * (ky * uz - kz * uy)
         ωy = im * (kz * ux - kx * uz)
@@ -194,15 +194,15 @@ end
 @inline function _density_at(::Types.Enstrophy, û, N̂, ks, I, M)
     nd = length(ks)
     @inbounds if nd == 2
-        kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-        ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
+        kx = FTB.derivative_wavenumber(ks[1], I[1])
+        ky = FTB.derivative_wavenumber(ks[2], I[2])
         ω̂   = im * (kx * û[I, 2] - ky * û[I, 1])
         N̂_ω = im * (kx * N̂[I, 2] - ky * N̂[I, 1])
         return real(conj(ω̂) * N̂_ω)
     elseif nd == 3
-        kx = SpectralLayout.derivative_wavenumber(ks[1], I[1])
-        ky = SpectralLayout.derivative_wavenumber(ks[2], I[2])
-        kz = SpectralLayout.derivative_wavenumber(ks[3], I[3])
+        kx = FTB.derivative_wavenumber(ks[1], I[1])
+        ky = FTB.derivative_wavenumber(ks[2], I[2])
+        kz = FTB.derivative_wavenumber(ks[3], I[3])
         ux = û[I, 1]; uy = û[I, 2]; uz = û[I, 3]
         Nx = N̂[I, 1];  Ny = N̂[I, 2];  Nz = N̂[I, 3]
         ωx  = im * (ky * uz - kz * uy); ωy  = im * (kz * ux - kx * uz); ωz  = im * (kx * uy - ky * ux)

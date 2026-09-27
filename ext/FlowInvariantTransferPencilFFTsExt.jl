@@ -5,6 +5,7 @@ using PencilFFTs: PencilFFTs
 using PencilArrays: PencilArrays
 using LinearAlgebra: LinearAlgebra
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 
 # ---------------------------------------------------------------------------
@@ -76,9 +77,9 @@ end
 
 # ---------------------------------------------------------------------------
 # Exact 3/2 padding on the pencil axis. The product is formed on a second pencil plan of the padded size
-# (`SpectralLayout.padded_length` per axis, the serial FFTW path's grid), and each coefficient moves to
-# the rank owning its padded image and back with one `Alltoallv` each way, following the serial map
-# (`SpectralLayout.padded_images`).
+# (`FlowTransformBindings.padded_length` per axis, the serial FFTW path's grid), and each coefficient moves
+# to the rank owning its padded image and back with one `Alltoallv` each way, following the serial map
+# (`FlowTransformBindings.padded_images`).
 # ---------------------------------------------------------------------------
 
 # Owner lookup for a pencil: per decomposed dimension, the topology coordinate holding each global index,
@@ -173,9 +174,9 @@ end
 
 function _PencilPadding(plan, ks, comm, ::Type{FT}) where {FT}
     nd = length(ks)
-    ns = FIT.SpectralLayout.full_size(ks); ms = FIT.SpectralLayout.spectral_size(ks)
-    half = FIT.SpectralLayout.is_half(ks)
-    Ms  = ntuple(d -> FIT.SpectralLayout.padded_length(ns[d]), nd)
+    ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
+    half = FTB.is_halved(ks)
+    Ms  = ntuple(d -> FTB.padded_length(ns[d]), nd)
     Msp = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], nd)
     pin = PencilArrays.Pencil(PencilArrays.pencil(PencilFFTs.allocate_input(plan)); size_global = Ms)
     transforms = half ? (PencilFFTs.Transforms.RFFT(), ntuple(_ -> PencilFFTs.Transforms.FFT(), nd - 1)...) :
@@ -188,9 +189,9 @@ function _PencilPadding(plan, ks, comm, ::Type{FT}) where {FT}
     linP = LinearIndices(Msp)
     nyq_row = (half && iseven(ns[1])) ? ms[1] : 0
     mirror(C) = (C[1], ntuple(d -> C[d + 1] == 1 ? 1 : ms[d + 1] - C[d + 1] + 2, nd - 1)...)
-    nyqaxes(C) = count(d -> FIT.SpectralLayout.is_nyquist(ks[d], C[d]), 1:nd)
-    images(C) = Iterators.product(ntuple(d -> FIT.SpectralLayout.padded_images(ks[d], C[d], Ms[d]), nd)...)
-    preimage(P) = ntuple(d -> FIT.SpectralLayout.padded_preimage(ks[d], P[d], Ms[d]), nd)
+    nyqaxes(C) = count(d -> FTB.is_nyquist(ks[d], C[d]), 1:nd)
+    images(C) = Iterators.product(ntuple(d -> FTB.padded_images(ks[d], C[d], Ms[d]), nd)...)
+    preimage(P) = ntuple(d -> FTB.padded_preimage(ks[d], P[d], Ms[d]), nd)
     local_globals(pen) = (Tuple(I) for I in CartesianIndices(PencilArrays.range_local(pen)))
     # The owner ranks are ranks of the pencils' Cartesian communicator, which the exchanges run on.
     cart = PencilArrays.get_comm(coarse)
@@ -288,11 +289,11 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
         "pencil workspace supports FIT.Types.ShellMagnitude shell geometries (FIT.Types.IsotropicShells / " *
         "FIT.Types.PerpendicularShells / FIT.Types.ParallelShells); got $(typeof(geometry))."))
     nd = length(ks)
-    ns = FIT.SpectralLayout.full_size(ks)          # physical grid
+    ns = FTB.full_size(ks)          # physical grid
     out_proto = PencilFFTs.allocate_output(plan)
     ph = PencilFFTs.allocate_input(plan)           # ifft output (physical)
     FT = real(eltype(out_proto))
-    (eltype(ph) <: Real) == FIT.SpectralLayout.is_half(ks) || throw(ArgumentError(
+    (eltype(ph) <: Real) == FTB.is_halved(ks) || throw(ArgumentError(
         "a real-input pencil plan needs the half wavenumber layout and a complex-input plan the full " *
         "one; build `ks` with `Utils.wavenumber_grid(ns, Ls; real = $(eltype(ph) <: Real))`."))
     Np = FT(prod(ns))
@@ -311,12 +312,12 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
         KMAG .+= KC[d] .^ 2
     end
     KMAG .= sqrt.(KMAG)
-    # Orszag 2/3 keep-mask: keep the folded integer index |m_d| ≤ `SpectralLayout.dealias_cutoff(N_d)`.
+    # Orszag 2/3 keep-mask: keep the folded integer index |m_d| ≤ `FlowTransformBindings.dealias_cutoff(N_d)`.
     dk = ntuple(d -> abs(ks[d][2] - ks[d][1]), nd)
     KEEP = similar(out_proto, Bool); fill!(KEEP, true)
     if do_trunc
         for d in 1:nd
-            cutoff = FIT.SpectralLayout.dealias_cutoff(ns[d])
+            cutoff = FTB.dealias_cutoff(ns[d])
             KEEP .&= (round.(Int, abs.(KC[d]) ./ FT(dk[d])) .<= cutoff)
         end
     end
@@ -324,7 +325,7 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
     # on the `k₁ = 0` plane and (even `n₁`) the Nyquist plane, which are stored whole and are their own
     # mirrors. `Σ_full f = Σ_half W·f` for the even densities below. All ones on a full layout.
     W = similar(out_proto, FT); fill!(W, one(FT))
-    if FIT.SpectralLayout.is_half(ks)
+    if FTB.is_halved(ks)
         i1  = round.(Int, KC[1] ./ FT(dk[1]))
         nyq = iseven(ns[1]) ? ns[1] ÷ 2 : -1
         W .= ifelse.((i1 .== 0) .| (i1 .== nyq), one(FT), FT(2))

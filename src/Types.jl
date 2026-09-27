@@ -583,7 +583,7 @@ struct NoDealiasing <: AbstractDealiasing end
     OrszagTwoThirds <: AbstractDealiasing
 
 Orszag 2/3-rule truncation: keep modes with `|m_d| ≤ ⌊(N_d−1)/3⌋` along every axis, in the inputs and
-the output ([`SpectralLayout.dealias_cutoff`](@ref)). Exact on the retained band; the default
+the output (`FlowTransformBindings.dealias_cutoff`). Exact on the retained band; the default
 `dealiasing`.
 """
 struct OrszagTwoThirds <: AbstractDealiasing end

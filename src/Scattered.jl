@@ -248,7 +248,7 @@ function NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple;
 
     ks_1d = Utils.wavenumber_grid(ms, ntuple(d -> FT(Ls[d]), D))   # FFTModes order
     k_mag = ShellBinning.shell_coordinate(Types.IsotropicShells(), ks_1d)
-    k_comp_grids = SpectralLayout.wavenumber_arrays(zeros(FT, 0), FT, ks_1d)
+    k_comp_grids = FlowTransformBindings.wavenumber_arrays(zeros(FT, 0), FT, ks_1d)
 
     kw = _plan_keywords(scatter_coords, Ls, FT, tol, execution)
     p1 = _analysis_plan(lib, FT, scatter_coords, ms, kw)

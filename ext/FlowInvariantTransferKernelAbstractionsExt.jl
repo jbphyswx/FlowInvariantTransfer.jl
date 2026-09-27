@@ -2,6 +2,7 @@ module FlowInvariantTransferKernelAbstractionsExt
 
 using KernelAbstractions: KernelAbstractions as KA, @kernel, @index
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
@@ -104,7 +105,7 @@ end
 end
 
 # Mode→shell scatter-add: T_spec[shell_idx[I]] += w1[I[1]]·density[I], summed over all modes I in one
-# pass, with `w1` the Hermitian weight along axis 1 (`SpectralLayout.hermitian_weights`), or `nothing`
+# pass, with `w1` the Hermitian weight along axis 1 (`FlowTransformBindings.fold_weight`), or `nothing`
 # for a density that already carries it. Atomic because many modes map to the same shell.
 @kernel function shell_scatter_add_kernel!(T_spec, @Const(density), @Const(shell_idx), w1)
     I = @index(Global, Cartesian)
@@ -115,17 +116,13 @@ end
 end
 
 # The Hermitian weight of every axis-1 index, on `dev`.
-function _hermitian_weights_dev(dev, ::Type{FT}, ks) where {FT}
-    nd = length(ks)
-    w = FT[FIT.SpectralLayout.hermitian_weight(ks, CartesianIndex(ntuple(d -> d == 1 ? i : 1, nd)))
-           for i in 1:length(ks[1])]
-    return _to_device(dev, w)
-end
+_hermitian_weights_dev(dev, ::Type{FT}, ks) where {FT} =
+    _to_device(dev, FT[FTB.fold_weight(ks[1], i) for i in 1:length(ks[1])])
 
 # The wavenumber components the vorticity kernels multiply by, on `dev`: `derivative_wavenumber`, zero at
 # the Nyquist index of an even axis, as the host densities use.
 _derivative_ks_dev(dev, ::Type{FT}, ks) where {FT} = ntuple(length(ks)) do d
-    _to_device(dev, FT[FIT.SpectralLayout.derivative_wavenumber(ks[d], i) for i in 1:length(ks[d])])
+    _to_device(dev, FT[FTB.derivative_wavenumber(ks[d], i) for i in 1:length(ks[d])])
 end
 
 # ComputationalBackends.GPUBackend method of the shared `ShellBinning.shell_scatter_add!` (host scalar method lives in core):
@@ -306,7 +303,7 @@ function FIT.BandTransfer._band_to_band_gpu!(
     W_dev = [_on_device(dev, bws.W[n]) for n in 1:nb]
     # Receiver weights carry the Hermitian weight, so Σ_I Wₙ[I]·d[I] over the stored modes is the
     # full-spectrum sum on either layout.
-    hw = FIT.SpectralLayout.hermitian_weights(FT, ks)
+    hw = FTB.fold_weights(FT, ks)
     Ww_dev = [_to_device(dev, bws.W[n] .* hw) for n in 1:nb]
     fill!(T, zero(FT))
     for m in 1:nb
