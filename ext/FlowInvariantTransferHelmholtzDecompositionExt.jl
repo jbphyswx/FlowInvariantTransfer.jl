@@ -68,9 +68,9 @@ function FIT.Decomposition._decompose_field_spectral(
     velocity_hat::AbstractArray{<:Complex},
     ks
 )
-    # N-D Leray projection straight from the wavenumber vectors (no grid reconstruction): the sibling's
-    # `helmholtz_project_spectral(velocity_hat, ks)` is a device-generic pure-broadcast projection, so
-    # this works in 2D and 3D and on device arrays. Component-last (ns..., D) convention both ways.
+    # HD's Leray projection on FIT's wavenumber axes, which it reads as derivative wavenumbers, zero at
+    # an even axis's Nyquist slot as in FIT's own derivatives. A broadcast over component-last
+    # `(ns..., D)` arrays, host or device.
     res = HDjl.helmholtz_project_spectral(velocity_hat, ks)
 
     # SpectralCartesianResult is a 3-way Hodge split (u_rot + u_div + u_harm) with the k = 0

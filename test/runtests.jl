@@ -727,9 +727,10 @@ end
 Test.@testset "HelmholtzDecomposition — 3D Leray: reconstruct, rot div-free, div curl-free" begin
     M = 8; L = 2π
     ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
-    kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
-    ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
-    kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+    # The grid derivative, zero at the Nyquist slot of an even axis.
+    kx = [FTB.derivative_wavenumber(ks[1], i) for i in 1:M, j in 1:M, l in 1:M]
+    ky = [FTB.derivative_wavenumber(ks[2], j) for i in 1:M, j in 1:M, l in 1:M]
+    kz = [FTB.derivative_wavenumber(ks[3], l) for i in 1:M, j in 1:M, l in 1:M]
     Random.seed!(53)
     û = randn(ComplexF64, M, M, M, 3)                     # generic: both rotational + divergent parts
     dec = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), û, ks)
