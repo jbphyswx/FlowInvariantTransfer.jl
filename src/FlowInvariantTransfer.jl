@@ -7,6 +7,10 @@ using PrecompileTools: PrecompileTools
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
+public FlowTransformBindings
+public ComputationalBackends
+public SpectralBackends
+
 # ---------------------------------------------------------------------------
 # Submodule includes
 # ---------------------------------------------------------------------------
