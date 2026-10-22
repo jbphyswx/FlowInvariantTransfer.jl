@@ -5,35 +5,23 @@ using FlowTransformBindings: FlowTransformBindings as FTB
 using ..Workspaces: Workspaces
 using SpectralBackends: SpectralBackends
 
-export compute_nonlinear_term, compute_nonlinear_term!
-export _nonlinear_term_fft!, _nonlinear_term_padded_fft!   # stubs overridden by FFTW extension
+export compute_nonlinear_term, compute_nonlinear_term!, compute_rotational_term!
+export synthesize_advecting!, compute_advection!
 
 # ---------------------------------------------------------------------------
-# Internal FFTW extension stub
+# FFTW extension stubs: the legs of the FFT nonlinear term
 # ---------------------------------------------------------------------------
 
-"""
-    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=velocity_hat)
-
-FFT-accelerated, allocation-free computation of N̂(k) = FFT[(u_adv·∇)u] into `ws.N̂`,
-using the pre-planned transforms and scratch buffers in `ws.plans`.
-This stub is overridden by the FFTW extension when FFTW is loaded.
-"""
-function _nonlinear_term_fft!(args...; kwargs...)
-    throw(ArgumentError(
-        "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
-end
-
-"""
-    _nonlinear_term_padded_fft!(ws, advected_hat, ks; advecting_hat=advected_hat)
-
-Exact 3/2 zero-padded pseudospectral nonlinear term written into `ws.N̂`. Overridden by the FFTW
-extension; the stub errors when FFTW is not loaded.
-"""
-function _nonlinear_term_padded_fft!(args...; kwargs...)
-    throw(ArgumentError(
-        "Types.PaddedThreeHalves dealiasing requires FFTW. Run `using FFTW` to load the extension."))
-end
+_nlt_synth_advecting_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+_nlt_advect_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+_nlt_forward_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+_nlt_padded_synth_fft!(args...) = throw(ArgumentError(
+    "Types.PaddedThreeHalves dealiasing requires FFTW. Run `using FFTW` to load the extension."))
+_nlt_padded_advect_fft!(args...) = throw(ArgumentError(
+    "Types.PaddedThreeHalves dealiasing requires FFTW. Run `using FFTW` to load the extension."))
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -41,130 +29,175 @@ end
 
 """
     compute_nonlinear_term(advected_hat, ks; dealiasing=OrszagTwoThirds(),
-                           spectral=SpectralBackends.DirectSumSpectralBackend(), advecting_hat=advected_hat)
+                           transform=SpectralBackends.AutoSpectralBackend(), advecting_hat=advected_hat)
 
 Compute the pseudospectral nonlinear term `𝒩̂ᵢ(k) = F̂[(uⱼ ∂fᵢ/∂xⱼ)]` — the advection of an
 `M`-component field `f` (`advected_hat`) by a velocity `u` (`advecting_hat`). For the momentum
 self-advection term pass the velocity as both (the default), giving `N̂ᵢ = F̂[(u·∇)uᵢ]`.
 
 # Arguments
-- `advected_hat`: Array of size `(ns..., M)` — Fourier coefficients of the advected field `f`
+- `advected_hat`: Array of size `(ms..., M)` — Fourier coefficients of the advected field `f`
   (`M = D` for momentum, `M = 1` for a passive scalar / vector potential).
 - `ks`: Tuple of 1D wavenumber vectors (length `nd`), one per spatial dimension.
 
 # Keyword Arguments
 - `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: dealiasing strategy (NoDealiasing / OrszagTwoThirds / PaddedThreeHalves).
-- `spectral::SpectralBackends.AbstractSpectralBackend`: `SpectralBackends.DirectSumSpectralBackend()` (default, no deps) or `SpectralBackends.FFTSpectralBackend()`
-  (requires the FFTW extension) for the O(N log N) path.
-- `advecting_hat`: the advecting velocity `u` (shape `(ns..., D)`, `D ≥ nd`); defaults to
+- `transform::SpectralBackends.AbstractSpectralBackend`: `SpectralBackends.AutoSpectralBackend()`
+  (default: FFT when FFTW is loaded, else the direct sum), `SpectralBackends.DirectSumSpectralBackend()`
+  (no dependencies) or `SpectralBackends.FFTSpectralBackend()` (requires the FFTW extension).
+- `advecting_hat`: the advecting velocity `u` (shape `(ms..., D)`, `D ≥ nd`); defaults to
   `advected_hat` (self-advection). Only the `nd` spatial components participate in `(u·∇)`.
 
 # Returns
-Array of size `(ns..., M)` containing `𝒩̂ᵢ(k)`.
+Array of size `(ms..., M)` containing `𝒩̂ᵢ(k)`.
 """
 function compute_nonlinear_term(
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     advecting_hat = velocity_hat,
 )
     ws = Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing)
     compute_nonlinear_term!(ws, velocity_hat, ks;
-        dealiasing=dealiasing, spectral=spectral, advecting_hat=advecting_hat)
+        dealiasing=dealiasing, transform=transform, advecting_hat=advecting_hat)
     return ws.N̂
 end
 
 """
     compute_nonlinear_term!(ws, advected_hat, ks; dealiasing=OrszagTwoThirds(),
-                            spectral=SpectralBackends.DirectSumSpectralBackend(), advecting_hat=advected_hat)
+                            transform=SpectralBackends.AutoSpectralBackend(), advecting_hat=advected_hat) -> ws.N̂
 
-In-place version of `compute_nonlinear_term`. Writes result into `ws.N̂`.
-Pass a `NonlinearTermWorkspace` (sized for `advected_hat`) to avoid any allocations in the hot path.
+In-place version of [`compute_nonlinear_term`](@ref), writing into `ws.N̂`. `ws` is a
+`NonlinearTermWorkspace` sized for `advected_hat`.
 """
 function compute_nonlinear_term!(
     ws::Workspaces.NonlinearTermWorkspace,
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     advecting_hat = velocity_hat,
 )
-    # The direct sum scalar-indexes, so it refuses a device array before any work starts.
-    spectral = Types.resolve_spectral(spectral)
-    if spectral isa SpectralBackends.DirectSumSpectralBackend && Types._is_device(velocity_hat)
-        throw(ArgumentError(
-            "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot run on " *
-            "device arrays; use `spectral = SpectralBackends.FFTSpectralBackend()` (cuFFT via AbstractFFTs) for the device path."))
-    end
-    _compute_nonlinear_term!(ws, velocity_hat, ks, spectral, dealiasing; advecting_hat=advecting_hat)
+    transform = _checked_transform(transform, velocity_hat)
+    _synthesize_advecting!(ws, advecting_hat, ks, transform, dealiasing)
+    _compute_advection!(ws, velocity_hat, ks, transform, dealiasing)
     return ws.N̂
 end
 
-# Dispatch on (spectral transform backend, dealiasing strategy). `advecting_hat` is the velocity
-# u_j that does the advecting; `velocity_hat` is the advected field whose gradient ∂_j(·)_i is taken:
-# N_i = (u_adv)_j ∂_j (u)_i. They coincide for plain self-advection, and differ for the shell-to-shell
-# term ((u·∇)u_m, the shell-m field advected) and scalar/MHD terms. The 2/3 and no-dealias paths share one implementation
-# (a `keep`/truncate flag); the exact 3/2-padding path is a separate, FFT-only routine.
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.OrszagTwoThirds; advecting_hat=velocity_hat) =
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=true, advecting_hat=advecting_hat)
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.NoDealiasing; advecting_hat=velocity_hat) =
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=false, advecting_hat=advecting_hat)
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.PaddedThreeHalves; advecting_hat=velocity_hat) =
-    throw(ArgumentError(
-        "Types.PaddedThreeHalves dealiasing requires the FFT path — pass spectral=SpectralBackends.FFTSpectralBackend() (and `using FFTW`). " *
-        "The dependency-free SpectralBackends.DirectSumSpectralBackend supports only Types.NoDealiasing/Types.OrszagTwoThirds."))
+"""
+    synthesize_advecting!(ws, advecting_hat, ks; dealiasing=OrszagTwoThirds(),
+                          transform=AutoSpectralBackend()) -> ws
 
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.OrszagTwoThirds; advecting_hat=velocity_hat) =
-    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=advecting_hat)
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.NoDealiasing; advecting_hat=velocity_hat) =
-    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=false, advecting_hat=advecting_hat)
-_compute_nonlinear_term!(ws, velocity_hat, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.PaddedThreeHalves; advecting_hat=velocity_hat) =
-    _nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=advecting_hat)
+The advecting velocity of [`compute_nonlinear_term!`](@ref), synthesized into `ws` (on the padded
+grid under `PaddedThreeHalves`). A driver that advects several fields by one velocity calls this once
+and [`compute_advection!`](@ref) per field.
+"""
+function synthesize_advecting!(
+    ws::Workspaces.NonlinearTermWorkspace,
+    advecting_hat,
+    ks;
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+)
+    _synthesize_advecting!(ws, advecting_hat, ks, _checked_transform(transform, advecting_hat), dealiasing)
+    return ws
+end
+
+"""
+    compute_advection!(ws, advected_hat, ks; dealiasing=OrszagTwoThirds(),
+                       transform=AutoSpectralBackend()) -> ws.N̂
+
+[`compute_nonlinear_term!`](@ref) of `advected_hat` by the velocity [`synthesize_advecting!`](@ref)
+left in `ws`, with the same `dealiasing` and `transform`.
+"""
+function compute_advection!(
+    ws::Workspaces.NonlinearTermWorkspace,
+    advected_hat,
+    ks;
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+)
+    _compute_advection!(ws, advected_hat, ks, _checked_transform(transform, advected_hat), dealiasing)
+    return ws.N̂
+end
+
+# The resolved transform; the direct sum scalar-indexes, so it refuses a device array before any work.
+function _checked_transform(transform, field)
+    transform = Types.resolve_transform(transform)
+    if transform isa SpectralBackends.DirectSumSpectralBackend && Types._is_device(field)
+        throw(ArgumentError(
+            "SpectralBackends.DirectSumSpectralBackend uses scalar-indexed direct sums (a host O(N²ᴰ) reference) and cannot run on " *
+            "device arrays; use `transform = SpectralBackends.FFTSpectralBackend()` (cuFFT via AbstractFFTs) for the device path."))
+    end
+    return transform
+end
+
+# Dispatch on (transform, dealiasing). The advecting velocity `u` is synthesized into
+# `ws.u_phys`, or the padded grid's `u_phys` under `PaddedThreeHalves`; the advected field `f` then
+# gives `𝒩_i = u_j ∂_j f_i`.
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.OrszagTwoThirds) =
+    _direct_synth_into!(ws.u_phys, a, ks, length(ks), true)
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.NoDealiasing) =
+    _direct_synth_into!(ws.u_phys, a, ks, length(ks), false)
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.PaddedThreeHalves) =
+    _padded_synth_advecting_direct!(_require_pad(ws.pad), a, length(ks))
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.OrszagTwoThirds) =
+    _nlt_synth_advecting_fft!(ws, a, ks, true)
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.NoDealiasing) =
+    _nlt_synth_advecting_fft!(ws, a, ks, false)
+_synthesize_advecting!(ws, a, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.PaddedThreeHalves) =
+    _nlt_padded_synth_fft!(ws, a, ks)
+
+_compute_advection!(ws, f, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.OrszagTwoThirds) =
+    _advection_direct!(ws, f, ks, true)
+_compute_advection!(ws, f, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.NoDealiasing) =
+    _advection_direct!(ws, f, ks, false)
+_compute_advection!(ws, f, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.PaddedThreeHalves) =
+    _padded_advection_direct!(_require_pad(ws.pad), ws.N̂, f, length(ks))
+_compute_advection!(ws, f, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.OrszagTwoThirds) =
+    _nlt_advect_fft!(ws, f, ks, true)
+_compute_advection!(ws, f, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.NoDealiasing) =
+    _nlt_advect_fft!(ws, f, ks, false)
+_compute_advection!(ws, f, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.PaddedThreeHalves) =
+    _nlt_padded_advect_fft!(ws, f, ks)
+
+# The workspace's padded grid; a workspace built for another dealiasing has none.
+_require_pad(pad::Workspaces.PaddedGrid) = pad
+_require_pad(::Nothing) = throw(ArgumentError(
+    "PaddedThreeHalves needs a workspace built for it — construct with dealiasing = Types.PaddedThreeHalves()."))
+
+# Component `c` of a component-last array as a `(…, 1)` view, the shape
+# `FlowTransformBindings.padded_embed!`/`padded_truncate!` read and write.
+@inline _component(A::AbstractArray{T, N}, c::Int) where {T, N} =
+    view(A, ntuple(_ -> Colon(), Val(N - 1))..., c:c)
 
 # ---------------------------------------------------------------------------
-# 2/3 dealiasing predicate (shared by input-truncation and output-zeroing)
+# 2/3 dealiasing
 # ---------------------------------------------------------------------------
 #
-# Orszag's 2/3 rule must truncate the *inputs* of the quadratic product, not only the
-# output: a product of two retained modes p,q with p+q wrapping past Nyquist aliases
-# back onto a *low* mode (e.g. p=q=N/2−1 → k≈−2), so output-only truncation leaves the
-# retained band |k|<N/3 contaminated. We therefore (a) skip dealiased input modes when
-# building u and ∇u, and (b) still zero the output above the cutoff for a clean N̂.
+# The 2/3 rule truncates both the inputs and the output of the quadratic product: an untruncated
+# pair p, q whose sum wraps past Nyquist aliases onto a low mode (p = q = N/2−1 → k ≈ −2). Dealiased
+# input modes are skipped when building u and ∇u, and the output is zeroed above the cutoff.
 
 # ---------------------------------------------------------------------------
-# Individual legs of the nonlinear term.
+# Legs of the nonlinear term
 #
 # `𝒩 = Σ_j u_j ∂_j f` factors into: synthesise the advecting velocity, accumulate the advection,
-# transform forward. A caller whose advected field is ONE Fourier mode (mode-to-mode's giver) knows
-# `∂_j f` analytically — it is a plane wave — and needs only the first and third legs. The advecting
-# velocity is the same for every giver, so it is synthesised once for the whole loop.
+# transform forward. A caller whose advected field is one Fourier mode (mode-to-mode's slot field) knows
+# `∂_j f` analytically, a plane wave, and needs only the first and third legs.
 # ---------------------------------------------------------------------------
 
-_nlt_synth_advecting_fft!(args...) = throw(ArgumentError(
-    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
-_nlt_forward_fft!(args...) = throw(ArgumentError(
-    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
-
-"""
-    nlt_synth_advecting!(ws, advecting_hat, ks, spectral; truncate=true) -> ws.u_phys
-
-Physical advecting velocity `u_j(x) = Σ_k û_j e^{ik·x}` into `ws.u_phys` — the first leg of the
-nonlinear term on its own, for drivers that hold the advecting field fixed across an outer loop.
-"""
-nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.FFTSpectralBackend; truncate::Bool = true) =
-    _nlt_synth_advecting_fft!(ws, advecting_hat, ks, truncate)
-
-function nlt_synth_advecting!(ws, advecting_hat, ks, ::SpectralBackends.DirectSumSpectralBackend;
-                              truncate::Bool = true)
+# `dest[…, c] = Σ_k src[k, c] e^{ik·x}` for the first `ncomp` components, by direct sums.
+function _direct_synth_into!(dest, src_hat, ks, ncomp::Int, truncate::Bool)
     nd = length(ks); ns = FTB.full_size(ks)
-    for j in 1:nd
-        û_j = selectdim(advecting_hat, nd + 1, j)
+    for c in 1:ncomp
+        û_c = selectdim(src_hat, nd + 1, c)
         for phys_I in CartesianIndices(ns)
-            ws.u_phys[phys_I, j] = _direct_synth(û_j, ks, phys_I, truncate, I -> true)
+            dest[phys_I, c] = _direct_synth(û_c, ks, phys_I, truncate, I -> true)
         end
     end
-    return ws.u_phys
+    return dest
 end
 
 """
@@ -177,33 +210,94 @@ nlt_forward!(ws, ks, ::SpectralBackends.FFTSpectralBackend; truncate::Bool = tru
 
 function nlt_forward!(ws, ks, ::SpectralBackends.DirectSumSpectralBackend; truncate::Bool = true)
     nd = length(ks)
-    ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
     M  = size(ws.N̂, nd + 1); FT = real(eltype(ws.N̂))
-    Np = prod(ns)
+    scale = one(FT) / FT(prod(FTB.full_size(ks)))
     for comp in 1:M
-        N̂_c = selectdim(ws.N̂, nd + 1, comp)
-        Nc  = selectdim(ws.N_phys, nd + 1, comp)
-        for spec_I in CartesianIndices(ms)
-            if truncate && _is_dealiased(ks, spec_I)
-                N̂_c[spec_I] = zero(eltype(ws.N̂))
-                continue
-            end
-            val = zero(complex(FT))
-            @inbounds for phys_I in CartesianIndices(ns)
-                phase = zero(FT)
-                for d in 1:nd
-                    phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
-                             FT(phys_I[d] - 1) / FT(ns[d])
-                end
-                val += Nc[phys_I] * exp(-im * phase)
-            end
-            N̂_c[spec_I] = val / FT(Np)
-        end
+        _direct_analysis!(selectdim(ws.N̂, nd + 1, comp), selectdim(ws.N_phys, nd + 1, comp), ks, scale,
+                          I -> truncate && _is_dealiased(ks, I))
     end
     return ws.N̂
 end
 
-# Synthesis of one component at one physical point, with `kfac` multiplying each mode's coefficient.
+# `dest[k] = scale · Σ_x src[x] e^{-ik·x}` over the coefficient grid of `ks`, and zero at the modes
+# `skip` names.
+function _direct_analysis!(dest, src, ks, scale, skip)
+    nd = length(ks); ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
+    FT = real(eltype(dest))
+    @inbounds for spec_I in CartesianIndices(ms)
+        if skip(spec_I)
+            dest[spec_I] = zero(eltype(dest))
+            continue
+        end
+        val = zero(complex(FT))
+        for phys_I in CartesianIndices(ns)
+            phase = zero(FT)
+            for d in 1:nd
+                phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
+                         FT(phys_I[d] - 1) / FT(ns[d])
+            end
+            val += src[phys_I] * exp(-im * phase)
+        end
+        dest[spec_I] = val * scale
+    end
+    return dest
+end
+
+# ---------------------------------------------------------------------------
+# Direct sums on the padded grid (`PaddedThreeHalves`): each field is embedded in the grid of the
+# workspace's `PaddedGrid`, the product formed there, and its forward transform returned to the
+# caller's grid, as on the FFT path.
+# ---------------------------------------------------------------------------
+
+# `dest[…, j]` for `j = 1:ncomp`: component `j` of `src_hat` embedded in the padded grid and
+# synthesised there.
+function _padded_direct_synth!(pg, dest, src_hat, ncomp::Int)
+    nd = length(pg.ks); Ms = FTB.full_size(pg.ks)
+    for j in 1:ncomp
+        FTB.padded_embed!(pg.spec1, _component(src_hat, j), pg.maps)
+        dj = selectdim(dest, nd + 1, j)
+        for x in CartesianIndices(Ms)
+            dj[x] = _direct_synth(pg.spec, pg.ks, x, false, I -> true)
+        end
+    end
+    return dest
+end
+
+_padded_synth_advecting_direct!(pg, advecting_hat, nd::Int) =
+    _padded_direct_synth!(pg, pg.u_phys, advecting_hat, nd)
+
+# `N̂ = (u·∇)f` with `u` in `pg.u_phys`: each gradient of `f` synthesised on the padded grid with the
+# padded derivative wavenumbers, the product accumulated there and transformed back.
+function _padded_advection_direct!(pg, N̂, advected_hat, nd::Int)
+    FT = real(eltype(advected_hat)); Ms = FTB.full_size(pg.ks)
+    for c in 1:size(advected_hat, nd + 1)
+        nc = selectdim(pg.n_phys, nd + 1, c)
+        fill!(nc, zero(FT))
+        FTB.padded_embed!(pg.spec1, _component(advected_hat, c), pg.maps)
+        for j in 1:nd
+            kdj = pg.kd[j]
+            for x in CartesianIndices(Ms)
+                pg.g_phys[x] = _direct_synth(pg.spec, pg.ks, x, false, I -> im * kdj[I[j]])
+            end
+            nc .+= selectdim(pg.u_phys, nd + 1, j) .* pg.g_phys
+        end
+    end
+    return _padded_direct_forward!(pg, N̂, nd)
+end
+
+# Every component of `pg.n_phys` analysed on the padded grid, divided by its point count and returned to
+# the caller's grid in `N̂` (`FlowTransformBindings.padded_truncate!`).
+function _padded_direct_forward!(pg, N̂, nd::Int)
+    for c in 1:size(N̂, nd + 1)
+        _direct_analysis!(pg.spec, selectdim(pg.n_phys, nd + 1, c), pg.ks, pg.invM, I -> false)
+        FTB.padded_truncate!(_component(N̂, c), pg.spec1, pg.maps)
+    end
+    return N̂
+end
+
+# Synthesis of one component at one physical point, with `kfac` multiplying each mode's coefficient. On a
+# half layout a stored mode stands for its unstored conjugate too, which `mode_fold` counts, so the real
+# part of the stored sum is the sum over the full spectrum.
 @inline function _direct_synth(û_c, ks, phys_I, truncate::Bool, kfac)
     nd = length(ks); ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
     FT = real(eltype(û_c))
@@ -229,111 +323,141 @@ wavenumber from `ks`, so it holds for both spectral layouts.
 @inline _is_dealiased(ks::Tuple, I::CartesianIndex) = FTB.is_dealiased(ks, I)
 
 # ---------------------------------------------------------------------------
+# Rotational form ω × u
+# ---------------------------------------------------------------------------
+
+_rotational_term_fft!(args...) = throw(ArgumentError(
+    "FFT-accelerated nonlinear term requires FFTW. Run `using FFTW` to load the extension."))
+_rotational_term_padded_fft!(args...) = throw(ArgumentError(
+    "Types.PaddedThreeHalves dealiasing requires FFTW. Run `using FFTW` to load the extension."))
+
+"""
+    compute_rotational_term!(ws, velocity_hat, vortex_hat, ks; dealiasing=OrszagTwoThirds(),
+                             transform=AutoSpectralBackend()) -> ws.N̂
+
+`𝒩̂ = FFT[ω × u]` in 3-D, written into `ws.N̂`: `u` is synthesised from `velocity_hat` and
+`ω = ∇ × v` from `vortex_hat`, both three-component `(ms..., 3)` coefficient arrays, with the
+normalization, input truncation and output zeroing of [`compute_nonlinear_term!`](@ref).
+
+`(u·∇)u = ω × u + ∇(½|u|²)`, and the gradient has no projection on a divergence-free `û`, so
+`Re{û*·𝒩̂}` is the kinetic-energy transfer density of `(u·∇)u` when `v = u` is solenoidal.
+"""
+function compute_rotational_term!(
+    ws::Workspaces.NonlinearTermWorkspace,
+    velocity_hat,
+    vortex_hat,
+    ks;
+    dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+)
+    length(ks) == 3 || throw(ArgumentError("the rotational form ω × u is three-dimensional; got nd=$(length(ks))."))
+    (size(velocity_hat, 4) == 3 && size(vortex_hat, 4) == 3 && size(ws.N̂, 4) == 3) || throw(DimensionMismatch(
+        "the rotational form takes three-component fields and a three-component workspace."))
+    _compute_rotational_term!(ws, velocity_hat, vortex_hat, ks, _checked_transform(transform, velocity_hat), dealiasing)
+    return ws.N̂
+end
+
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.OrszagTwoThirds) =
+    _rotational_term_direct!(ws, u, v, ks, true)
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.NoDealiasing) =
+    _rotational_term_direct!(ws, u, v, ks, false)
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.DirectSumSpectralBackend, ::Types.PaddedThreeHalves) =
+    _rotational_term_padded_direct!(ws, u, v, ks)
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.OrszagTwoThirds) =
+    _rotational_term_fft!(ws, u, v, ks, true)
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.NoDealiasing) =
+    _rotational_term_fft!(ws, u, v, ks, false)
+_compute_rotational_term!(ws, u, v, ks, ::SpectralBackends.FFTSpectralBackend, ::Types.PaddedThreeHalves) =
+    _rotational_term_padded_fft!(ws, u, v, ks)
+
+# `ω̂ = i k × v̂` into `out` by a host loop over the modes, with each axis's derivative wavenumber.
+function _curl_hat_direct!(out, v, ks)
+    ms = FTB.spectral_size(ks)
+    @inbounds for I in CartesianIndices(ms)
+        kx = FTB.derivative_wavenumber(ks[1], I[1])
+        ky = FTB.derivative_wavenumber(ks[2], I[2])
+        kz = FTB.derivative_wavenumber(ks[3], I[3])
+        out[I, 1] = im * (ky * v[I, 3] - kz * v[I, 2])
+        out[I, 2] = im * (kz * v[I, 1] - kx * v[I, 3])
+        out[I, 3] = im * (kx * v[I, 2] - ky * v[I, 1])
+    end
+    return out
+end
+
+"""
+    _cross_in_place!(W, U, g) -> W
+
+`W ← W × U` over the trailing component axis of three-component fields, with `g` (one component's
+shape) as the only scratch. Elementwise broadcasts, so it runs on device arrays.
+"""
+function _cross_in_place!(W, U, g)
+    d = ndims(W)
+    w1 = selectdim(W, d, 1); w2 = selectdim(W, d, 2); w3 = selectdim(W, d, 3)
+    u1 = selectdim(U, d, 1); u2 = selectdim(U, d, 2); u3 = selectdim(U, d, 3)
+    @. g  = w2 * u3 - w3 * u2      # x component
+    @. w2 = w1 * u2 - w2 * u1      # z component, held in slot 2
+    @. w1 = w3 * u1 - w1 * u3      # y component, held in slot 1
+    w3 .= w2
+    w2 .= w1
+    w1 .= g
+    return W
+end
+
+# ω̂ into `ws.N̂`, then ω into `ws.N_phys` and u into `ws.u_phys`; `ws.N̂` is overwritten by the forward
+# transform of `ω × u` at the end.
+function _rotational_term_direct!(ws, velocity_hat, vortex_hat, ks, truncate::Bool)
+    _curl_hat_direct!(ws.N̂, vortex_hat, ks)
+    _direct_synth_into!(ws.N_phys, ws.N̂, ks, 3, truncate)
+    _direct_synth_into!(ws.u_phys, velocity_hat, ks, 3, truncate)
+    _cross_in_place!(ws.N_phys, ws.u_phys, ws.g_phys)
+    return nlt_forward!(ws, ks, SpectralBackends.DirectSumSpectralBackend(); truncate = truncate)
+end
+
+# The same on the padded grid: ω̂ on the caller's grid, both fields embedded and synthesised on the
+# padded grid, the product formed there and returned to the caller's grid.
+function _rotational_term_padded_direct!(ws, velocity_hat, vortex_hat, ks)
+    pg = _require_pad(ws.pad)
+    _curl_hat_direct!(ws.N̂, vortex_hat, ks)
+    _padded_direct_synth!(pg, pg.n_phys, ws.N̂, 3)
+    _padded_direct_synth!(pg, pg.u_phys, velocity_hat, 3)
+    _cross_in_place!(pg.n_phys, pg.u_phys, pg.g_phys)
+    return _padded_direct_forward!(pg, ws.N̂, 3)
+end
+
+# ---------------------------------------------------------------------------
 # Direct-sum reference implementation
 # ---------------------------------------------------------------------------
 
 """
-    _compute_nonlinear_term_direct!(ws, velocity_hat, ks; truncate=true)
+    _advection_direct!(ws, advected_hat, ks, truncate) -> ws.N̂
 
-Reference O(N²) direct-sum computation of the nonlinear advection term.
-Uses pre-allocated buffers from `ws::NonlinearTermWorkspace` — no heap allocation.
+Reference `O(N²ᴰ)` direct-sum advection of `advected_hat` by the velocity in `ws.u_phys`:
+`∂_j f_i(x) = Σ_k i k_j f̂_i e^{ik·x}`, `𝒩_i = Σ_j u_j ∂_j f_i`, `𝒩̂ = DFT(𝒩)/Nᵈ`, with the inputs and
+the output truncated to the 2/3 band when `truncate`.
 
-Algorithm (pseudospectral, direct DFT/IDFT):
-  1. uᵢ(x)        = IDFT(ûᵢ) via explicit sum
-  2. ∂uᵢ/∂xⱼ(x)  = IDFT(i·kⱼ·ûᵢ) via explicit sum
-  3. Nᵢ(x)        = Σⱼ u_j(x) · ∂uᵢ/∂xⱼ(x)
-  4. N̂ᵢ(k)        = DFT(Nᵢ(x)) via explicit sum
-  5. Apply 2/3 dealiasing.
-
-Normalization: the package convention is `û = fft(u)/Nᵈ` (so `E(k)=½|û|²` is the physical modal
-energy). The physical synthesis (IDFT) is therefore `u(x) = Σ_k û(k) e^{ik·x}` — an *unnormalized*
-inverse (no `/Nᵈ`); the forward analysis (DFT) is `û(k) = (1/Nᵈ) Σ_x u(x) e^{-ik·x}`. This makes
-`T(k)=Re{û*·N̂}` the physically-scaled transfer (verified against an independent FFTW ground truth).
+The package convention is `û = fft(u)/Nᵈ`, so synthesis `u(x) = Σ_k û(k) e^{ik·x}` is the unnormalized
+inverse and analysis `û(k) = (1/Nᵈ) Σ_x u(x) e^{-ik·x}`; `T(k) = Re{û*·N̂}` is then the physical transfer.
 """
-function _compute_nonlinear_term_direct!(
-    ws::Workspaces.NonlinearTermWorkspace,
-    velocity_hat,
-    ks;
-    truncate::Bool = true,   # apply the Orszag 2/3 input/output truncation
-    advecting_hat = velocity_hat,
-)
-    nd  = length(ks)
-    ns  = FTB.full_size(ks)        # physical grid
-    ms  = FTB.spectral_size(ks)    # coefficient grid
-    M   = size(velocity_hat, nd+1)   # advected-field components (D for momentum, 1 for scalar)
-    FT  = real(eltype(velocity_hat))
-    Np  = prod(ns)
-    phys_idxs = CartesianIndices(ns)
-    spec_idxs = CartesianIndices(ms)
-
-    # Synthesis over the stored coefficients. On the full layout every mode is stored and the weight
-    # is 1; on the half layout the unstored conjugate mode contributes the conjugate term, which is
-    # exactly the Hermitian weight (1 on the self-paired k₁ = 0 / Nyquist planes, 2 elsewhere) — so
-    # `real(Σ_stored w·û·e^{ikx})` equals `Σ_full û·e^{ikx}` in both cases.
-    @inline function _synth(f, phys_I)
-        val = zero(complex(FT))
-        @inbounds for spec_I in spec_idxs
-            truncate && _is_dealiased(ks, spec_I) && continue      # truncate input
-            phase = zero(FT)
-            for d in 1:nd
-                phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
-                         FT(phys_I[d] - 1) / FT(ns[d])
-            end
-            val += FTB.mode_fold(ks, spec_I) * f(spec_I) * exp(im * phase)
-        end
-        return real(val)
-    end
-
-    # --- (advecting) uⱼ(x_p) = IDFT(û_adv), j = 1:nd (only the advecting directions) ---
-    # Synthesis is unnormalized (physical u = Σ_k û e^{ik·x}); û already carries the 1/Nᵈ.
-    for j in 1:nd
-        û_j = selectdim(advecting_hat, nd+1, j)
-        for phys_I in phys_idxs
-            ws.u_phys[phys_I, j] = _synth(I -> û_j[I], phys_I)
-        end
-    end
-
-    # --- 𝒩ᵢ = Σⱼ uⱼ ∂fᵢ/∂xⱼ, streaming one gradient at a time through ws.g_phys ---
+function _advection_direct!(ws::Workspaces.NonlinearTermWorkspace, advected_hat, ks, truncate::Bool)
+    nd = length(ks)
+    ns = FTB.full_size(ks)
+    M  = size(advected_hat, nd + 1)
+    FT = real(eltype(advected_hat))
     for comp in 1:M
-        û_c = selectdim(velocity_hat, nd+1, comp)
-        Nc  = selectdim(ws.N_phys, nd+1, comp)
+        f̂_c = selectdim(advected_hat, nd + 1, comp)
+        Nc  = selectdim(ws.N_phys, nd + 1, comp)
         fill!(Nc, zero(FT))
         for grad_d in 1:nd
             # `derivative_wavenumber`, matching the FFT engine: the grid derivative along `grad_d`
             # vanishes at that axis's Nyquist mode.
-            for phys_I in phys_idxs
-                ws.g_phys[phys_I] = _synth(
-                    I -> (im * FT(FTB.derivative_wavenumber(ks[grad_d], I[grad_d]))) * û_c[I],
-                    phys_I)
+            kfac = I -> im * FT(FTB.derivative_wavenumber(ks[grad_d], I[grad_d]))
+            for phys_I in CartesianIndices(ns)
+                ws.g_phys[phys_I] = _direct_synth(f̂_c, ks, phys_I, truncate, kfac)
             end
-            uj = selectdim(ws.u_phys, nd+1, grad_d)
-            Nc .+= uj .* ws.g_phys
+            Nc .+= selectdim(ws.u_phys, nd + 1, grad_d) .* ws.g_phys
         end
     end
-
-    # --- 𝒩̂ᵢ(k) = DFT(𝒩ᵢ), zeroed above the 2/3 cutoff ---
-    for comp in 1:M
-        N̂_c = selectdim(ws.N̂, nd+1, comp)
-        Nc  = selectdim(ws.N_phys, nd+1, comp)
-        for spec_I in spec_idxs
-            if truncate && _is_dealiased(ks, spec_I)
-                N̂_c[spec_I] = zero(eltype(ws.N̂))
-                continue
-            end
-            val = zero(complex(FT))
-            @inbounds for phys_I in phys_idxs
-                phase = zero(FT)
-                for d in 1:nd
-                    phase += FT(2π) * FTB.mode_frequency(ks[d], spec_I[d]) *
-                             FT(phys_I[d] - 1) / FT(ns[d])
-                end
-                val += Nc[phys_I] * exp(-im * phase)
-            end
-            N̂_c[spec_I] = val / FT(Np)
-        end
-    end
-
-    return ws.N̂
+    return nlt_forward!(ws, ks, SpectralBackends.DirectSumSpectralBackend(); truncate = truncate)
 end
 
 end # module NonlinearTerm

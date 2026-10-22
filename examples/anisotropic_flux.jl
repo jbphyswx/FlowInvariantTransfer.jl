@@ -19,20 +19,22 @@ function run_anisotropic_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FIT.Types.LinearBinning(2π / L)
-    iso  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.IsotropicShells())
-    perp = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.PerpendicularShells())
-    par  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.ParallelShells())
+    iso  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.IsotropicShells())
+    perp = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.PerpendicularShells())
+    par  = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend(), geometry=FIT.Types.ParallelShells())
 
     println("peak Π(|k|)=", round(maximum(iso.flux); sigdigits=3),
             "  Π(k⊥)=", round(maximum(perp.flux); sigdigits=3),
             "  Π(k∥)=", round(maximum(par.flux); sigdigits=3))
 
+    # Π[n] is the flux through the upper edge of shell n.
+    K(r) = r.shell_edges[2:end]
     fig = CairoMakie.Figure(size=(840, 480), fontsize=14)
     ax = CairoMakie.Axis(fig[1, 1], title="Isotropic vs Anisotropic Energy Flux — 3D Taylor–Green Vortex",
-        xlabel="shell wavenumber", ylabel="Π")
-    CairoMakie.lines!(ax, iso.k_shells,  iso.flux,  label="Π(|k|) isotropic",   linewidth=2.5, color=:black)
-    CairoMakie.lines!(ax, perp.k_shells, perp.flux, label="Π(k⊥) perpendicular", linewidth=2.5, color=:seagreen)
-    CairoMakie.lines!(ax, par.k_shells,  par.flux,  label="Π(k∥) parallel",      linewidth=2.5, color=:purple)
+        xlabel="wavenumber K", ylabel="Π(K)")
+    CairoMakie.lines!(ax, K(iso),  iso.flux,  label="Π(|k|) isotropic",   linewidth=2.5, color=:black)
+    CairoMakie.lines!(ax, K(perp), perp.flux, label="Π(k⊥) perpendicular", linewidth=2.5, color=:seagreen)
+    CairoMakie.lines!(ax, K(par),  par.flux,  label="Π(k∥) parallel",      linewidth=2.5, color=:purple)
     CairoMakie.hlines!(ax, [0]; color=:black, linewidth=0.8, linestyle=:dot)
     CairoMakie.axislegend(ax; position=:rt)
 

@@ -9,20 +9,19 @@ using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 
 # ---------------------------------------------------------------------------
-# Pencil axis: split ONE grid across ranks; transpose-based distributed FFT.
+# Pencil axis: one grid split across ranks; transpose-based distributed FFT.
 #
-# The pseudospectral nonlinear term N̂ = FFT[(u·∇)u]/Np is built with PencilFFTs
-# (LinearAlgebra.mul! = unnormalised forward fft, LinearAlgebra.ldiv! = normalised inverse ifft, matching the FFTW
-# extension's fft/ifft pair). The package coefficient convention is û = fft(u)/Np, so
-# u_phys = real(ifft(û)). Each rank owns a pencil of both the physical (input) and the
-# spectral (output) grid; products are pointwise-local, gradients/dealiasing use the
-# rank's local Fourier wavenumbers (via PencilArrays.localgrid, permutation-aware), and the per-shell
-# KE transfer spectrum is MPI.Allreduce'd to a global result identical on every rank and
-# equal to the serial calculate_spectral_flux on the same field.
+# The pseudospectral nonlinear term N̂ = FFT[(u·∇)u]/Np is built with PencilFFTs (`mul!` is the
+# unnormalised forward fft, `ldiv!` the normalised inverse). The package coefficient convention is
+# û = fft(u)/Np, so u_phys = Np·ifft(û). Each rank owns a pencil of both the physical (input) and the
+# spectral (output) grid; products are pointwise-local, gradients/dealiasing use the rank's local
+# Fourier wavenumbers (via PencilArrays.localgrid, permutation-aware), and the per-shell transfer
+# spectrum is MPI.Allreduce'd to a global result identical on every rank and equal to the serial
+# calculate_spectral_flux on the same field.
 #
-#   plan = build_pencil_plan(ns, comm)               # convenience below
-#   u    = ntuple(_ -> PencilFFTs.allocate_input(plan), D)      # fill each rank's LOCAL portion
-#   res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
+#   plan = build_pencil_plan(ns, comm)
+#   u    = ntuple(_ -> PencilFFTs.allocate_input(plan), D)      # fill each rank's local portion
+#   res  = pencil_spectral_flux(u, plan, ks; binning = FlowInvariantTransfer.Types.LinearBinning(dk))
 # ---------------------------------------------------------------------------
 
 # Implements the FIT.build_pencil_plan stub (docstring lives on the core stub).
@@ -36,10 +35,10 @@ function FIT.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Fl
     return PencilFFTs.PencilFFTPlan(ns, transforms, proc_dims, comm, T)
 end
 
-# Per-mode transfer density for the pencil (distributed) layout, IN PLACE into `d` (real spectral),
-# using `ω` (nd complex-spectral scratch buffers) for the helicity/enstrophy vorticity. Same KE /
-# helicity / enstrophy formulas as the serial `transfer_density!`, as broadcasts over each rank's LOCAL
-# spectral pencil arrays (û, N̂, local wavenumber components KC). 0-alloc (writes into caller buffers).
+# Per-mode transfer density for the pencil (distributed) layout, in place into `d` (real spectral),
+# with `ω` (nd complex-spectral scratch buffers) for the helicity/enstrophy vorticity: the formulas of
+# the serial `transfer_density!` as broadcasts over each rank's local spectral pencils (û, N̂, local
+# wavenumber components KC).
 function _pencil_transfer_density!(d, ::FIT.Types.KineticEnergy, û, Nhat, KC, nd, ω)
     fill!(d, zero(eltype(d)))
     for i in 1:nd
@@ -270,9 +269,9 @@ end
 # Reusable pencil workspace: the (geometry/dealiasing/binning-fixed) wavenumber grids + shell structure
 # and every per-snapshot scratch field, so `pencil_spectral_flux!` reuses them (0 alloc beyond the small
 # per-shell result vectors). Spectral-layout buffers via PencilFFTs.allocate_output; physical-layout via PencilFFTs.allocate_input.
-struct PencilWorkspace{PL, CM, KCT, KM, KP, SI, CE, UST, OT, SP, UPT, IB, WT, R, EX, IV, PD}
+struct PencilWorkspace{PL, CM, KCT, KM, KP, SI, CE, ED, UST, OT, SP, UPT, IB, WT, R, EX, IV, PD}
     plan::PL; comm::CM
-    KC::KCT; KD::KCT; KMAG::KM; KEEP::KP; W::KM; shell_idx::SI; centers::CE
+    KC::KCT; KD::KCT; KMAG::KM; KEEP::KP; W::KM; shell_idx::SI; centers::CE; edges::ED
     û::UST; Nhat::UST; ω::OT; spec::SP; dloc::KM
     uphys::UPT; N_i::IB; g::IB; ph::IB
     Tloc::WT; Np::R; do_trunc::Bool; nd::Int; inner::EX; invariant::IV
@@ -343,7 +342,7 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
     # Local execution backend (Serial default; ComputationalBackends.GPUBackend for a per-rank device pencil / multi-GPU,
     # possibly wrapped in ComputationalBackends.MPIBackend, unwrapped here). Drives the per-rank shell reduction below.
     inner = ComputationalBackends.local_backend(execution)
-    # Shell edges/centers from the GLOBAL max |k| (MPI.Allreduce → identical on all ranks); local shell index.
+    # Shell edges/centers from the global max |k| (MPI.Allreduce → identical on all ranks); local shell index.
     kmax = MPI.Allreduce(maximum(KMAG), max, comm)
     edges     = FIT.ShellBinning.shell_edges(binning, kmax)
     centers   = collect(FIT.ShellBinning.shell_centers(binning, kmax))
@@ -362,7 +361,7 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
     N_i   = PencilFFTs.allocate_input(plan)                     # nonlinear accumulator (physical)
     g     = PencilFFTs.allocate_input(plan)                     # gradient (physical)
     Tloc  = zeros(FT, length(centers))
-    return PencilWorkspace(plan, comm, KC, KD, KMAG, KEEP, W, shell_idx, centers,
+    return PencilWorkspace(plan, comm, KC, KD, KMAG, KEEP, W, shell_idx, centers, edges,
                            û, Nhat, ω, spec, dloc, uphys, N_i, g, ph, Tloc, Np, do_trunc, nd, inner, invariant,
                            pad)
 end
@@ -416,8 +415,8 @@ function FIT.pencil_spectral_flux!(ws::PencilWorkspace, u_phys::NTuple{D};
     # atomic device scatter-add (ComputationalBackends.GPUBackend, device-resident) — writes into the host `Tloc`, then reduce.
     FIT.ShellBinning.shell_scatter_add!(ws.Tloc, ws.dloc, ws.shell_idx, ws.inner)
     Tglob = MPI.Allreduce(ws.Tloc, +, ws.comm)     # global per-shell transfer
-    flux  = cumsum(Tglob)                           # Π(K) = Σ_{k≤K} T(k)
-    return (centers = ws.centers, transfer_spectrum = Tglob, flux = flux)
+    flux  = cumsum(Tglob)                           # Π[n]: the flux through shell_edges[n+1]
+    return (centers = ws.centers, shell_edges = ws.edges, transfer_spectrum = Tglob, flux = flux)
 end
 
 # Allocating convenience: build a one-shot workspace and delegate to the in-place form.

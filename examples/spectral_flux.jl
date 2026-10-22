@@ -19,12 +19,13 @@ function run_spectral_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FIT.Types.LinearBinning(2π / L)
-    result = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    result = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend())
 
+    K = result.shell_edges[2:end]          # Π[n] is the flux through the upper edge of shell n
     imax = argmax(result.flux)
     println("Shells: ", length(result.k_shells))
     println("Peak forward flux Π = ", round(maximum(result.flux); sigdigits=4),
-            " at k ≈ ", round(result.k_shells[imax]; digits=2))
+            " through K = ", round(K[imax]; digits=2))
 
     fig = CairoMakie.Figure(size=(960, 430), fontsize=14)
     CairoMakie.Label(fig[0, 1:2], "Spectral Energy Transfer — 3D Taylor–Green Vortex",
@@ -37,9 +38,9 @@ function run_spectral_flux_example(; N=32)
 
     ax2 = CairoMakie.Axis(fig[1, 2], title="Cumulative flux Π(K)  (>0 ⇒ forward cascade)",
         xlabel="wavenumber K", ylabel="Π(K)")
-    CairoMakie.band!(ax2, result.k_shells, zero(result.flux), result.flux;
+    CairoMakie.band!(ax2, K, zero(result.flux), result.flux;
         color=(:crimson, 0.18))
-    CairoMakie.lines!(ax2, result.k_shells, result.flux, color=:crimson, linewidth=2.5)
+    CairoMakie.lines!(ax2, K, result.flux, color=:crimson, linewidth=2.5)
     CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=0.8, linestyle=:dot)
 
     outpath = joinpath(@__DIR__, "spectral_flux.png")

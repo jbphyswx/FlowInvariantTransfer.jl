@@ -92,8 +92,8 @@ function run_tgv(; N=32, ν=0.005, dt=0.02, steps=150, frame_every=5)
         û3 = zeros(ComplexF64, N, N, N, 3)
         û3[:,:,:,1] .= uh ./ N^3; û3[:,:,:,2] .= vh ./ N^3; û3[:,:,:,3] .= wh ./ N^3
         s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û3, ks3;
-            binning=b, dealiasing=FIT.Types.OrszagTwoThirds(), verify_antisymmetry=false,
-            spectral=FIT.SpectralBackends.FFTSpectralBackend())
+            binning=b, dealiasing=FIT.Types.OrszagTwoThirds(),
+            transform=FIT.SpectralBackends.FFTSpectralBackend())
         return s2s.transfer_matrix, s2s.net_transfer
     end
 

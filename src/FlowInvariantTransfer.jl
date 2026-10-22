@@ -28,14 +28,9 @@ include("ScaleToScale/ModeToModeTransfer.jl")
 include("Compressible/CompressibleTransfer.jl")
 include("Spherical/SphericalTransfer.jl")
 
-# AutoBackend resolution is FIT-owned in `Types.resolve_execution` (not a method on
-# `ComputationalBackends.resolve_backend`, which would be type piracy) — see Types.jl.
-
 # ---------------------------------------------------------------------------
-# Public surface. Re-import the public names so `FlowInvariantTransfer.foo` resolves, but `export`
-# ONLY the entry-point functions — a bare `using FlowInvariantTransfer` brings in the verbs
-# (`calculate_*`, `triadic_orthogonal_decomposition`, `to_spectral`), never the method/binning/
-# geometry/dealiasing/result TYPES, which stay reachable qualified (`FlowInvariantTransfer.LinearBinning`).
+# Public surface: `export` covers the entry-point functions; the method, binning, geometry,
+# dealiasing and result types are reached qualified (`FlowInvariantTransfer.Types.LinearBinning`).
 # ---------------------------------------------------------------------------
 
 using .SpectralFlux: SpectralFlux, calculate_spectral_flux, calculate_spectral_flux!, calculate_spectral_flux_batch, calculate_scalar_flux, calculate_scalar_flux!, calculate_partial_fluxes, calculate_partial_fluxes!, calculate_partial_fluxes_batch, calculate_helical_partial_fluxes, calculate_helical_partial_fluxes!
@@ -72,8 +67,8 @@ rank applies `f` to a round-robin subset of `items` (e.g. snapshots of a time se
 per-item outputs are combined. With `reduce=:gather` (default) the results are **collated** into
 one `Vector` in the original order of `items`, returned on every rank; `reduce=:sum`/`:mean`
 returns the element-wise reduction (the outputs of `f` must support `+`, and `/` for `:mean`); a
-callable `reduce` is applied as a binary combiner. This is the "batch axis" of distribution —
-orthogonal to the pencil axis ([`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux)), which splits a single grid.
+callable `reduce` is applied as a binary combiner. For one grid split across ranks, see
+[`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux).
 
 Requires `using MPI` to load the extension.
 """
@@ -82,7 +77,8 @@ function mpi_batch_map(args...; kwargs...)
 end
 
 """
-    pencil_spectral_flux(u_phys, plan, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant, geometry, execution) -> (centers, transfer_spectrum, flux)
+    pencil_spectral_flux(u_phys, plan, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant, geometry, execution)
+        -> (centers, shell_edges, transfer_spectrum, flux)
 
 Distributed spectral transfer/flux for a single grid split across MPI ranks along the **pencil
 axis**: `u_phys` is the physical-space velocity as an `NTuple{D, PencilArray}` (one component per
@@ -90,8 +86,8 @@ entry; each rank owns a pencil of the global grid) and `plan` is a distributed F
 [`build_pencil_plan`](@ref). The pseudospectral nonlinear term is evaluated with a transpose-based
 distributed FFT (PencilFFTs), the transfer density is shell-binned locally, and the per-shell
 spectrum is `MPI.Allreduce`d to a global result identical on every rank (matching the serial
-[`calculate_spectral_flux`](@ref) on the same field). Use this when one snapshot's grid is too
-large for a single node; for many independent snapshots use [`mpi_batch_map`](@ref) instead.
+[`calculate_spectral_flux`](@ref) on the same field). For many independent snapshots, see
+[`mpi_batch_map`](@ref).
 
 Requires `using MPI, PencilFFTs, PencilArrays` to load the extension.
 """
@@ -114,7 +110,8 @@ end
 
 """
     PencilWorkspace(plan, ks, comm=MPI.COMM_WORLD; binning, dealiasing=OrszagTwoThirds(),
-                    geometry=IsotropicShells(), execution=SerialBackend()) -> PencilWorkspace
+                    geometry=IsotropicShells(), invariant=KineticEnergy(), execution=SerialBackend())
+        -> PencilWorkspace
 
 Reusable workspace for [`pencil_spectral_flux!`](@ref): the (geometry/dealiasing/binning-fixed)
 wavenumber grids + shell structure and every per-snapshot scratch field, so a repeated distributed
@@ -130,11 +127,12 @@ function PencilWorkspace(args...; kwargs...)
 end
 
 """
-    pencil_spectral_flux!(ws::PencilWorkspace, u_phys; invariant=KineticEnergy())
-        -> (centers, transfer_spectrum, flux)
+    pencil_spectral_flux!(ws::PencilWorkspace, u_phys; invariant=ws.invariant)
+        -> (centers, shell_edges, transfer_spectrum, flux)
 
 In-place distributed pencil spectral flux reusing `ws` (0 alloc beyond the small result vectors) — build
-`ws` once and loop over snapshots of the same distributed grid. Requires `using MPI, PencilFFTs, PencilArrays`.
+`ws` once and loop over snapshots of the same distributed grid. `invariant` must be the one `ws` was
+built for. Requires `using MPI, PencilFFTs, PencilArrays`.
 """
 function pencil_spectral_flux!(args...; kwargs...)
     throw(ArgumentError("pencil_spectral_flux! requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
@@ -160,26 +158,23 @@ export plot_energy_transfer
 
 include("Scattered.jl")
 
-# Unified scattered-Cartesian coarse-graining entry, through the one-shot in Scattered.jl. The
-# 4-positional (…, scatter_coords, ms) form disambiguates it from the uniform-grid
-# `calculate_energy_transfer` methods.
+# Scattered-Cartesian coarse-graining entry. The 4-positional (…, scatter_coords, ms) form separates it
+# from the uniform-grid `calculate_energy_transfer` methods.
 function calculate_energy_transfer(method::Types.CoarseGrainingFluxMethod, velocity_fields::Tuple,
                                    scatter_coords::Tuple, ms::Tuple; kwargs...)
     return nufft_coarse_graining_flux(velocity_fields, scatter_coords, method.scale, method.filter, ms; kwargs...)
 end
 
-# Physical-space one-call entry for the spectral-flux / shell / mode family, covering BOTH scattered
-# (non-uniform) and uniform-grid Cartesian data. One method owns the 4-positional (…, coords, ms) form;
-# the transform step dispatches on the spectral backend (`_physical_energy_transfer`) so the two data
-# layouts route cleanly instead of colliding: a NUFFT provider reconstructs from scattered samples, any
-# other backend goes through the FlowFieldSpectra uniform-grid path. The 4-positional form disambiguates
-# from the uniform coefficient methods (…, velocity_hat, ks).
+# Physical-space entry for the spectral-flux / shell / mode family on scattered and uniform-grid
+# Cartesian data. The 4-positional (…, coords, ms) form separates it from the coefficient methods
+# (…, velocity_hat, ks). `_physical_energy_transfer` dispatches on `transform`: a NUFFT backend
+# reconstructs from scattered samples, any other goes through the FlowFieldSpectra uniform-grid path.
 const _SpectralFamilyMethod = Union{Types.SpectralFluxMethod, Types.ShellToShellTransferMethod, Types.ModeToModeTransferMethod}
 
 function calculate_energy_transfer(method::_SpectralFamilyMethod, velocity_fields::Tuple, domain, ms::Tuple;
-                                   spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+                                   transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
                                    kwargs...)
-    return _physical_energy_transfer(spectral, method, velocity_fields, domain, ms; kwargs...)
+    return _physical_energy_transfer(transform, method, velocity_fields, domain, ms; kwargs...)
 end
 
 # Scattered NUFFT branch: reconstruct `velocity_hat` on the scattered samples, then run the uniform
@@ -187,26 +182,27 @@ end
 # and the diagnostic.
 function _physical_energy_transfer(spectral::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
                                    method::_SpectralFamilyMethod, velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
-                                   Ls::Tuple, tol::Real = 1e-9,
+                                   Ls::Tuple, tol::Union{Nothing, Real} = nothing,
+                                   weights::Union{Nothing, AbstractVector} = nothing,
                                    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
                                    kwargs...)
-    velocity_hat, ks = to_spectral(velocity_fields, scatter_coords, ms; spectral = spectral, Ls = Ls, tol = tol, execution = execution)
+    velocity_hat, ks = to_spectral(velocity_fields, scatter_coords, ms; transform = spectral, Ls = Ls, tol = tol,
+                                   weights = weights, execution = execution)
     return calculate_energy_transfer(method, velocity_hat, ks; execution = execution, kwargs...)
 end
 
-# Uniform-grid branch: the FlowFieldSpectra extension adds the concrete (more specific) method (physical
-# → spectral on a structured grid). This varargs catch-all is the fallback when it is not loaded — a
-# non-NUFFT backend then has no physical transform here. (A catch-all, not the FFS signature: an
-# extension may not overwrite a same-signature parent method during precompilation.)
+# Uniform-grid branch: the FlowFieldSpectra extension adds the concrete method. This varargs method
+# throws when that extension is not loaded; its signature stays distinct from the extension's, since an
+# extension that overwrites a parent method fails to precompile.
 _physical_energy_transfer(spectral::SpectralBackends.AbstractSpectralBackend, args...; kwargs...) = throw(ArgumentError(
     "uniform-grid physical → spectral transfer requires `using FlowFieldSpectra`; for scattered (non-uniform) " *
-    "Cartesian data pass a NUFFT library (spectral = FlowTransformBindings.NonuniformFFTsBackend() / " *
+    "Cartesian data pass a NUFFT library (transform = FlowTransformBindings.NonuniformFFTsBackend() / " *
     "FlowTransformBindings.FINUFFTBackend()) with `Ls`."))
 
 export nufft_coarse_graining_flux, nufft_coarse_graining_flux!, nufft_coarse_graining_flux_batch,
        NUFFTCoarseGrainingWorkspace
 export ToSpectralWorkspace
-export NUFFTToSpectralWorkspace, to_spectral!
+export NUFFTToSpectralWorkspace, to_spectral, to_spectral!
 
 # ---------------------------------------------------------------------------
 # Unified entry point
@@ -215,21 +211,25 @@ export NUFFTToSpectralWorkspace, to_spectral!
 """
     calculate_energy_transfer(method, velocity_data, coords_or_ks; kwargs...)
 
-Unified entry point for all energy transfer computations.
+Run the diagnostic `method` names and return its result container.
 
 # Arguments
 - `method::AbstractEnergyTransferMethod`: Which method to use:
-  - `SpectralFluxMethod(binning)` — spectral flux Π(K)
-  - `CoarseGrainingFluxMethod(filter, ℓ)` — coarse-graining flux Π_ℓ(x)
-  - `ShellToShellTransferMethod(binning)` — shell-to-shell T(n,m)
-- `velocity_data`: For spectral methods, a complex array of size `(ns..., D)` containing
+  - `SpectralFluxMethod(binning)` — spectral flux Π(K) → `SpectralFluxResult`
+  - `ShellToShellTransferMethod(binning)` — shell-to-shell T(n,m) → `ShellToShellResult`
+  - `ModeToModeTransferMethod(; invariant)` — mode-to-mode S(k|p) → `ModeToModeTriadResult`
+  - `CoarseGrainingFluxMethod(filter, ℓ)` — coarse-graining flux Π_ℓ(x) → `CoarseGrainingFluxResult`
+  - `TriadicOrthogonalDecompositionMethod(; nfft, noverlap, nmode)` — called as
+    `calculate_energy_transfer(method, X; kwargs...)` on snapshots `X` →
+    `TriadicOrthogonalDecompositionResult`
+- `velocity_data`: For spectral methods, a complex array of size `(ms..., D)` containing
   Fourier coefficients; for coarse-graining, a tuple of D real physical-space arrays.
 - `coords_or_ks`: For spectral methods, a tuple of 1D wavenumber vectors; for
   coarse-graining, a tuple of 1D coordinate vectors.
 
 Physical-space Cartesian data uses the 4-positional form
-`calculate_energy_transfer(method, velocity_fields, coords, ms; spectral, …)`, which routes on the
-spectral backend: a NUFFT library (`FlowTransformBindings.NonuniformFFTsBackend()` /
+`calculate_energy_transfer(method, velocity_fields, coords, ms; transform, …)`, which routes on
+`transform`: a NUFFT library (`FlowTransformBindings.NonuniformFFTsBackend()` /
 `FlowTransformBindings.FINUFFTBackend()`, with `Ls`) reconstructs from **scattered** samples, while any
 other backend transforms **uniform-grid** data through
 FlowFieldSpectra (`using FlowFieldSpectra`; `coords` are the per-axis grid vectors). Coarse-graining has
@@ -237,24 +237,19 @@ the same 4-positional scattered route. Spherical data uses
 `calculate_energy_transfer(SphericalTransferMethod(), ζ, (θ, φ); lmax, …)` (scattered, NUFSHT) or a
 regular colatitude–longitude grid (FastSphericalHarmonics).
 
-# Returns
-Method-specific result container: `SpectralFluxResult`, `CoarseGrainingFluxResult`,
-or `ShellToShellResult`.
-
 # Examples
 ```julia
-using FlowInvariantTransfer, FFTW
+using FlowInvariantTransfer, FlowFieldSpectra, FFTW
+const FIT = FlowInvariantTransfer
 
 # Spectral flux on a 32×32 periodic domain
 N = 32; L = 2π
 x = range(0.0, L; length=N+1)[1:N]
-y = range(0.0, L; length=N+1)[1:N]
-u = [cos(x) for x in x, y in y]
-v = [sin(y) for x in x, y in y]
-û = cat(FFTW.fft(u), FFTW.fft(v); dims=3) ./ N^2  # (N,N,2)
-ks = FlowInvariantTransfer.Utils.wavenumber_grid((N,N), (L,L))
+u = [cos(xi) * sin(yj) for xi in x, yj in x]
+v = [-sin(xi) * cos(yj) + 0.3 * sin(2yj) for xi in x, yj in x]
+û, ks = to_spectral((u, v), (x, x))                  # real fields: the half layout
 
-result = calculate_energy_transfer(SpectralFluxMethod(LinearBinning(2π/L)), û, ks)
+result = calculate_energy_transfer(FIT.Types.SpectralFluxMethod(FIT.Types.LinearBinning(2π/L)), û, ks)
 ```
 """
 function calculate_energy_transfer(
@@ -309,7 +304,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    to_spectral(velocity_fields::Tuple, coords_vecs::Tuple; spectral=SpectralBackends.FFTSpectralBackend()) -> (velocity_hat, ks)
+    to_spectral(velocity_fields::Tuple, coords_vecs::Tuple; transform=SpectralBackends.AutoSpectralBackend()) -> (velocity_hat, ks)
 
 Forward-transform physical-space velocity components sampled on a **uniform, periodic, tensor-product
 Cartesian grid** into the Fourier-coefficient input `(velocity_hat, ks)` consumed by every Cartesian
@@ -321,12 +316,15 @@ here once with the package's `û = fft(u)/Nᵈ` normalization (so `E(k) = ½|û|
 wavenumber convention — you do not build `û`/`ks` by hand.
 
 `coords_vecs` are the **1D coordinate vectors** `(x, y[, z])` of the grid, one vector of length `nₐ`
-per axis. Scattered (non-uniform) Cartesian data takes the 3-argument form with a NUFFT library
-(`spectral = FlowTransformBindings.NonuniformFFTsBackend()` or `FlowTransformBindings.FINUFFTBackend()`),
+per axis, each `nₐ` periodic samples `x₁, x₁ + Δ, …, x₁ + (nₐ−1)Δ` of the period `L = nₐΔ` (uniform to
+`√eps` of their float type, `Float32` or `Float64`). A vector that ends at `x₁ + L` repeats its first
+sample; drop that sample, or pass a `FlowGeometries` grid, which carries its period.
+Scattered (non-uniform) Cartesian data takes the 3-argument form with a NUFFT library
+(`transform = FlowTransformBindings.NonuniformFFTsBackend()` or `FlowTransformBindings.FINUFFTBackend()`),
 and spherical data [`calculate_spherical_transfer`](@ref); see [`spectral_geometry`](@ref).
 
 # Keyword Arguments
-- `spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
+- `transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
   `using FFTW` (cuFFT is used automatically for device-array inputs); `SpectralBackends.DirectSumSpectralBackend()` is the
   dependency-free `O(N²ᴰ)` reference (tiny grids only).
 
@@ -336,17 +334,17 @@ field yields a device coefficient array); `ks` a tuple of `D` wavenumber vectors
 
 # Example
 ```julia
-using FlowInvariantTransfer, FFTW
+using FlowInvariantTransfer, FlowFieldSpectra, FFTW
 û, ks = to_spectral((u, v), (x, y))
-Π = calculate_spectral_flux(û, ks; spectral = SpectralBackends.FFTSpectralBackend())
+result = calculate_spectral_flux(û, ks)
 ```
 
 Pass a scalar (density / pressure / passive scalar) as a 1-tuple: `ρ̂, _ = to_spectral((ρ,), coords)`.
 """
 function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
-                     spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+                     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
                      real_layout::Bool = eltype(velocity_fields[1]) <: Real, kwargs...)
-    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; spectral = spectral,
+    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; transform = transform,
                              real_layout = real_layout, kwargs...)
     return to_spectral!(ws, velocity_fields)
 end
@@ -369,7 +367,7 @@ Base.show(io::IO, ::ToSpectralWorkspace) = print(io, "ToSpectralWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::ToSpectralWorkspace) = show(io, w)
 
 """
-    ToSpectralWorkspace(velocity_fields, coords_vecs; spectral, real_layout=true)
+    ToSpectralWorkspace(velocity_fields, coords_vecs; transform, real_layout=true)
 
 Build the reusable uniform-grid analysis workspace. `real_layout = true` (the default for real input
 fields) stores the non-redundant half spectrum; see [`to_spectral`](@ref).
@@ -410,7 +408,7 @@ function to_spectral!(ws::ToSpectralWorkspace, velocity_fields::Tuple)
 end
 
 """
-    ToSpectralWorkspace(velocity_hat::AbstractArray, ks::Tuple; spectral=AutoSpectralBackend())
+    ToSpectralWorkspace(velocity_hat::AbstractArray, ks::Tuple; transform=AutoSpectralBackend())
 
 Build the workspace from the coefficient side, sizing the physical buffer from `ks` — the form
 [`from_spectral`](@ref) needs. The same workspace drives both directions, so a loop that transforms
@@ -451,7 +449,7 @@ function from_spectral!(ws::ToSpectralWorkspace, velocity_hat::AbstractArray)
 end
 
 """
-    from_spectral(velocity_hat, ks; spectral=AutoSpectralBackend()) -> velocity_fields
+    from_spectral(velocity_hat, ks; transform=AutoSpectralBackend()) -> velocity_fields
 
 Synthesise physical-space components from Fourier coefficients on a uniform periodic Cartesian grid —
 the inverse of [`to_spectral`](@ref), and its normalization: `u = Σ û e^{ik·x}`. Accepts either
@@ -462,8 +460,8 @@ The components come back as a tuple of views into one backing array, mirroring t
 for the stacked array and plan reuse across snapshots.
 """
 function from_spectral(velocity_hat::AbstractArray, ks::Tuple;
-                       spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend())
-    ws = ToSpectralWorkspace(velocity_hat, ks; spectral = spectral)
+                       transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend())
+    ws = ToSpectralWorkspace(velocity_hat, ks; transform = transform)
     phys = from_spectral!(ws, velocity_hat)
     nd = length(ks)
     colons = ntuple(_ -> Colon(), nd)
@@ -473,7 +471,7 @@ end
 export from_spectral, from_spectral!
 
 # ---------------------------------------------------------------------------
-# Precompilation workload (small grid to reduce TTFX)
+# Precompilation workload
 # ---------------------------------------------------------------------------
 
 PrecompileTools.@setup_workload begin
@@ -486,16 +484,15 @@ PrecompileTools.@setup_workload begin
     û[2, 1, 1] = 0.5    # single mode u
     û[1, 2, 2] = 0.5    # single mode v
 
-    # Precompilation runs without the FFTW extension loaded, so the backend is named explicitly: this
-    # is the one available here, and naming it keeps `resolve_spectral`'s fallback warning out of the
-    # precompile output.
+    # The FFTW extension is not loaded during precompilation; naming the direct-sum backend keeps
+    # `resolve_transform`'s fallback warning out of the precompile output.
     ds = SpectralBackends.DirectSumSpectralBackend()
 
     PrecompileTools.@compile_workload begin
         _ = calculate_spectral_flux(û, ks; binning=Types.LinearBinning(2π/L),
-                dealiasing=Types.NoDealiasing(), spectral=ds)
+                dealiasing=Types.NoDealiasing(), transform=ds)
         _ = calculate_shell_to_shell_transfer(û, ks; binning=Types.LinearBinning(2π/L),
-                dealiasing=Types.NoDealiasing(), verify_antisymmetry=false, spectral=ds)
+                dealiasing=Types.NoDealiasing(), transform=ds)
         _ = Utils.wavenumber_grid((N,N), (L,L))
     end
 end

@@ -21,23 +21,24 @@ function run_mode_to_mode_example(; N=24)
     b = FIT.Types.LinearBinning(2π / L)
 
     # Fully-resolved S(k|p): O(N^{2D}); FFTSpectralBackend keeps each per-giver term O(N^D log N).
-    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend())
     S = m2m.transfer
 
-    # Reduce S(k|p) over shells → T(K,Q).
+    # Reduce w(k)·S(k|p) over shells → T(K,Q); w(k) counts the modes each stored slot stands for.
     kmag = FIT.Utils.wavenumber_magnitude_grid(ks)
     edges = FIT.ShellBinning.shell_edges(b, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
     K = FIT.ShellBinning.shell_centers(b, maximum(kmag)); Nsh = length(K)
     TKQ = zeros(Nsh, Nsh)
-    for kI in CartesianIndices((N, N)), pI in CartesianIndices((N, N))
+    slots = CartesianIndices(size(m2m.net_transfer))
+    for kI in slots, pI in slots
         n = sidx[kI]; m = sidx[pI]
         (n == 0 || m == 0) && continue
-        TKQ[n, m] += S[kI, pI]
+        TKQ[n, m] += m2m.weights[kI] * S[kI, pI]
     end
 
     # Direct shell-to-shell T(n,m) for comparison.
     s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
-        verify_antisymmetry=false, spectral=FIT.SpectralBackends.FFTSpectralBackend())
+        transform=FIT.SpectralBackends.FFTSpectralBackend())
     Tdir = s2s.transfer_matrix
     println("max|reduce(S) − T_shell| / ‖T‖ = ",
             round(maximum(abs, TKQ .- Tdir) / sqrt(sum(abs2, Tdir)); sigdigits=3))

@@ -13,7 +13,8 @@ using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 Dispatch to the appropriate plot function based on result type.
 
 - `SpectralFluxResult`: plots T(k) and Π(K) on semi-log axes.
-- `CoarseGrainingFluxResult`: heatmap of Π_ℓ(x) (2D only).
+- `CoarseGrainingFluxResult`: heatmap of Π_ℓ(x); a 3-D field shows the plane `slice` of its third
+  axis (keyword, default 1).
 - `ShellToShellResult`: heatmap of T(n,m) with diverging colormap.
 - `TriadicOrthogonalDecompositionResult`: the mode bispectrum λ(f_l, f_n) and modal energy budget
   T(f_l, f_n) as heatmaps (Yeung–Chu–Schmidt Fig. 4 style).
@@ -45,6 +46,8 @@ function _plot_spectral_flux(r::FIT.Types.SpectralFluxResult;
     k = r.k_shells
     positive_k = k .> 0
     k_pos = k[positive_k]
+    # Π[n] is the flux through the shell's upper edge.
+    K = r.shell_edges[2:end]
 
     fig = CairoMakie.Figure(size = (900, 400))
     CairoMakie.Label(fig[0, :], title; fontsize = 18, font = :bold)
@@ -66,7 +69,7 @@ function _plot_spectral_flux(r::FIT.Types.SpectralFluxResult;
         ylabel = "Π(K)",
         xscale = xscale,
     )
-    CairoMakie.lines!(ax2, k_pos, r.flux[positive_k]; color = :crimson, linewidth = 2)
+    CairoMakie.lines!(ax2, K, r.flux; color = :crimson, linewidth = 2)
     CairoMakie.hlines!(ax2, [0.0]; color = :black, linewidth = 0.7, linestyle = :dash)
 
     return fig
@@ -76,35 +79,30 @@ end
 # CoarseGrainingFluxResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_cg_flux(r::FIT.Types.CoarseGrainingFluxResult{FT, N};
+function _plot_cg_flux(r::FIT.Types.CoarseGrainingFluxResult;
     title::String = "Coarse-Graining Energy Flux Π_ℓ(x)",
-) where {FT, N}
-    N == 2 || @warn "plot_energy_transfer: CoarseGrainingFluxResult has $N spatial dimensions; only 2D heatmaps are supported."
+    slice::Integer = 1,
+)
+    N = ndims(r.flux_field)
+    N in (2, 3) || throw(ArgumentError(
+        "plot_energy_transfer draws a 2-D field or a plane of a 3-D one; this flux field has $N dimensions"))
+    Π = N == 2 ? r.flux_field : view(r.flux_field, :, :, slice)
+    where_ = N == 2 ? "" : ", z index $slice"
 
     fig = CairoMakie.Figure()
     ax  = CairoMakie.Axis(fig[1, 1];
-        title  = "$title  [ℓ = $(round(r.filter_scale; sigdigits=4))]",
+        title  = "$title  [ℓ = $(round(r.filter_scale; sigdigits=4))$where_]",
         xlabel = "x",
         ylabel = "y",
         aspect = CairoMakie.DataAspect(),
     )
-
-    if N == 2
-        Π  = r.flux_field
-        nx, ny = size(Π)
-        # Symmetric colormap around zero
-        vmax = maximum(abs, Π)
-        hm = CairoMakie.heatmap!(ax, 1:nx, 1:ny, Π;
-            colormap = :RdBu_9,
-            colorrange = (-vmax, vmax),
-        )
-        CairoMakie.Colorbar(fig[1, 2], hm; label = "Π_ℓ")
-    else
-        # Fallback: plot first slice
-        CairoMakie.text!(ax, 0.5, 0.5; text = "3D result — plotting first slice",
-            align = (:center, :center))
-    end
-
+    nx, ny = size(Π)
+    vmax = maximum(abs, Π)
+    hm = CairoMakie.heatmap!(ax, 1:nx, 1:ny, Π;
+        colormap = :RdBu_9,
+        colorrange = (-vmax, vmax),
+    )
+    CairoMakie.Colorbar(fig[1, 2], hm; label = "Π_ℓ")
     return fig
 end
 
@@ -112,9 +110,9 @@ end
 # ShellToShellResult plot
 # ---------------------------------------------------------------------------
 
-function _plot_shell_transfer_matrix(r::FIT.Types.ShellToShellResult{FT};
+function _plot_shell_transfer_matrix(r::FIT.Types.ShellToShellResult;
     title::String = "Shell-to-Shell Transfer T(n,m)",
-) where {FT}
+)
     T    = r.transfer_matrix
     N_sh = size(T, 1)
     k    = r.shell_centers
@@ -122,11 +120,11 @@ function _plot_shell_transfer_matrix(r::FIT.Types.ShellToShellResult{FT};
     fig  = CairoMakie.Figure(size = (800, 650))
     CairoMakie.Label(fig[0, :], title; fontsize = 18, font = :bold)
 
-    # Transfer matrix heatmap (diverging)
+    # T[n, m] at (n, m): the shell that gives energy on x, the shell that receives it on y.
     ax1  = CairoMakie.Axis(fig[1, 1];
         title  = "T(n,m)",
-        xlabel = "Donor shell m",
-        ylabel = "Receiver shell n",
+        xlabel = "Giving shell n",
+        ylabel = "Receiving shell m",
     )
     vmax = maximum(abs, T)
     hm   = CairoMakie.heatmap!(ax1, 1:N_sh, 1:N_sh, T;
@@ -137,7 +135,7 @@ function _plot_shell_transfer_matrix(r::FIT.Types.ShellToShellResult{FT};
 
     # Net transfer bar chart
     ax2 = CairoMakie.Axis(fig[2, 1:2];
-        title  = "Net Transfer Σ_m T(n,m) per Receiver Shell",
+        title  = "Net Transfer Σ_m T(n,m) = −dE_n/dt",
         xlabel = "Shell center k",
         ylabel = "Net T(n)",
     )
@@ -156,12 +154,11 @@ end
 """
     _plot_tod_bispectrum(r; mode=1, fmax=nothing, title="Triadic Orthogonal Decomposition")
 
-Reusable bispectrum figure for a TOD result: the mode bispectrum `λ(f_l, f_n)` (triadic coupling
-strength, sequential colormap) and the modal energy budget `T(f_l, f_n)` (signed energy flow,
-diverging colormap) for the selected `mode` (default the leading mode). `f_n` is restricted to the
-non-negative half (real data); pass `fmax` to clip the symmetric `f_l` band. Mirrors the paper's
-Fig. 4 panels; the per-triad recipient/convective *mode shapes* are problem-specific and left to
-the caller (see `examples/triadic_orthogonal_decomposition.jl`).
+Bispectrum figure for a TOD result: the mode bispectrum `λ(f_l, f_n)` (triadic coupling strength,
+sequential colormap) and the modal energy budget `T(f_l, f_n)` (signed energy flow, diverging
+colormap) for the selected `mode` (default the leading mode), as in Yeung, Chu & Schmidt (2026,
+Fig. 4). `f_n` is restricted to the non-negative half (real data); pass `fmax` to clip the symmetric
+`f_l` band.
 """
 function _plot_tod_bispectrum(r::FIT.Types.TriadicOrthogonalDecompositionResult;
     mode::Int = 1,

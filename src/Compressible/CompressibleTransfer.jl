@@ -23,19 +23,13 @@ export calculate_compressible_flux, calculate_compressible_flux!, calculate_comp
 #
 #     T_u(k) = ½ Re{ û*(k)·𝒩̂₁(k) } + ½ Re{ v̂*(k)·𝒩̂₂(k) }
 #     𝒩₁ = (u·∇)v + v(∇·u) = ∂_j(v ⊗ u)_j ,   𝒩₂ = (u·∇)u ,   v = ρu.
-#
-# This reference works entirely by explicit DFT/IDFT (dependency-free, exact), mirroring the
-# SpectralBackends.DirectSumSpectralBackend philosophy of the incompressible path; small grids only, correctness-first.
 # ---------------------------------------------------------------------------
 
-# Direct transforms on the spatial dimensions of an (ms..., C) coefficient / (ns..., C) physical field.
-# Convention matches NonlinearTerm.jl: analysis Σ_x f(x) e^{-i k·x}/N, synthesis Σ_k f̂(k) e^{+i k·x},
-# with x_d = (I_d-1)/n_d and integer wavenumber index k_d.
-#
-# The physical side of every transform below is REAL: these fields (velocity, density, momentum,
-# their gradients, the nonlinear terms) are real by construction, and the synthesis of a Hermitian
-# spectrum is real. Synthesis sums the stored coefficients with the Hermitian weight, which equals
-# the full-spectrum sum on either layout (`FlowTransformBindings.mode_fold`).
+# Direct transforms on the spatial dimensions of an (ms..., C) coefficient / (ns..., C) physical field:
+# analysis Σ_x f(x) e^{-i k·x}/N, synthesis Σ_k f̂(k) e^{+i k·x}, with x_d = (I_d-1)/n_d and integer
+# wavenumber index k_d. The physical side is real, the synthesis of a Hermitian spectrum. Synthesis
+# sums the stored coefficients with the Hermitian weight (`FlowTransformBindings.mode_fold`), equal
+# to the full-spectrum sum on either layout.
 @inline function _synth_at(field_hat, c, ks, xI, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}, kfac) where {nd}
     FT = real(eltype(field_hat))
     acc = zero(complex(FT))
@@ -91,26 +85,17 @@ function _grad_phys!(g, field_hat, ks, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}, k
 end
 
 # ---------------------------------------------------------------------------
-# Transform context — swappable analysis/synthesis/gradient primitives so the physics assembly is
-# written once and the transform algorithm is chosen by the spectral backend: the core provides the
-# dependency-free explicit-DFT context (`SpectralBackends.DirectSumSpectralBackend`), and the FlowInvariantTransferFFTWExt
-# extension provides the O(Nᵈ log Nᵈ) FFT context (`SpectralBackends.FFTSpectralBackend`), reusing preplanned FFTs + scratch.
+# Transform context: the analysis/synthesis/gradient primitives, chosen by `transform`. The
+# core builds the explicit-DFT context (`SpectralBackends.DirectSumSpectralBackend`); the FFTW
+# extension builds the FFT context (`SpectralBackends.FFTSpectralBackend`) on preplanned transforms.
 #
-#   tf.idft(field_hat)  : spectral (ms...,C) → physical (ns...,C) REAL   (synthesis, u = Σ û e^{ik·x})
-#   tf.dft(field_phys)  : physical (ns...,C) REAL → spectral (ms...,C)   (analysis, û = fft/Nᵈ)
-#   tf.grad(field_hat)  : spectral (ms...,C) → physical gradients (ns...,C,nd) REAL
+#   tf.idft!(out, fh) : spectral (ms...,C) → real physical (ns...,C)   (synthesis, u = Σ û e^{ik·x})
+#   tf.dft!(out, fp)  : real physical (ns...,C) → spectral (ms...,C)   (analysis, û = fft/Nᵈ)
+#   tf.grad!(g, fh)   : spectral (ms...,C) → real physical gradients (ns...,C,nd)
 #
-# The physical side is real throughout: these fields are real by construction and the synthesis of a
-# Hermitian spectrum is real, so nothing is carried as a complex "physical" array and no `real(...)`
-# pass follows a transform. `ms` is the coefficient shape and `ns` the grid; they differ on the half
-# layout.
+# `ms` is the coefficient shape and `ns` the grid; they differ on the half layout.
 # ---------------------------------------------------------------------------
-#   In-place siblings write into a caller buffer (for the workspace path): tf.idft!(out, fh),
-#   tf.dft!(out, fp), tf.grad!(g, fh).
-struct TransformContext{ID, DF, GR, IDB, DFB, GRB}
-    idft::ID
-    dft::DF
-    grad::GR
+struct TransformContext{IDB, DFB, GRB}
     idft!::IDB
     dft!::DFB
     grad!::GRB
@@ -118,29 +103,21 @@ end
 
 function _directsum_tf(ks, ns::NTuple{nd,Int}, kd) where {nd}
     ms = FTB.spectral_size(ks)
-    FT = float(eltype(ks[1]))
-    CT = complex(FT)
     return TransformContext(
-        fh -> _idft!(Array{FT}(undef, ns..., size(fh, nd + 1)), fh, ks, ns, ms),
-        fp -> _dft!(Array{CT}(undef, ms..., size(fp, nd + 1)), fp, ks, ns, ms),
-        fh -> _grad_phys!(Array{FT}(undef, ns..., size(fh, nd + 1), nd), fh, ks, ns, ms, kd),
         (out, fh) -> _idft!(out, fh, ks, ns, ms),
         (out, fp) -> _dft!(out, fp, ks, ns, ms),
         (g, fh) -> _grad_phys!(g, fh, ks, ns, ms, kd),
     )
 end
 
-# The FFT context is provided by FlowInvariantTransferFFTWExt; this fallback (less specific than the
-# extension's method) gives a clear error when a non-DirectSum backend is requested without FFTW.
-# `fft_nthreads` pins the FFTW plan thread count (baked into the plan → no per-call scratch alloc); the
-# threaded execution path passes `> 1` so the single-pipeline FFTs run multithreaded (no outer loop).
+# The FFTW extension adds the FFT context as a more specific method; this one throws without FFTW.
+# `fft_nthreads` is the plans' FFTW thread count, `> 1` under `ThreadedBackend`.
 _fft_tf(velocity_hat, ks, ns, kd; fft_nthreads::Int = 1) = throw(ArgumentError(
     "calculate_compressible_flux with an FFT backend requires `using FFTW`; " *
-    "or pass `spectral = SpectralBackends.DirectSumSpectralBackend()` for the dependency-free (slow, small-grid) path."))
+    "or pass `transform = SpectralBackends.DirectSumSpectralBackend()` for the dependency-free (slow, small-grid) path."))
 
-# Explicit per-backend transform contexts — NO `::SpectralBackends.AbstractSpectralBackend` catch-all: a catch-all
-# silently routed the scattered/spherical backends through the FFT context (wrong answers, no error).
-# The public entry validates the backend (`require_coefficient_spectral`), so only DirectSum/FFT reach here.
+# One method per coefficient backend and no catch-all: the public entries validate the backend with
+# `require_coefficient_transform`, so only the direct sum and the FFT reach here.
 _resolve_tf(::SpectralBackends.DirectSumSpectralBackend, proto, ks, ns, kd; fft_nthreads::Int = 1) =
     _directsum_tf(ks, ns, kd)
 _resolve_tf(::SpectralBackends.FFTSpectralBackend, proto, ks, ns, kd; fft_nthreads::Int = 1) =
@@ -162,10 +139,13 @@ vectors of each result). Build once for a given grid/precision and reuse across 
 The products are formed on the working grid: the caller's grid, or under `PaddedThreeHalves` the grid
 padded for the transfer's cubic products. The densities are taken on the caller's grid, from the
 working grid's spectral outputs (`coarse`, the same arrays unless padded).
+
+Every buffer lives in the memory the workspace's `execution` computes in. A workspace on a device built
+from a host array holds in `stage` the device buffers its host inputs are copied into once per call.
 """
-struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM, CO, RM, SI, CE}
+struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM, CO, RM, SI, CE, ED, ST}
     dealiasing::DA
-    ks::KS; kd::KD; kdc::KD        # working-grid axes and derivative wavenumbers; the caller grid's
+    ks::KS; kd::KD; kdc::KD        # working-grid axes and derivative wavenumbers; `kdc` the caller grid's
     tf::TF
     vel::CA; ρh::CS; v̂::CA; N̂1::CA; N̂2::CA
     u_phys::RA; v_phys::RA; N1_phys::RA; N2_phys::RA
@@ -176,9 +156,10 @@ struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM,
     maps::PM                      # `FlowTransformBindings.PaddedMaps` under padding, else `nothing`
     coarse::CO                    # (v̂, N̂1, N̂2) on the caller's grid
     td::RM                        # per-mode density on the caller's grid
-    sidx::SI; centers::CE         # shell structure of the caller's grid
+    sidx::SI; centers::CE; edges::ED   # shell structure of the caller's grid
     ns::NTuple{ND, Int}           # working physical grid
     ms::NTuple{ND, Int}           # working coefficient grid (differs from `ns` on the half layout)
+    stage::ST                     # `(vel, ρ, p)` staging buffers of host inputs, each `nothing` if unused
 end
 
 # Buffers used only by the Helmholtz R/C channel decomposition: the working-grid splits and giver
@@ -201,7 +182,7 @@ struct CompressiblePressure{CS, RG1, RA, CA, CCA, CCS, C1, RM}
 end
 
 """
-    CompressibleWorkspace(velocity_hat, ks; spectral, binning, geometry, execution,
+    CompressibleWorkspace(velocity_hat, ks; transform, binning, geometry, execution,
                           dealiasing = OrszagTwoThirds(), decompose = true, with_pressure = false)
 
 `dealiasing` fixes the working grid. The transfer's products are cubic (`ρ·u·∇u`), so
@@ -210,49 +191,62 @@ every term is exact and `Σ_k T_u = 0`; `PaddedThreeHalves()` forms the products
 them (`FlowTransformBindings.padded_length(N, 3)`) and returns every spectral output to the caller's grid;
 `NoDealiasing()` takes the raw products. `decompose` and `with_pressure` fix which optional terms the
 workspace can compute, and their scratch is allocated only when selected.
+
+`execution` places the work: `ThreadedBackend()` threads the transforms, and `GPUBackend(dev)` puts
+every buffer on `dev`, with buffers there for host inputs. The direct-sum transform indexes scalars, so
+a workspace on a device takes the FFT.
 """
 function CompressibleWorkspace(velocity_hat, ks;
-                               spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-                               binning::Types.AbstractShellBinning = _default_binning(ks),
+                               transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+                               binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
                                geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
                                execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
                                decompose::Bool = true,
                                with_pressure::Bool = false)
-    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
+    transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
+    execution = Types.resolve_execution(execution)
     nd = length(ks)
     mc = FTB.spectral_size(ks)      # the caller's coefficient grid
     FT = real(eltype(velocity_hat)); CT = complex(FT)
     size(velocity_hat)[1:nd] == mc || throw(DimensionMismatch(
         "field spatial size $(size(velocity_hat)[1:nd]) does not match the wavenumber grid $mc."))
-    # Compressible is a single ~O(nd) FFT pipeline (not an outer loop), so ComputationalBackends.ThreadedBackend threads the
-    # FFTs themselves — plans baked at nthreads (no per-call scratch alloc, no oversubscription).
+    # An array in the memory `execution` computes in: `velocity_hat`, or its copy on the device.
+    vbuf  = Types._staging_buffer(execution, velocity_hat)
+    proto = vbuf === nothing ? velocity_hat : vbuf
+    (transform isa SpectralBackends.DirectSumSpectralBackend && Types._is_device(proto)) && throw(ArgumentError(
+        "SpectralBackends.DirectSumSpectralBackend indexes scalars and cannot run in device memory; pass " *
+        "transform = SpectralBackends.FFTSpectralBackend() for a device execution backend."))
+    # One FFT pipeline with no outer loop, so `ThreadedBackend` threads the FFTs.
     fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1
     padded = dealiasing isa Types.PaddedThreeHalves
     Ms  = padded ? map(n -> FTB.padded_length(n, 3), FTB.full_size(ks)) :
                    FTB.full_size(ks)
     ksw = padded ? FTB.padded_axes(ks, Ms) : ks
     ns  = FTB.full_size(ksw); ms = FTB.spectral_size(ksw)
-    kdc = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
-    kd  = padded ? FTB.padded_derivative_wavenumbers(velocity_hat, FT, ks, Ms) : kdc
-    maps = padded ? FTB.PaddedMaps(velocity_hat, FT, ks, Ms) : nothing
-    # Buffers built in `velocity_hat`'s own array type → device-resident for device input (the whole
-    # pipeline is device-generic broadcasts), plain `Array`s for host input. Coefficient buffers are
-    # sized by `ms`, physical ones by `ns`, and every physical buffer is REAL.
-    ca()  = similar(velocity_hat, CT, ms..., nd)
-    cs()  = similar(velocity_hat, CT, ms..., 1)
-    ra()  = similar(velocity_hat, FT, ns..., nd)
-    rs()  = similar(velocity_hat, FT, ns...)
-    rg()  = similar(velocity_hat, FT, ns..., nd, nd)
-    rg1() = similar(velocity_hat, FT, ns..., 1, nd)
+    kdc = FTB.wavenumber_arrays(proto, FT, ks; derivative = true)
+    kd  = padded ? FTB.padded_derivative_wavenumbers(proto, FT, ks, Ms) : kdc
+    maps = padded ? FTB.PaddedMaps(proto, FT, ks, Ms) : nothing
+    # Buffers in `proto`'s array type: coefficient buffers sized by `ms`, real physical ones by `ns`.
+    ca()  = similar(proto, CT, ms..., nd)
+    cs()  = similar(proto, CT, ms..., 1)
+    ra()  = similar(proto, FT, ns..., nd)
+    rs()  = similar(proto, FT, ns...)
+    rg()  = similar(proto, FT, ns..., nd, nd)
+    rg1() = similar(proto, FT, ns..., 1, nd)
     # On the caller's grid, or the working array itself when the two grids are one.
-    onc(w, k...) = padded ? similar(velocity_hat, CT, mc..., k...) : w
-    # Shell structure of the caller's grid, hoisted so the per-snapshot `!` reallocates nothing.
+    onc(w, k...) = padded ? similar(proto, CT, mc..., k...) : w
+    # Host inputs on a device workspace are copied into these, the velocity's being the copy above.
+    stage = vbuf === nothing ? (vel = nothing, ρ = nothing, p = nothing) :
+            (vel = vbuf, ρ = similar(proto, CT, mc..., 1),
+             p = with_pressure ? similar(proto, CT, mc..., 1) : nothing)
+    # Shell structure of the caller's grid, hoisted so the per-snapshot `!` reallocates nothing. The
+    # shell index is in the workspace's memory, where the shell sums read it.
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
     kmax    = ShellBinning.max_shell_coordinate(geometry, ks)
     edges   = ShellBinning.shell_edges(binning, kmax)
     centers = collect(ShellBinning.shell_centers(binning, kmax))
-    sidx    = ShellBinning.assign_shells(k_mag, edges)
+    sidx    = copyto!(similar(proto, Int, mc...), ShellBinning.assign_shells(k_mag, edges))
     vel = ca(); v̂ = ca(); N̂1 = ca(); N̂2 = ca()
     coarse = (v̂ = onc(v̂, nd), N̂1 = onc(N̂1, nd), N̂2 = onc(N̂2, nd))
     # The pressure-dilatation term projects the velocity and momentum onto the rotational/compressive
@@ -267,25 +261,26 @@ function CompressibleWorkspace(velocity_hat, ks;
     pressure = if with_pressure
         σh = cs(); σ̃ = ca()
         CompressiblePressure(σh, rg1(), ra(), σ̃, onc(σ̃, nd), onc(σh, 1),
-                             similar(velocity_hat, CT, mc...), similar(velocity_hat, FT, mc...))
+                             similar(proto, CT, mc...), similar(proto, FT, mc...))
     else
         nothing
     end
     return CompressibleWorkspace(
         dealiasing, ksw, kd, kdc,
-        _resolve_tf(spectral, velocity_hat, ksw, ns, kd; fft_nthreads = fft_nthreads),
+        _resolve_tf(transform, proto, ksw, ns, kd; fft_nthreads = fft_nthreads),
         vel, cs(), v̂, N̂1, N̂2,
         ra(), ra(), ra(), ra(),
         rs(), rs(),
         rg(), rg(),
         channels, pressure, maps, coarse,
-        similar(velocity_hat, FT, mc...),
-        sidx, centers, ns, ms)
+        similar(proto, FT, mc...),
+        sidx, centers, edges, ns, ms, stage)
 end
 
 """
-    calculate_compressible_flux(velocity_hat, density_hat, ks; binning, pressure_hat=nothing,
-        decompose=true, geometry=IsotropicShells(), spectral=SpectralBackends.FFTSpectralBackend()) -> CompressibleFluxResult
+    calculate_compressible_flux(velocity_hat, density_hat, ks; transform=SpectralBackends.AutoSpectralBackend(),
+        binning, geometry=IsotropicShells(), execution=SerialBackend(), pressure_hat=nothing, decompose=true,
+        dealiasing=OrszagTwoThirds()) -> CompressibleFluxResult
 
 Compressible kinetic-energy spectral transfer `T_u(k)` and cumulative flux `Π(K)` (Singh–Tiwari–
 Sharma–Verma 2025): momentum `v = ρu`, `E_u(k) = ½Re[v·u*]`; the nonlinear transfer conserves total KE
@@ -295,14 +290,16 @@ channels. `T_u(k) = −dE_u(k)/dt` from the nonlinear terms (positive when shell
 other shells) and `Π(K) = Σ_{k≤K} T_u(k)`; in the incompressible limit `T_u` reduces to `ρ ×` the
 incompressible transfer spectrum.
 This allocates a [`CompressibleWorkspace`](@ref) and delegates to [`calculate_compressible_flux!`](@ref);
-build the workspace once and use the in-place form to loop over snapshots allocation-free.
+build the workspace once and use the in-place form to loop over snapshots allocation-free. Under
+`execution = GPUBackend(dev)` the transfer runs in `dev`'s memory, host inputs copied there once per
+call, and the per-shell results come back as host vectors.
 """
 function calculate_compressible_flux(
     velocity_hat,
     density_hat,
     ks;
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    binning::Types.AbstractShellBinning = _default_binning(ks),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...,
@@ -318,27 +315,13 @@ function calculate_compressible_flux(
     decompose = get(kwargs, :decompose, true)
     dealiasing = get(kwargs, :dealiasing, Types.OrszagTwoThirds())
     if exec isa ComputationalBackends.DistributedBackend
-        # Compressible is a single FFT pipeline (no outer loop): its independent work units are the
-        # decomposition-channel set and the pressure-dilatation, computed on separate workers (each
-        # rebuilding its own workspace from the raw inputs) and assembled on the master. Overridden by
-        # the Distributed extension; the core stub errors clearly if that ext isn't loaded.
+        # The independent work units are the channel set and the pressure-dilatation, each computed on
+        # its own worker from the raw inputs and assembled on the master (Distributed extension).
         return _compressible_distributed(velocity_hat, density_hat, ks, exec;
-            spectral=spectral, binning=binning, geometry=geometry, kwargs...)
-    elseif exec isa ComputationalBackends.GPUBackend
-        # The compressible pipeline is device-generic (broadcasts + cuFFT via AbstractFFTs) with no KA
-        # kernel, so the device path is selected by the INPUT ARRAY TYPE, not this knob. A host `Array`
-        # under ComputationalBackends.GPUBackend cannot be honoured (no data movement, no separate device kernel) → clear error
-        # rather than a silent serial run; a device-array input runs on device by construction.
-        Types._is_device(velocity_hat) || throw(ArgumentError(
-            "compressible transfer runs on-device automatically for device-array inputs (the pipeline is " *
-            "device-generic broadcasts + cuFFT via AbstractFFTs); execution=ComputationalBackends.GPUBackend() does not move a host " *
-            "array to the device. Pass device-array inputs (e.g. CuArray), or use ComputationalBackends.SerialBackend()/ComputationalBackends.ThreadedBackend()."))
-        ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry,
-                                   execution=ComputationalBackends.SerialBackend(), dealiasing=dealiasing,
-                                   decompose=decompose, with_pressure=with_pressure)
-        return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
+            transform=transform, binning=binning, geometry=geometry, kwargs...)
     end
-    ws = CompressibleWorkspace(velocity_hat, ks; spectral=spectral, binning=binning, geometry=geometry,
+    # The workspace lives in `exec`'s memory, the device of a `GPUBackend`, and stages host inputs there.
+    ws = CompressibleWorkspace(velocity_hat, ks; transform=transform, binning=binning, geometry=geometry,
                                execution=exec, dealiasing=dealiasing, decompose=decompose,
                                with_pressure=with_pressure)
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
@@ -351,13 +334,12 @@ _compressible_distributed(args...; kwargs...) = throw(ArgumentError(
 
 """
     calculate_compressible_flux_batch(velocity_hats, density_hats, ks; pressure_hats=nothing,
-        spectral, binning, geometry, dealiasing, decompose, execution) -> Vector
+        transform, binning, geometry, dealiasing, decompose, execution) -> Vector
 
 Compressible transfer for a batch of snapshots sharing one grid (`velocity_hats`/`density_hats`
 iterables of coefficient arrays). One [`CompressibleWorkspace`](@ref) is built per worker and reused
-across its snapshots — this is the workspace the package allocates most for, so a time series pays for
-it once. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over snapshots with a
-serial inner pipeline. Results are in input order and equal the per-snapshot
+across its snapshots. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over
+snapshots with a serial inner pipeline. Results are in input order and equal the per-snapshot
 [`calculate_compressible_flux`](@ref).
 """
 function calculate_compressible_flux_batch(
@@ -365,36 +347,47 @@ function calculate_compressible_flux_batch(
     density_hats,
     ks;
     pressure_hats = nothing,
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    binning::Types.AbstractShellBinning = _default_binning(ks),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     decompose::Bool = true,
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
+    transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n = length(velocity_hats)
     length(density_hats) == n || throw(DimensionMismatch(
         "got $n velocity snapshots and $(length(density_hats)) density snapshots"))
     pressure_hats === nothing || length(pressure_hats) == n || throw(DimensionMismatch(
         "got $n velocity snapshots and $(length(pressure_hats)) pressure snapshots"))
-    n == 0 && return Types.CompressibleFluxResult[]
+    if n == 0
+        kmax = ShellBinning.max_shell_coordinate(geometry, ks)
+        R = _result_type(real(eltype(eltype(velocity_hats))), collect(ShellBinning.shell_centers(binning, kmax)),
+                         ShellBinning.shell_edges(binning, kmax), decompose, pressure_hats !== nothing)
+        return R[]
+    end
     return _compressible_batch!(Types.resolve_execution(execution), velocity_hats, density_hats,
-                                pressure_hats, ks; spectral = spectral, binning = binning,
+                                pressure_hats, ks; transform = transform, binning = binning,
                                 geometry = geometry, dealiasing = dealiasing, decompose = decompose)
 end
 
-# Serial reference: one workspace reused across the whole batch.
-function _compressible_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_hats, density_hats,
-                              pressure_hats, ks; spectral, binning, geometry, dealiasing, decompose)
-    ws = CompressibleWorkspace(first(velocity_hats), ks; spectral = spectral, binning = binning,
+# One workspace in `execution`'s memory reused across the whole batch, each snapshot staged into it.
+function _compressible_reuse(execution, velocity_hats, density_hats, pressure_hats, ks;
+                             transform, binning, geometry, dealiasing, decompose)
+    ws = CompressibleWorkspace(first(velocity_hats), ks; transform = transform, binning = binning,
                                geometry = geometry, dealiasing = dealiasing, decompose = decompose,
-                               with_pressure = pressure_hats !== nothing)
+                               with_pressure = pressure_hats !== nothing, execution = execution)
     return [calculate_compressible_flux!(ws, velocity_hats[i], density_hats[i], ks;
                 pressure_hat = pressure_hats === nothing ? nothing : pressure_hats[i],
                 dealiasing = dealiasing, decompose = decompose)
             for i in eachindex(velocity_hats)]
 end
+
+# Serial reference.
+_compressible_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_hats, density_hats,
+                     pressure_hats, ks; kwargs...) =
+    _compressible_reuse(ComputationalBackends.SerialBackend(), velocity_hats, density_hats, pressure_hats, ks;
+                        kwargs...)
 
 # Threaded over the batch — overridden by the OhMyThreads extension (per-chunk workspace, serial inner).
 function _compressible_batch_threaded!(args...; kwargs...)
@@ -405,28 +398,24 @@ _compressible_batch!(::ComputationalBackends.AbstractThreadedBackend, velocity_h
                      pressure_hats, ks; kwargs...) =
     _compressible_batch_threaded!(velocity_hats, density_hats, pressure_hats, ks; kwargs...)
 
-# A device batch loops the device pipeline on one device-resident workspace.
-function _compressible_batch!(gpu::ComputationalBackends.AbstractGPUBackend, velocity_hats, density_hats,
-                              pressure_hats, ks; spectral, binning, geometry, dealiasing, decompose)
-    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
-        "calculate_compressible_flux_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
-        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
-    return _compressible_batch!(ComputationalBackends.SerialBackend(), velocity_hats, density_hats,
-                                pressure_hats, ks; spectral = spectral, binning = binning,
-                                geometry = geometry, dealiasing = dealiasing, decompose = decompose)
-end
+# A device batch loops the pipeline on one workspace in the device's memory.
+_compressible_batch!(gpu::ComputationalBackends.AbstractGPUBackend, velocity_hats, density_hats, pressure_hats,
+                     ks; kwargs...) =
+    _compressible_reuse(gpu, velocity_hats, density_hats, pressure_hats, ks; kwargs...)
 
 _compressible_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_hats, density_hats,
                      pressure_hats, ks; kwargs...) =
-    throw(ArgumentError("calculate_compressible_flux_batch supports SerialBackend(), ThreadedBackend() " *
-                        "and GPUBackend(); got execution = $(typeof(be))."))
+    Types.batch_unavailable("calculate_compressible_flux_batch", be)
 
 """
-    calculate_compressible_flux!(ws::CompressibleWorkspace, velocity_hat, density_hat, ks; kwargs...)
+    calculate_compressible_flux!(ws::CompressibleWorkspace, velocity_hat, density_hat, ks;
+                                 pressure_hat=nothing, dealiasing=ws.dealiasing, decompose=true)
 
 In-place momentum-weighted compressible transfer reusing `ws` (FFT plans + all field scratch). Returns
 a fresh [`CompressibleFluxResult`](@ref) whose arrays are the small per-shell vectors; the O(field)
 intermediates live in `ws` and are reused across calls (build the workspace once, loop over snapshots).
+On a workspace in device memory, host inputs are copied into its staging buffers and the per-shell
+vectors are host vectors.
 """
 function calculate_compressible_flux!(
     ws::CompressibleWorkspace,
@@ -453,12 +442,13 @@ function calculate_compressible_flux!(
         "this CompressibleWorkspace was built with with_pressure = false; rebuild it with " *
         "with_pressure = true to compute the pressure-dilatation term."))
 
-    # Inputs on the working grid: truncated to the kept band, embedded in the padded grid, or copied.
-    _load!(ws.vel, velocity_hat, ws, ks)
-    _load!(ws.ρh, _as_scalar(density_hat, mc), ws, ks)
+    # Inputs in the workspace's memory, then on the working grid: truncated to the kept band, embedded in
+    # the padded grid, or copied.
+    vin = Types._staged!(ws.stage.vel, velocity_hat)
+    _load!(ws.vel, vin, ws, ks)
+    _load!(ws.ρh, Types._staged!(ws.stage.ρ, _as_scalar(density_hat, mc)), ws, ks)
 
-    # Physical fields  u = idft(û),  ρ = idft(ρ̂),  v = ρu,  v̂ = dft(v). Every synthesis lands in a
-    # real buffer, so there is no complex "physical" array and no `real(...)` pass after a transform.
+    # Physical fields  u = idft(û),  ρ = idft(ρ̂),  v = ρu,  v̂ = dft(v).
     tf.idft!(ws.u_phys, ws.vel)
     tf.idft!(reshape(ws.ρ_phys, ns..., 1), ws.ρh)
     ws.v_phys .= reshape(ws.ρ_phys, ns..., 1) .* ws.u_phys
@@ -480,7 +470,7 @@ function calculate_compressible_flux!(
     # The spectral outputs on the caller's grid, where the densities are taken.
     co = ws.coarse
     _unload!(co.v̂, ws.v̂, ws); _unload!(co.N̂1, ws.N̂1, ws); _unload!(co.N̂2, ws.N̂2, ws)
-    ûc = ws.maps === nothing ? ws.vel : velocity_hat
+    ûc = ws.maps === nothing ? ws.vel : vin
 
     # Per-mode transfer T_u(k) = −dE_u(k)/dt = ½Re{û*·𝒩̂₁} + ½Re{v̂*·𝒩̂₂}
     _density!(ws.td, ûc, co.v̂, co.N̂1, co.N̂2)
@@ -497,12 +487,21 @@ function calculate_compressible_flux!(
     pdil = nothing
     if pressure_hat !== nothing
         pr = ws.pressure
-        _load!(pr.σh, _as_scalar(pressure_hat, mc), ws, ks)
-        σhc = ws.maps === nothing ? pr.σh : _as_scalar(pressure_hat, mc)
+        pin = Types._staged!(ws.stage.p, _as_scalar(pressure_hat, mc))
+        _load!(pr.σh, pin, ws, ks)
+        σhc = ws.maps === nothing ? pr.σh : pin
         pdil = _pressure_dilatation!(ws, ûc, σhc, ks, mc, sidx, N_sh, FT)
     end
 
-    return Types.CompressibleFluxResult(centers, T_spec, flux, channels, pdil)
+    return Types.CompressibleFluxResult(centers, ws.edges, T_spec, flux, channels, pdil)
+end
+
+# The result type for shells with these centres and edges, with or without each optional term.
+function _result_type(::Type{FT}, centers, edges, decompose::Bool, with_pressure::Bool) where {FT}
+    V  = Vector{FT}
+    CH = decompose ? NamedTuple{(:rotational, :compressive, :rot_to_comp, :comp_to_rot), NTuple{4, V}} : Nothing
+    PD = with_pressure ? NamedTuple{(:rotational, :compressive), NTuple{2, V}} : Nothing
+    return Types.CompressibleFluxResult{typeof(centers), typeof(edges), V, V, CH, PD}
 end
 
 # `td = ½Re{û*·N̂₁} + ½Re{v̂*·N̂₂}` summed over components, on the caller's grid. `td`'s rank fixes the
@@ -555,11 +554,10 @@ function _assemble_N!(N1, N2, u_phys, v_phys, gradu, gradv, divu, ns::NTuple{nd,
 end
 
 # ---------------------------------------------------------------------------
-# Rotational/compressive flux channels (paper Eqs. 52–57).
-# We form the transfer with the *receiver* field split into R/C (û_R*, v̂_R*, û_C*, v̂_C*) and the
-# nonlinear term built from the R/C-filtered *giver* momentum. Each channel is shell-binned and
-# accumulated into a flux; the four channels sum to the total flux (validated in tests), and in the
-# incompressible limit only the rotational channel survives (paper Eqs. 48–50).
+# Rotational/compressive flux channels (paper Eqs. 52–57): the *receiver* field split into R/C
+# (û_R*, v̂_R*, û_C*, v̂_C*) against the nonlinear term of the R/C-filtered *giver* momentum. The four
+# channels sum to the total flux, and in the incompressible limit only the rotational channel
+# survives (paper Eqs. 48–50).
 # ---------------------------------------------------------------------------
 function _rc_channels!(ws, ûc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) where {nd, FT}
     tf = ws.tf
@@ -574,8 +572,8 @@ function _rc_channels!(ws, ûc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) 
     tf.idft!(ch.vR, ch.v̂R)
     tf.idft!(ch.vC, ch.v̂C)
 
-    # 𝒩̂₁/𝒩̂₂ depend only on the giver (α) part — two distinct sets (α=R,C), reused across the four
-    # channels; each reuses the (now-free) main gradient/nonlinear scratch (ws.gradu/gradv/N1_phys/…).
+    # 𝒩̂₁/𝒩̂₂ depend only on the giver part α ∈ {R, C}, so two sets serve the four channels. Both
+    # reuse the main gradient/nonlinear scratch (ws.gradu/gradv/N1_phys/…), free at this point.
     giver_N!(N̂1_out, N̂2_out, u_giv, v_giv) = begin
         tf.dft!(ch.sscr, v_giv); tf.grad!(ws.gradv, ch.sscr)
         tf.dft!(ch.sscr, u_giv); tf.grad!(ws.gradu, ch.sscr)
@@ -592,15 +590,17 @@ function _rc_channels!(ws, ûc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) 
         _unload!(c, w, ws)
     end
 
-    # Transfer density: receiver β-part at k, giver α-part carried through the nonlinear term
-    #   T^{βα}(k) = ½ Re{ û_β*(k)·𝒩̂₁[α] } + ½ Re{ v̂_β*(k)·𝒩̂₂[α] }  (into the reused ws.td)
-    Π(û_recv, v̂_recv, N̂1, N̂2) =
-        _flux_from_transfer(_bin(_density!(ws.td, û_recv, v̂_recv, N̂1, N̂2), sidx, N_sh, FT, ks, mc))
-    rr = Π(rc.ûR, rc.v̂R, rc.N̂1R, rc.N̂2R)   # R receiver, R giver
-    cc = Π(rc.ûC, rc.v̂C, rc.N̂1C, rc.N̂2C)   # C receiver, C giver
-    rcf = Π(rc.ûR, rc.v̂R, rc.N̂1C, rc.N̂2C)  # C→R : R receiver, C giver
-    cr = Π(rc.ûC, rc.v̂C, rc.N̂1R, rc.N̂2R)   # R→C : C receiver, R giver
-    return (rotational = rr, compressive = cc, rot_to_comp = cr, comp_to_rot = rcf)
+    # Transfer density of the β part at k against the α part carried through the nonlinear term,
+    #   T^{βα}(k) = ½ Re{ û_β*(k)·𝒩̂₁[α] } + ½ Re{ v̂_β*(k)·𝒩̂₂[α] }  (into the reused ws.td),
+    # the rate at which the β part gives energy to the α part (T = −dE/dt, as `T(n,m)` of the
+    # shell-to-shell transfer).
+    Π(û_β, v̂_β, N̂1, N̂2) =
+        _flux_from_transfer(_bin(_density!(ws.td, û_β, v̂_β, N̂1, N̂2), sidx, N_sh, FT, ks, mc))
+    rr = Π(rc.ûR, rc.v̂R, rc.N̂1R, rc.N̂2R)   # R gives to R
+    cc = Π(rc.ûC, rc.v̂C, rc.N̂1C, rc.N̂2C)   # C gives to C
+    rc_ = Π(rc.ûR, rc.v̂R, rc.N̂1C, rc.N̂2C)  # R gives to C
+    cr = Π(rc.ûC, rc.v̂C, rc.N̂1R, rc.N̂2R)   # C gives to R
+    return (rotational = rr, compressive = cc, rot_to_comp = rc_, comp_to_rot = cr)
 end
 
 # The rotational/compressive split of `û` and `v̂` on the caller's grid, into `channels.rc`. Under
@@ -658,8 +658,7 @@ function _pressure_dilatation!(ws, ûc, σhc, ks, mc::NTuple{nd,Int}, sidx, N_sh
     tf.dft!(pr.σ̃, pr.σ̃phys)
     _unload!(pr.σ̃c, pr.σ̃, ws)
 
-    # `QR`/`QC` reuse the main scratch (free once the transfer and channels are done); the wavenumber
-    # arrays and `kdotuC` live in the workspace, so this stays on the 0-alloc reuse contract.
+    # `QR`/`QC` reuse scratch that is free once the transfer and channels are done.
     QR = pr.qscr; QC = ws.td
     kdotuC = pr.kdotuC            # Σ_c k_c·conj(û_C,c), with the grid's derivative wavenumbers
     fill!(QR, zero(FT)); fill!(QC, zero(FT)); fill!(kdotuC, zero(eltype(kdotuC)))
@@ -692,15 +691,6 @@ end
 # Π(K) = Σ_{k≤K} T_u(k); the last entry is Σ_k T_u, the conservation residual.
 _flux_from_transfer(T_spec) = cumsum(T_spec)
 
-function _default_binning(ks)
-    min_dk = Inf
-    for kv in ks, k in kv
-        ak = abs(k); ak > 0 && (min_dk = min(min_dk, ak))
-    end
-    return Types.LinearBinning(isfinite(min_dk) ? min_dk : 1.0)
-end
-
-# One-line show (the workspace's transform context holds FFTW plans → default show can segfault).
 Base.show(io::IO, ::CompressibleWorkspace) = print(io, "CompressibleWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::CompressibleWorkspace) = show(io, w)
 

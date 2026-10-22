@@ -4,7 +4,8 @@ using ..Types: Types
 using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 
-export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate, max_shell_coordinate
+export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate, max_shell_coordinate,
+       default_binning
 
 # ---------------------------------------------------------------------------
 # Shell coordinate — the per-mode scalar the shells partition (set by geometry)
@@ -44,10 +45,9 @@ end
 """
     max_shell_coordinate(geometry, ks) -> Real
 
-`maximum(shell_coordinate(geometry, ks))` without building the grid. The axes are independent, so
-the maximum of `√(Σ_d k_d²)` over a tensor grid is `√(Σ_d max_d k_d²)` — `O(nd)` where materialising
-the magnitude grid to take its maximum is `O(Nᴰ)`. Equal on the full and half layouts, so shell edges
-built from it do not depend on how the field is stored.
+`maximum(shell_coordinate(geometry, ks))` in `O(nd)`: over a tensor grid the maximum of `√(Σ_d k_d²)`
+is `√(Σ_d max_d k_d²)`. Equal on the full and half layouts, so shell edges built from it do not
+depend on how the field is stored.
 """
 function max_shell_coordinate(g::Types.ShellMagnitude, ks)
     nd = length(ks)
@@ -60,14 +60,31 @@ function max_shell_coordinate(g::Types.ShellMagnitude, ks)
     return sqrt(s)
 end
 
+"""
+    default_binning(ks) -> LinearBinning
+
+`LinearBinning(Δk)` with `Δk` the smallest nonzero `|k|` on any axis, in the float type the axes
+promote to; `Δk = 1` when no axis has a nonzero wavenumber.
+"""
+function default_binning(ks::Tuple)
+    FT = float(promote_type(map(eltype, ks)...))
+    dk = typemax(FT)
+    for a in ks, k in a
+        ak = FT(abs(k))
+        ak > 0 && (dk = min(dk, ak))
+    end
+    return Types.LinearBinning(dk == typemax(FT) ? one(FT) : dk)
+end
+
 # ---------------------------------------------------------------------------
 # Shell edge generation
 # ---------------------------------------------------------------------------
 
 """
-    shell_edges(binning, k_max) -> Vector{Float64}
+    shell_edges(binning, k_max) -> AbstractVector
 
-Return the monotonically increasing shell boundary vector for `binning` up to `k_max`.
+Return the monotonically increasing shell boundary vector for `binning` up to `k_max`, in the float
+type of `k_max` (a `CustomBinning` returns its own `edges`).
 
 The resulting vector has length `n_shells(binning, k_max) + 1`; shell n covers
 wavenumbers in `[edges[n], edges[n+1])`, and the last shell includes `edges[end]`. The built-in
@@ -109,7 +126,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    shell_centers(binning, k_max) -> Vector{Float64}
+    shell_centers(binning, k_max) -> AbstractVector
 
 Return the midpoint of each shell.  For logarithmic binnings, this is the geometric mean of the
 edge pair, and half the upper edge for the `[0, k₀)` shell; for linear binnings, the arithmetic mean.
@@ -146,9 +163,6 @@ end
 Return an integer array (same shape as `k_mag`) where `[I] = n` if
 `edges[n] <= k_mag[I] < edges[n+1]`, or `n = N_sh` if `k_mag[I] == edges[end]`, and `0` if the mode
 falls outside all shells.
-
-One integer per mode (single allocation, cache-friendly): the canonical shell-membership
-representation used by every transfer accumulation kernel.
 """
 function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
     idx  = similar(k_mag, Int)
@@ -167,9 +181,8 @@ function assign_shells(k_mag::AbstractArray, edges::AbstractVector)
 end
 
 # Shell reduction `T_spec[shell_idx[I]] += density[I]` over all modes (shell index 0 = dropped),
-# zeroing `T_spec` first. The host method is a 0-alloc scalar loop; the KernelAbstractions extension
-# adds a `ComputationalBackends.GPUBackend` method (atomic device scatter-add) so device-backed arrays reduce with no scalar
-# indexing. Backend-dispatched so the serial reductions and the distributed pencil flux share one op.
+# zeroing `T_spec` first. The KernelAbstractions extension adds the `GPUBackend` method, an atomic
+# device scatter-add.
 function shell_scatter_add!(T_spec, density, shell_idx, ::ComputationalBackends.AbstractExecutionBackend)
     fill!(T_spec, zero(eltype(T_spec)))
     @inbounds for I in CartesianIndices(density)

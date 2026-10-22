@@ -11,24 +11,28 @@ export calculate_spherical_transfer, calculate_spherical_transfer!,
 
 # ---------------------------------------------------------------------------
 # Backend validation for the spherical transfer (shared by the FSH regular-grid and NUFSHT scattered
-# extensions). The transform is selected by the *input sampling*: SpectralBackends.FSHTSpectralBackend ↔ regular colatitude–
-# longitude grid (FastSphericalHarmonics), SpectralBackends.NUFSHTSpectralBackend ↔ scattered points (NUFSHT). Passing an
-# explicit `spectral` that disagrees, or an execution backend the single-pipeline transform cannot
-# honour, raises a clear error rather than silently ignoring it.
+# extensions). The *input sampling* selects the transform: `FSHTSpectralBackend` for a regular
+# colatitude–longitude grid (FastSphericalHarmonics), `NUFSHTSpectralBackend` for scattered points
+# (NUFSHT). An explicit `transform` that disagrees throws, as does an execution backend the path has no
+# method for: serial and threaded on both, a device on scattered points.
 # ---------------------------------------------------------------------------
 
-# `path` is `:regular` (FSH) or `:scattered` (NUFSHT).
+# `path` is `:regular` (FSH) or `:scattered` (NUFSHT). An `AutoBackend` is resolved first.
 function _validate_spherical_backends(spectral, execution::ComputationalBackends.AbstractExecutionBackend, path::Symbol)
     expected = path === :regular ? SpectralBackends.FSHTSpectralBackend : SpectralBackends.NUFSHTSpectralBackend
     other    = path === :regular ? "SpectralBackends.NUFSHTSpectralBackend (scattered points)" : "SpectralBackends.FSHTSpectralBackend (regular grid)"
     (spectral === nothing || spectral isa expected) || throw(ArgumentError(
         "spherical transfer on a $(path === :regular ? "regular colatitude–longitude grid" : "scattered point set") " *
-        "uses $(nameof(expected)); got spectral = $(typeof(spectral)). Use $other for the other sampling."))
-    execution isa Union{ComputationalBackends.SerialBackend, ComputationalBackends.ThreadedBackend} || throw(ArgumentError(
-        "spherical transfer runs as a single transform pipeline; execution = $(typeof(execution)) is not a " *
-        "distinct code path. Supported: ComputationalBackends.SerialBackend, ComputationalBackends.ThreadedBackend (threads the transform). Distribute " *
-        "independent snapshots with `mpi_batch_map`; for a GPU transform use the NUFSHT scattered path with " *
-        "device-array coordinates (the device path follows the coordinate array type, not execution=ComputationalBackends.GPUBackend())."))
+        "uses $(nameof(expected)); got transform = $(typeof(spectral)). Use $other for the other sampling."))
+    execution = Types.resolve_execution(execution)
+    host = execution isa Union{ComputationalBackends.SerialBackend, ComputationalBackends.ThreadedBackend}
+    device = path === :scattered && execution isa ComputationalBackends.AbstractGPUBackend
+    host || device || throw(ArgumentError(
+        "the spherical transfer of one field runs on one process; got execution = $(typeof(execution)). " *
+        "Supported: SerialBackend, ThreadedBackend" *
+        (path === :scattered ? ", GPUBackend. " : "; FastSphericalHarmonics runs on the host, and scattered points " *
+         "(NUFSHT) take GPUBackend. ") *
+        "Independent snapshots distribute with `mpi_batch_map`."))
     return nothing
 end
 
@@ -63,18 +67,17 @@ function calculate_spherical_transfer end
 
 In-place spherical spectral transfer reusing `ws`. Implemented in the FastSphericalHarmonics /
 NUFSHT extensions. Reuses the workspace's spectral work arrays, per-mode reduction buffers, and the
-result vectors, so a repeat call on the same grid re-allocates only what the underlying transform
-library itself allocates (FastSphericalHarmonics has no in-place transform API — that portion is an
-irreducible floor). Build the workspace once with [`SphericalTransferWorkspace`](@ref).
+result vectors, so a repeat call on the same grid allocates only inside the transform library
+(FastSphericalHarmonics has no in-place transform API). Build the workspace once with
+[`SphericalTransferWorkspace`](@ref).
 """
 function calculate_spherical_transfer! end
 
 """
     SphericalTransferWorkspace(lmax; ...)
 
-Reusable buffers for [`calculate_spherical_transfer!`](@ref). Constructed by the FastSphericalHarmonics
-(regular grid) or NUFSHT (scattered) extension; loading one provides the constructor. The buffer
-fields are typed via parameters so the core names no extension type.
+Reusable buffers for the regular-grid [`calculate_spherical_transfer!`](@ref). Constructed by the
+FastSphericalHarmonics extension; loading it provides the constructor.
 """
 struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, PC, RES, R}
     Cζ::CW           # spectral work array — vorticity coefficients (extension layout)
@@ -91,6 +94,7 @@ struct SphericalTransferWorkspace{CW, JW, GC, IV, RV, PC, RES, R}
     radius::R
     lmax::Int
     dealias::Bool
+    nthreads::Int    # the transforms' thread count, from the workspace's execution backend
 end
 
 function SphericalTransferWorkspace(args...; kwargs...)
@@ -101,15 +105,15 @@ end
 """
     ScatteredSphericalTransferWorkspace(coords, lmax; ...)
 
-Reusable buffers for the SCATTERED-point spherical transfer `!()` (NUFSHT extension). Holds the three
-NUFSHT spin plans (spin-0 at `lmax`, spin-1 at `lmax`, spin-0 at the dealiased `lwork = 2·lmax`) with
-the scattered points preset, plus every coefficient/gradient/reduction buffer and the result vectors.
-The plans are the dominant cost (NUFFT planning + the least-squares setup); building them once lets a
-snapshot time series on the same points reuse them. They hold NUFFT resources that
-[`close!`](@ref FlowInvariantTransfer.close!) releases; the allocating entries close theirs. Fields
-are typed via parameters so the core names no NUFSHT type. Requires `using NUFSHT`.
+Reusable buffers for the scattered-point [`calculate_spherical_transfer!`](@ref) (NUFSHT extension).
+Holds the three NUFSHT spin plans (spin-0 at `lmax`, spin-1 at `lmax`, spin-0 at the dealiased
+`lwork = 2·lmax`) with the scattered points preset, plus every coefficient/gradient/reduction buffer
+and the result vectors. The plans (NUFFT planning and the least-squares setup) are the dominant cost,
+so build one per point set and reuse it across snapshots. They hold NUFFT resources that
+[`close!`](@ref FlowInvariantTransfer.close!) releases; the allocating entries close theirs. Requires
+`using NUFSHT`.
 """
-struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, L0, L0W, CM, CV, DC, PB, TC, QW, RES, R}
+struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, L0, L0W, CM, CV, RF, DC, PB, TC, QW, RES, R}
     plan0::P0        # spin-0 analysis plan at lmax
     plan1::P1        # spin-1 synthesis plan at lmax
     plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
@@ -126,6 +130,7 @@ struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, L0, L0W, CM, CV, DC, PB,
     Gζ::CV           # (M,) ðζ at the scattered points
     ζdata::CV        # (M,) vorticity as complex (solve input)
     Jc::CV           # (M,) Jacobian A = J(ψ,ζ) as complex (solve input)
+    fr::RF           # (M,) the caller's vorticity, copied into the plans' memory
     ladl::DC         # (lmax+1, 1) eth ladder √(ℓ(ℓ+1)) per degree row
     invll1::DC       # (lmax+1, 1) 1/(ℓ(ℓ+1)), 0 at ℓ = 0
     Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
@@ -196,6 +201,29 @@ merge_fits(a::NamedTuple, b::NamedTuple) = (; converged = a.converged & b.conver
     iterations = max(a.iterations, b.iterations), residual = max(a.residual, b.residual))
 
 """
+    with_merged_fit(result, fit) -> result′
+
+`result` with the outcome `fit` merged into its own by [`merge_fits`](@ref); `result` itself when `fit`
+is `nothing`.
+"""
+with_merged_fit(r, ::Nothing) = r
+with_merged_fit(r, fit::NamedTuple) = with_fit(r, merge_fits(
+    (; converged = r.converged, iterations = r.iterations, residual = r.residual),
+    (; converged = fit.converged, iterations = fit.iterations, residual = oftype(r.residual, fit.residual))))
+
+"""
+    active_fit(values, s, (θ, φ), active, lmax; tol, rtol, maxiter, nufft, execution) -> (field, fit)
+
+The spin-`s`, degree-`lmax` least-squares fit to `values` at the nodes `active` (linear indices into the
+colatitudes `θ` and longitudes `φ`), evaluated at every node. `values` is read at `active` alone; `field`
+is complex, `u_θ + i u_φ` for `s = 1`, and `fit = (; converged, iterations, residual)` is the fit's
+outcome. The keywords are those of the scattered transfer's fits. The NUFSHT extension provides it.
+"""
+active_fit(args...; kwargs...) = throw(ArgumentError(
+    "the fit over a grid's active cells (`inactive = Types.Exclude()`) runs NUFSHT; " *
+    "run `using NUFSHT`, or pass `inactive = Types.ZeroFill()`."))
+
+"""
     spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm) -> result
 
 In-place degree-spectrum reduction: writes `T_E`/`T_Z` and the cumulative fluxes into the
@@ -223,7 +251,6 @@ function spherical_transfer_reduce!(
     return result
 end
 
-# One-line show (these hold FSH / NUFSHT (NUFFT-backed) plans → default field-dump show can segfault).
 Base.show(io::IO, ::SphericalTransferWorkspace) = print(io, "SphericalTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::SphericalTransferWorkspace) = show(io, w)
 Base.show(io::IO, ::ScatteredSphericalTransferWorkspace) = print(io, "ScatteredSphericalTransferWorkspace(…)")
@@ -239,15 +266,14 @@ Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = 
 #
 # Vorticity ζ = k̂·∇×u and divergence δ = ∇·u come from the eth ladder:
 #     ζ_lm = −i √(l(l+1)) sym_lm,   δ_lm = +√(l(l+1)) anti_lm.
-# The advection is taken in the energy-conserving skew-symmetric Lamb form
+# The advection is taken in the energy-conserving skew-symmetric form of Augier & Lindborg (2013,
+# Appendix A; Eq. 35 of arXiv:1211.0607, with the topography factor β = 1), in Lamb form
 #     A = (u·∇)u + ½ u (∇·u) = ∇(½|u|²) + ζ (k̂×u) + ½ δ u = ∇K + (i ζ + ½ δ) U₊,
 # with the scalar gradient ∇f = −ð f (eth) and k̂×u ↔ i U₊. The transfer of degree l, −dE_l/dt from
 # the advection, is the spin-1 vector-harmonic projection, split into the two channels:
 #     T_rot(l) = Σ_m Re{ sym*_lm Â_lm},   T_div(l) = Σ_m Re{ anti*_lm Â_lm},   T = T_rot + T_div,
-# and Π(L) = Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for
-# divergent flow too;
-# in the non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy
-# transfer. Products are quadratic, so the advection is analysed at the dealiased degree lwork = 2·lmax
+# and Π(L) = Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for divergent flow; in the
+# non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy transfer. Products are quadratic, so the advection is analysed at the dealiased degree lwork = 2·lmax
 # and truncated back to l ≤ lmax. (Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013.)
 #
 # The transform machinery lives in the extensions (FastSphericalHarmonics regular grid; NUFSHT
@@ -275,11 +301,11 @@ function calculate_divergent_spherical_transfer! end
 """
     DivergentSphericalTransferWorkspace(lmax; ...)
 
-Reusable buffers for the regular-grid divergent KE transfer `!()` (FastSphericalHarmonics extension;
-loading it provides the constructor): the work-grid fields, the embed targets, the transforms' plans
-and the reused [`DivergentSphericalTransferResult`](@ref). FastSphericalHarmonics has no in-place
-transform API, so the spin-weighted transforms/eth allocate their outputs on every call. Fields are
-typed via parameters so the core names no extension type. Requires `using FastSphericalHarmonics`.
+Reusable buffers for the regular-grid [`calculate_divergent_spherical_transfer!`](@ref)
+(FastSphericalHarmonics extension; loading it provides the constructor): the work-grid fields, the
+embed targets, the transforms' plans and the reused [`DivergentSphericalTransferResult`](@ref).
+FastSphericalHarmonics has no in-place transform API, so the spin-weighted transforms/eth allocate
+their outputs on every call. Requires `using FastSphericalHarmonics`.
 """
 struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC, PC}
     uθw::RW          # (lwork) velocity components on the work grid
@@ -297,6 +323,7 @@ struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC, PC}
     lmax::Int
     lwork::Int
     dealias::Bool
+    nthreads::Int    # the transforms' thread count, from the workspace's execution backend
 end
 
 function DivergentSphericalTransferWorkspace(args...; kwargs...)
@@ -307,14 +334,13 @@ end
 """
     ScatteredDivergentSphericalTransferWorkspace(coords, lmax; ...)
 
-Reusable buffers for the SCATTERED-point divergent KE transfer `!()` (NUFSHT extension; loading it
-provides the constructor). Holds the five NUFSHT spin plans (spin ±1 and spin 0 at `lmax`, spin 0 and
-spin +1 at the dealiased `lwork = 2·lmax`) with the points preset, plus every coefficient/field/reduction
-buffer and the result. The plans are the dominant reusable cost, and hold NUFFT resources that
-[`close!`](@ref FlowInvariantTransfer.close!) releases. Fields are typed via parameters so the core
-names no NUFSHT type. Requires `using NUFSHT`.
+Reusable buffers for the scattered-point [`calculate_divergent_spherical_transfer!`](@ref) (NUFSHT
+extension; loading it provides the constructor). Holds the five NUFSHT spin plans (spin ±1 and spin 0
+at `lmax`, spin 0 and spin +1 at the dealiased `lwork = 2·lmax`) with the points preset, plus every
+coefficient/field/reduction buffer and the result. The plans are the dominant reusable cost, and hold
+NUFFT resources that [`close!`](@ref FlowInvariantTransfer.close!) releases. Requires `using NUFSHT`.
 """
-struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, LP, LM, L0W, LPW, CM, CMW, CV, RV, RVW, PB, TC, QW, RES, R}
+struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, LP, LM, L0W, LPW, CM, CMW, CV, RF, RV, RVW, PB, TC, QW, RES, R}
     planp::PP        # spin+1 analysis plan at lmax
     planm::PM        # spin−1 analysis plan at lmax
     plan0::P0        # spin-0 synthesis plan at lmax (vorticity/divergence)
@@ -330,7 +356,8 @@ struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, LP, LM
     Up::CV; Um::CV                          # (M,) U₊, U₋ at the points
     ζv::CV; δv::CV; Kv::CV                   # (M,) vorticity, divergence, ½|u|²
     gradK::CV; Advv::CV                      # (M,) ∇K, advection
-    ladl::RV                                 # (lmax+1,1) ladder √(l(l+1))
+    uθ::RF; uφ::RF                           # (M,) the caller's velocity, copied into the plans' memory
+    ladl::RV                                # (lmax+1,1) ladder √(l(l+1))
     ladw::RVW                                # (lwork+1,1) ladder at lwork
     Pr::PB                                   # (lmax+1, 2lmax+1) real product scratch (row-sum reduce)
     Tcol::TC                                 # (lmax+1,1) real per-degree column-sum scratch
@@ -351,7 +378,7 @@ function ScatteredDivergentSphericalTransferWorkspace(args...; kwargs...)
 end
 
 """
-    divergent_transfer_finalize!(result, T_rot, T_div) -> result
+    divergent_transfer_finalize!(result) -> result
 
 Shared finalisation (extension-agnostic): given the per-degree rotational and divergent channel
 transfers already written into `result.rotational_transfer` / `result.divergent_transfer`, fill the
@@ -370,7 +397,6 @@ function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferRe
     return result
 end
 
-# One-line show (these hold FSH / NUFSHT (NUFFT-backed) plans → default field-dump show can segfault).
 Base.show(io::IO, ::DivergentSphericalTransferWorkspace) = print(io, "DivergentSphericalTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::DivergentSphericalTransferWorkspace) = show(io, w)
 Base.show(io::IO, ::ScatteredDivergentSphericalTransferWorkspace) = print(io, "ScatteredDivergentSphericalTransferWorkspace(…)")

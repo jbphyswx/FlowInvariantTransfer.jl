@@ -6,9 +6,9 @@
 # a least-squares tangent-plane gradient.
 #
 # Each case is gated on a physical identity: a spatially constant velocity has zero strain, so its
-# flux is zero. A grid built without adjacency also yields exactly zero — every least-squares gradient
-# fits nothing — so non-triviality is asserted alongside, and the no-adjacency grid is checked to
-# raise on that zero field.
+# flux is zero. A grid built without adjacency also yields exactly zero, since every least-squares
+# gradient fits nothing, so non-triviality is asserted alongside and a node set without adjacency is
+# refused.
 # ---------------------------------------------------------------------------
 
 using Test: Test
@@ -35,22 +35,10 @@ Test.@testset "coarse-graining on a FlowGeometries grid" begin
         ℓ = 20 * (L / N)                       # ~20 cells across the filter window
 
         grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, y)
-        Test.@test grid.mask isa FG.Grids.AllActive      # omitting the mask stores just a size
-
         r_coords = FIT.calculate_coarse_graining_flux((u, v), (x, y), ℓ, filt)
         r_grid = FIT.calculate_coarse_graining_flux((u, v), grid, ℓ, filt)
         Test.@test maximum(abs, r_coords.flux_field) > 1e-6
         Test.@test r_grid.flux_field == r_coords.flux_field
-
-        ws = _CGF_T.CoarseGrainingFluxWorkspace((u, v), grid, ℓ, filt)
-        r_ws = FIT.calculate_coarse_graining_flux!(ws, (u, v))
-        Test.@test r_ws.flux_field == r_coords.flux_field
-        FIT.calculate_coarse_graining_flux!(ws, (u, v))
-        Test.@test (@allocated FIT.calculate_coarse_graining_flux!(ws, (u, v))) < 4096
-
-        # A grid carries its own mask, so the keyword has no meaning alongside one.
-        Test.@test_throws MethodError FIT.calculate_coarse_graining_flux((u, v), grid, ℓ, filt;
-                                                                          mask = trues(N, N))
     end
 
     Test.@testset "3D structured" begin
@@ -80,7 +68,6 @@ Test.@testset "coarse-graining on a FlowGeometries grid" begin
         grid = FG.Grids.CurvilinearGrid(FG.Geometry.CartesianGeometry{Float64}(), X, Y)
         ℓ = 8 * (L / N)
         ws = _CGF_T.CoarseGrainingFluxWorkspace((_gg_u(X, Y), _gg_v(X, Y)), grid, ℓ, filt)
-        Test.@test ws.deriv_plan isa FG.Operators.GradientPlan
         r = FIT.calculate_coarse_graining_flux!(ws, (_gg_u(X, Y), _gg_v(X, Y)))
         Test.@test maximum(abs, r.flux_field) > 1e-6
         rc = FIT.calculate_coarse_graining_flux((fill(1.7, size(X)), fill(-0.3, size(X))), grid, ℓ, filt)

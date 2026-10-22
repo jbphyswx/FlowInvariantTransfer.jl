@@ -7,6 +7,7 @@ export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMetho
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
 export AbstractFieldDecomposition, NoDecomposition, HelmholtzDecomposition, RotationalDecomposition, DivergentDecomposition, HelicalDecomposition, ToroidalPoloidalDecomposition
 export AbstractFilter, SharpSpectralFilter, GaussianFilter, TopHatFilter
+export AbstractInactiveCells, ZeroFill, Exclude
 export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, CustomBinning
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
@@ -14,13 +15,11 @@ export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult
 
 # ---------------------------------------------------------------------------
-# Execution-backend resolution (FIT-owned; not type piracy)
+# Execution-backend resolution
 # ---------------------------------------------------------------------------
-# Concrete execution backends pass through `ComputationalBackends.resolve_backend`; the AutoBackend
-# selector maps to ThreadedBackend only when the OhMyThreads extension is loaded and Julia has more
-# than one thread, else SerialBackend. Defined on FIT's own `resolve_execution` — NOT by adding a
-# method to `ComputationalBackends.resolve_backend` — so it commits no type piracy and never collides
-# with another consumer's AutoBackend policy.
+# Concrete execution backends pass through `ComputationalBackends.resolve_backend`; `AutoBackend`
+# resolves to `ThreadedBackend` when the OhMyThreads extension is loaded and Julia has more than one
+# thread, else to `SerialBackend`.
 resolve_execution(execution::ComputationalBackends.AbstractExecutionBackend) = ComputationalBackends.resolve_backend(execution)
 function resolve_execution(::ComputationalBackends.AutoBackend)
     if Threads.nthreads() > 1 &&
@@ -30,23 +29,31 @@ function resolve_execution(::ComputationalBackends.AutoBackend)
     return ComputationalBackends.SerialBackend()
 end
 
+# The error a batch `entry` raises when the method for `be` is not loaded: the threaded, Distributed and
+# MPI methods live in the extensions of those packages.
+function batch_unavailable(entry::AbstractString, be::ComputationalBackends.AbstractExecutionBackend)
+    pkg = be isa ComputationalBackends.AbstractThreadedBackend ? "OhMyThreads" :
+          be isa ComputationalBackends.AbstractDistributedBackend ? "Distributed" :
+          be isa ComputationalBackends.AbstractMPIBackend ? "MPI" : nothing
+    pkg === nothing && throw(ArgumentError(
+        "$entry runs on SerialBackend, ThreadedBackend, GPUBackend, DistributedBackend and MPIBackend; " *
+        "got execution = $(typeof(be))."))
+    throw(ArgumentError("$entry on execution = $(typeof(be)) needs `using $pkg`."))
+end
+
 # ---------------------------------------------------------------------------
-# Spectral-backend resolution (FIT-owned, mirroring `resolve_execution`)
+# Transform resolution
 # ---------------------------------------------------------------------------
 """
-    resolve_spectral(spectral) -> AbstractSpectralBackend
+    resolve_transform(transform) -> AbstractSpectralBackend
 
-Concrete transform backends pass through. [`SpectralBackends.AutoSpectralBackend`](@ref) — the
-default of every Cartesian coefficient diagnostic — resolves to the FFT backend when the FFTW
-extension is loaded, and otherwise to the dependency-free direct sum with a one-time warning naming
-the cost: the FFT path is `O(Nᴰ log N)` and the direct sum `O(N²ᴰ)`, which on a 128² grid is
-milliseconds against minutes.
-
-Defined on FIT's own function — NOT as a method on anything in `SpectralBackends` — so it commits no
-type piracy and never collides with another consumer's policy.
+Concrete transform backends pass through. [`SpectralBackends.AutoSpectralBackend`](@ref), the
+default `transform` of every Cartesian coefficient diagnostic, resolves to the FFT backend
+(`O(Nᴰ log N)`) when the FFTW extension is loaded, else to the dependency-free direct sum (`O(N²ᴰ)`)
+with a one-time warning.
 """
-resolve_spectral(spectral::SpectralBackends.AbstractSpectralBackend) = spectral
-function resolve_spectral(::SpectralBackends.AbstractAutoSpectralBackend)
+resolve_transform(transform::SpectralBackends.AbstractSpectralBackend) = transform
+function resolve_transform(::SpectralBackends.AbstractAutoSpectralBackend)
     if _fft_backend_available()
         return SpectralBackends.FFTSpectralBackend()
     end
@@ -64,14 +71,50 @@ end
 _is_device(::Any) = false
 
 """
+    _to_execution(execution, x) -> array
+
+`x` in the memory `execution` computes in: `x` itself on a host backend or where it already lives, a
+copy on the backend's device otherwise. The KernelAbstractions extension adds the `GPUBackend` method.
+"""
+_to_execution(::ComputationalBackends.AbstractExecutionBackend, x) = x
+
+"""
+    _fields_to_execution(execution, field, advecting) -> (field′, advecting′)
+
+The advected field and the advecting velocity in `execution`'s memory, one copy when they are the same
+array.
+"""
+function _fields_to_execution(execution::ComputationalBackends.AbstractExecutionBackend, field, advecting)
+    f = _to_execution(execution, field)
+    return f, advecting === field ? f : _to_execution(execution, advecting)
+end
+
+"""
+    _staging_buffer(execution, x) -> array or nothing
+
+A copy of `x` in `execution`'s memory, the buffer [`_staged!`](@ref) copies later inputs shaped like `x`
+into; `nothing` when `x` already lives there.
+"""
+function _staging_buffer(execution::ComputationalBackends.AbstractExecutionBackend, x)
+    y = _to_execution(execution, x)
+    return y === x ? nothing : y
+end
+
+"""
+    _staged!(buf, x) -> array
+
+`x` in the memory of `buf`, the buffer an input is staged through: `x` itself when it lives there, else
+copied into `buf`. A `nothing` buffer stages nothing.
+"""
+_staged!(::Nothing, x) = x
+_staged!(buf, x) = (_is_device(buf) && !_is_device(x)) ? copyto!(buf, x) : x
+
+"""
     _FFT_BACKEND_LOADED
 
-Set to `true` by the FFTW extension's `__init__`. [`resolve_spectral`](@ref) reads it to answer the
-`Auto` tag, which the `!` entry points do on every call: a `Ref` load allocates nothing, where asking
-the loading machinery costs a dictionary lookup each time.
-
-An extension signals through this flag. A method whose signature the parent already carries is an
-overwrite, and an extension that overwrites a parent method fails to precompile.
+Set to `true` by the FFTW extension's `__init__` and read by [`resolve_transform`](@ref) on every
+call. The extension signals through a flag because an extension that overwrites a parent method
+fails to precompile.
 """
 const _FFT_BACKEND_LOADED = Ref(false)
 
@@ -107,6 +150,36 @@ Supertype for spectral filter kernels used by coarse-graining: [`SharpSpectralFi
 [`GaussianFilter`](@ref), [`TopHatFilter`](@ref).
 """
 abstract type AbstractFilter end
+
+# ---------------------------------------------------------------------------
+# Inactive cells of a masked spherical grid
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractInactiveCells
+
+How the spherical transfer on a masked `FlowGeometries` grid reads the grid's inactive cells, passed as
+`inactive`: [`ZeroFill`](@ref) or [`Exclude`](@ref). What an inactive cell holds, `NaN` included, never
+enters the transfer.
+"""
+abstract type AbstractInactiveCells end
+
+"""
+    ZeroFill <: AbstractInactiveCells
+
+Inactive cells count as zero: the transfer is that of the field extended by zero over the sphere,
+computed on every node of the grid. The default.
+"""
+struct ZeroFill <: AbstractInactiveCells end
+
+"""
+    Exclude <: AbstractInactiveCells
+
+Inactive cells are left out: the field's coefficients are the least-squares fit to the active cells
+alone, and the transfer is that of the band-limited field the fit defines, computed on every node of
+the grid.
+"""
+struct Exclude <: AbstractInactiveCells end
 
 # ---------------------------------------------------------------------------
 # Quadratic-invariant trait
@@ -159,11 +232,9 @@ and `N̂_ω = i k×N̂`.
   conserved (`Σ_k T_Ω = 0`), counter-directional forward cascade dual to the inverse energy
   cascade (Kraichnan–Batchelor).
 - **3D** (vector vorticity): `N̂_ω = curl[(u·∇)u] = (u·∇)ω − (ω·∇)u` includes vortex
-  **stretching**, so enstrophy is **not** conserved (`Σ_k T_Ω ≠ 0`: net production). This is a
-  valid transfer/budget diagnostic, not a conservative cascade.
+  **stretching**, so enstrophy is **not** conserved (`Σ_k T_Ω ≠ 0`: net production).
 
-Available in 2D and 3D across every diagnostic — spectral flux, shell-to-shell, and the resolved
-mode-to-mode triad form (the invariant weighting rides the generic `transfer_density!`).
+Available in 2D and 3D in the spectral flux, shell-to-shell and mode-to-mode diagnostics.
 """
 struct Enstrophy <: AbstractInvariant end
 
@@ -180,14 +251,14 @@ entry points `calculate_scalar_*` do this for you).
 
 Scalar variance is an inviscid invariant for incompressible flow (`∫θ(u·∇)θ = −½∫θ²∇·u = 0`),
 so it is **conserved** (`Σ_k T_θ ≈ 0`) and cascades **forward** (to small scales) in both 2D and
-3D — unlike kinetic energy there is no inverse-cascade dimension.
+3D.
 
 # A family of canonical invariants
-Other quadratic invariants are advected by the velocity exactly like a passive scalar, so their
-cross-scale transfer is computed by this same path (pass the field as the "scalar"):
+Other quadratic invariants are advected by the velocity like a passive scalar, so their cross-scale
+transfer is computed by this same path (pass the field as the "scalar"):
 - **Buoyancy / available-potential-energy variance** `½⟨b²⟩` (APE `= ½⟨b²⟩/N²`) in the
-  Boussinesq system; the `−N²w` term is a KE↔APE *conversion* (a separate source, not a triad
-  transfer), so the variance *cascade* is exactly the scalar transfer of `b`.
+  Boussinesq system. The `−N²w` term is a separate KE↔APE *conversion* source, so the variance
+  *cascade* is the scalar transfer of `b`.
 - **QG potential enstrophy** `½⟨q²⟩` with PV `q = ∇²ψ + βy` advected by the geostrophic velocity.
 
 # References
@@ -283,9 +354,8 @@ pseudospectral method on a periodic uniform grid.
 - `binning::B`: Shell binning strategy for grouping wavenumbers.
 
 # Notes
-Requires Fourier-space velocity data on a uniform periodic grid.
-When FFTW is loaded, all transforms run in O(N log N); without it, falls back
-to an O(N²) direct-sum reference implementation.
+Requires Fourier-space velocity data on a uniform periodic grid. The transforms run through FFTW
+(`O(Nᴰ log N)`) when it is loaded, else through the `O(N²ᴰ)` direct-sum reference.
 """
 struct SpectralFluxMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod
     binning::B
@@ -319,43 +389,36 @@ gives energy to shell S_m through the nonlinear advection term.
 
 # Notes
 The antisymmetry property T(n,m) = −T(m,n) holds when the mediator velocity is
-the full field u (Verma et al. 2002). This is automatically verified by default.
+the full field u (Verma et al. 2002).
 """
 struct ShellToShellTransferMethod{B<:AbstractShellBinning} <: AbstractEnergyTransferMethod
     binning::B
 end
 
 """
-    ModeToModeTransferMethod{B, I<:AbstractInvariant} <: AbstractEnergyTransferMethod
+    ModeToModeTransferMethod{I<:AbstractInvariant} <: AbstractEnergyTransferMethod
 
-Compute the exact **mode-to-mode triad transfer** `S(k|p)` — the rate at which mode `k`
-gives energy (or another invariant) to mode `p`, mediated by `q = k − p`:
+Compute the **mode-to-mode transfer** `S(k|p)` between stored coefficients — the rate at which the
+modes of slot `k` give energy (or another invariant) to the slot field `u_p`, mediated by `q = k − p`:
 
-    S(k|p) = Re{ û*(k) · N̂_p(k) },   N̂_p = FFT[(u·∇)u_p].
+    S(k|p) = Re{ û*(k) · N̂_p(k) },   N̂_p = FFT[(u·∇)u_p],   u_p(x) = w(p)·Re{û(p) e^{ip·x}},
 
-This is the most fundamental (delta-in-`k`) mode-to-mode object; it reduces to
-the shell-to-shell matrix and the spectral transfer `T(k)` under summation.
+with `w` the slot's fold weight (see [`ModeToModeTriadResult`](@ref)). It reduces to the
+shell-to-shell matrix and the spectral transfer `T(k)` under summation.
 
 # Fields
-- `binning::B`: Optional shell binning for reductions to the magnitude-to-magnitude
-  transfer `T(K,Q)`. Use `nothing` to return the raw per-receiver transfer only.
 - `invariant::I`: Which quadratic invariant to accumulate (default `KineticEnergy()`).
 
 # Cost
-`O(N^D)` per receiver mode; `O(N^{2D})` for the full tensor — exact but slow.
-Guard with a mode-count limit unless `force=true`.
+One nonlinear-term evaluation per slot `p` and an `O(N^{2D})` result tensor.
 
 # References
 - Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book).
 """
-struct ModeToModeTransferMethod{B, I<:AbstractInvariant} <: AbstractEnergyTransferMethod
-    binning::B
+struct ModeToModeTransferMethod{I<:AbstractInvariant} <: AbstractEnergyTransferMethod
     invariant::I
 end
-ModeToModeTransferMethod(; binning=nothing, invariant=KineticEnergy()) =
-    ModeToModeTransferMethod(binning, invariant)
-ModeToModeTransferMethod(binning::AbstractShellBinning; invariant=KineticEnergy()) =
-    ModeToModeTransferMethod(binning, invariant)
+ModeToModeTransferMethod(; invariant=KineticEnergy()) = ModeToModeTransferMethod(invariant)
 
 """
     TriadicOrthogonalDecompositionMethod{N, O, M} <: AbstractEnergyTransferMethod
@@ -416,17 +479,17 @@ velocity field carrying divergence, and reduces to it exactly in the non-diverge
 
 The input is the horizontal velocity `u = (u_θ, u_φ)` (colatitude, longitude components), Helmholtz-
 decomposed as `u = k̂×∇ψ + ∇χ` (rotational streamfunction `ψ`, divergent velocity potential `χ`).
-Writing the advection in Lamb (rotational) form `(u·∇)u = ∇(½|u|²) + ζ (k̂×u)` with vorticity
-`ζ = k̂·(∇×u)`, the nonlinear KE transfer of degree `l`, `−dE_l/dt` from the advection, is the
-vector-harmonic projection
+The advection is taken in the skew-symmetric form `A = (u·∇)u + ½u(∇·u)` of Augier & Lindborg (2013,
+Appendix A; Eq. 35 of arXiv:1211.0607), written in Lamb form as `A = ∇(½|u|²) + ζ(k̂×u) + ½δu` with
+vorticity `ζ = k̂·(∇×u)` and divergence `δ = ∇·u`. The nonlinear KE transfer of degree `l`,
+`−dE_l/dt` from that advection, is the vector-harmonic projection
 
-    T(l) = Σ_m Re{ û*_lm · Â_lm},   Â = [(u·∇)u]^  (spin-1 vector-harmonic coefficients),
+    T(l) = Σ_m Re{ û*_lm · Â_lm}   (spin-1 vector-harmonic coefficients),
 
 split by the toroidal (rotational) / spheroidal (divergent) parts of `û` into `T = T_rot + T_div`.
-Total KE is advectively conserved: `Σ_l T(l) ≈ 0` (the rotational and divergent channels are not
-individually conserved — they exchange energy). The Lamb form needs only spin-0/spin-1 transforms
-(no spin-2). Augier–Lindborg 2013;
-Burgess–Erler–Shepherd 2013).
+`∫u·A = 0`, so total KE is conserved, `Σ_l T(l) ≈ 0`; the rotational and divergent channels exchange
+energy and are not conserved one by one. References: Augier & Lindborg (2013); Burgess, Erler &
+Shepherd (2013).
 
 Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (two
 `AbstractMatrix` velocity components) routes to the FastSphericalHarmonics extension; scattered
@@ -483,7 +546,10 @@ struct TopHatFilter <: AbstractFilter end
 """
     LinearBinning(Δk) <: AbstractShellBinning
 
-Uniform shell spacing: k_n = n · Δk.
+Shells of width `Δk`: edges `0, Δk, 2Δk, …` up to the largest wavenumber coordinate, shell `n`
+covering `[(n−1)Δk, nΔk)` around its centre `(n−½)Δk`, and the last shell closed; the flux `Π[n]` is
+the flux through `nΔk`. With `Δk` the fundamental wavenumber, shell 1 holds the mean mode alone and
+`|k| = nΔk` falls in shell `n + 1`.
 
 # Fields
 - `Δk`: Shell width in physical wavenumber units.
@@ -552,23 +618,17 @@ end
 SmoothBands(centers::AbstractVector; logwidth=0.6) = SmoothBands(centers, float(logwidth))
 
 # ---------------------------------------------------------------------------
-# Dealiasing strategy — how the quadratic-product aliasing error is removed
+# Dealiasing strategy
 # ---------------------------------------------------------------------------
-#
-# A pseudospectral product of two N-mode fields generates wavenumbers up to 2× the maximum, which
-# alias back onto the resolved band. Two standard cures (Canuto et al. 2006; Orszag 1971):
-#   • Orszag 2/3 truncation: keep modes with |m_d| ≤ ⌊(N_d−1)/3⌋ in the inputs and the output. Exact on
-#     the retained band, but discards the top third of the field's spectrum.
-#   • 3/2 zero-padding: embed the N-mode field in a (3N/2)-point grid, form the product there
-#     (no aliasing), transform back and truncate. Exact for the quadratic term over ALL modes to
-#     Nyquist — nothing is discarded.
 
 """
     AbstractDealiasing
 
 Strategy for removing aliasing from the pseudospectral quadratic product, passed as the
-`dealiasing` keyword. Subtypes: [`NoDealiasing`](@ref), [`OrszagTwoThirds`](@ref) (the default),
-and [`PaddedThreeHalves`](@ref) (exact 3/2 zero-padding).
+`dealiasing` keyword. A product of two `N`-mode fields generates wavenumbers up to twice the
+maximum, which alias back onto the resolved band (Orszag 1971; Canuto et al. 2006). Subtypes:
+[`NoDealiasing`](@ref), [`OrszagTwoThirds`](@ref) (the default), and [`PaddedThreeHalves`](@ref)
+(exact 3/2 zero-padding).
 """
 abstract type AbstractDealiasing end
 
@@ -583,37 +643,34 @@ struct NoDealiasing <: AbstractDealiasing end
     OrszagTwoThirds <: AbstractDealiasing
 
 Orszag 2/3-rule truncation: keep modes with `|m_d| ≤ ⌊(N_d−1)/3⌋` along every axis, in the inputs and
-the output (`FlowTransformBindings.dealias_cutoff`). Exact on the retained band; the default
-`dealiasing`.
+the output (`FlowTransformBindings.dealias_cutoff`). Exact on the retained band, and discards the top
+third of the spectrum. The default `dealiasing`.
 """
 struct OrszagTwoThirds <: AbstractDealiasing end
 
 """
     PaddedThreeHalves <: AbstractDealiasing
 
-Exact 3/2 zero-padding: form the quadratic product on a `(3N/2)`-point grid so no aliasing reaches
-the resolved band, then truncate back to `N`. Exact for the quadratic nonlinear term over every
-mode up to Nyquist (nothing discarded), at ~`(3/2)^D` higher transform cost. Requires FFTW for the
-fast path.
+Exact 3/2 zero-padding: form the quadratic product on the grid of
+`FlowTransformBindings.padded_length(N)` points per axis, the smallest past `3N/2` on which no alias
+reaches the resolved band, then truncate back to `N`. Exact for the quadratic nonlinear term over every
+mode up to Nyquist (nothing discarded), at ~`(3/2)^D` the transform cost of the unpadded term, on the
+FFT and the direct-sum transforms alike.
 """
 struct PaddedThreeHalves <: AbstractDealiasing end
 
 # ---------------------------------------------------------------------------
-# Shell geometry — WHICH wavenumber coordinate the shells partition
+# Shell geometry
 # ---------------------------------------------------------------------------
-#
-# A binning (LinearBinning, …) sets the shell *spacing*; the geometry sets the *coordinate* that
-# spacing is applied to. Isotropic shells partition |k| (spherical in 3D, annular in 2D). For
-# rotating/stratified flows the canonical anisotropic fluxes Π(k_⊥), Π(k_∥) (Alexakis & Biferale
-# 2018, §IV) partition a subset of components: k_⊥ = √(k_x²+k_y²) (cylindrical) or k_∥ = |k_z|.
-# Geometry only changes which scalar each mode is binned by — the transfer physics is identical.
 
 """
     AbstractShellGeometry
 
 Abstract supertype selecting the wavenumber coordinate the shells partition (isotropic `|k|`,
 or an anisotropic projection like `k_⊥`/`k_∥`). Orthogonal to the binning *spacing*
-([`AbstractShellBinning`](@ref)).
+([`AbstractShellBinning`](@ref)); the geometry changes only the scalar each mode is binned by. The
+anisotropic fluxes `Π(k_⊥)`, `Π(k_∥)` of rotating/stratified flow follow Alexakis & Biferale (2018,
+§IV).
 """
 abstract type AbstractShellGeometry end
 
@@ -654,31 +711,13 @@ anisotropic parallel flux `Π(k_∥)`.
 ParallelShells(dims=(3,)) = ShellMagnitude(dims)
 
 # ---------------------------------------------------------------------------
-# Transform (spectral) backends — WHICH transform (direct / FFT / NUFFT / SHT / NUFSHT). Orthogonal
-# to the EXECUTION axis (serial / threaded / distributed / MPI / GPU), which lives in the shared
-# `ComputationalBackends` package: a computation picks one of each (e.g. FFT transform + threaded
-# mediator loop, or a NUFSHT transform + MPI reduction). Keeping "what" and "where" separate avoids
-# conflating them.
-# ---------------------------------------------------------------------------
-
-# Transform (spectral) backend TYPES come from the shared `SpectralBackends` package
-# (`SpectralBackends.DirectSumSpectralBackend`/`FFTSpectralBackend`/`FSHTSpectralBackend`/…, all
-# `<: SpectralBackends.AbstractSpectralBackend`); the NUFFT libraries' tags come from
-# FlowTransformBindings. FIT adds the geometry classification + coefficient-input validation below.
-
-# ---------------------------------------------------------------------------
 # Transform-backend geometry classification + validation
 # ---------------------------------------------------------------------------
-# Each transform backend targets one (geometry, sampling). The Fourier-coefficient Cartesian
-# diagnostics accept only the uniform-Cartesian transforms — the DirectSum reference and FFT — because
-# their input already *is* a uniform-Cartesian Fourier field. Passing a scattered (NUFFT) or spherical
-# (FSHT/NUFSHT) backend to them is a geometry mismatch and must raise a clear error, never a bare
-# `MethodError` and never a silent misroute to FFT.
 
 """
-    spectral_geometry(backend) -> Symbol
+    spectral_geometry(transform) -> Symbol
 
-The (geometry, sampling) a transform backend targets: `:any` (the DirectSum reference works on any
+The (geometry, sampling) a transform targets: `:any` (the DirectSum reference works on any
 geometry), `:cartesian_uniform`, `:cartesian_scattered`, `:spherical_uniform`, `:spherical_scattered`.
 """
 spectral_geometry(::SpectralBackends.DirectSumSpectralBackend) = :any
@@ -688,22 +727,21 @@ spectral_geometry(::SpectralBackends.FSHTSpectralBackend)      = :spherical_unif
 spectral_geometry(::SpectralBackends.NUFSHTSpectralBackend)    = :spherical_scattered
 
 """
-    require_coefficient_spectral(spectral) -> spectral
+    require_coefficient_transform(transform) -> transform
 
-Assert that `spectral` is a valid transform for a Fourier-coefficient Cartesian diagnostic (input is a
-uniform-Cartesian Fourier field). Returns `spectral` for the DirectSum reference / FFT backends;
-raises a clear geometry-mismatch error for the scattered/spherical backends directing the caller to the
-right entry point.
+Assert that `transform` is valid for a Fourier-coefficient Cartesian diagnostic (input is a
+uniform-Cartesian Fourier field). Returns `transform` for the Auto, direct-sum and FFT backends; throws
+an `ArgumentError` naming the right entry point for the scattered and spherical backends.
 """
-require_coefficient_spectral(spectral::Union{SpectralBackends.AbstractAutoSpectralBackend,
-                                             SpectralBackends.DirectSumSpectralBackend,
-                                             SpectralBackends.FFTSpectralBackend}) = spectral
-require_coefficient_spectral(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = throw(ArgumentError(
+require_coefficient_transform(transform::Union{SpectralBackends.AbstractAutoSpectralBackend,
+                                               SpectralBackends.DirectSumSpectralBackend,
+                                               SpectralBackends.FFTSpectralBackend}) = transform
+require_coefficient_transform(::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend) = throw(ArgumentError(
     "A NUFFT backend is a scattered-Cartesian transform: it acts on a physical field sampled at scattered " *
     "points, not on Fourier coefficients. Pass the physical field and its scatter coordinates to the " *
-    "physical-space entry, e.g. `to_spectral(velocity_fields, scatter_coords, ms; spectral, Ls)` or the " *
-    "4-positional `calculate_energy_transfer(method, velocity_fields, scatter_coords, ms; spectral, Ls)`."))
-require_coefficient_spectral(::Union{SpectralBackends.FSHTSpectralBackend, SpectralBackends.NUFSHTSpectralBackend}) = throw(ArgumentError(
+    "physical-space entry, e.g. `to_spectral(velocity_fields, scatter_coords, ms; transform, Ls)` or the " *
+    "4-positional `calculate_energy_transfer(method, velocity_fields, scatter_coords, ms; transform, Ls)`."))
+require_coefficient_transform(::Union{SpectralBackends.FSHTSpectralBackend, SpectralBackends.NUFSHTSpectralBackend}) = throw(ArgumentError(
     "FSHTSpectralBackend and NUFSHTSpectralBackend are spherical transforms. Use `calculate_spherical_transfer` for transfer " *
     "on the sphere (regular grid → FSHTSpectralBackend, scattered points → NUFSHTSpectralBackend). The Cartesian flux " *
     "diagnostics take FFTSpectralBackend (uniform grid) or a NUFFT backend (scattered, via the physical-space entry)."))
@@ -713,27 +751,28 @@ require_coefficient_spectral(::Union{SpectralBackends.FSHTSpectralBackend, Spect
 # ---------------------------------------------------------------------------
 
 """
-    SpectralFluxResult{KS, V}
+    SpectralFluxResult{KS, E, V}
 
-Result of a spectral energy flux computation.
+Result of a spectral energy flux computation over the shells `[shell_edges[n], shell_edges[n+1])`.
 
 # Fields
-- `k_shells::KS`: Representative wavenumber for each shell (midpoint of bin edges).
-- `transfer_spectrum::V`: T(k) = −dE(k)/dt from the nonlinear term, positive where shell k gives
-  energy to the others.
-- `flux::V`: Π(K) = +cumsum(T(k)) — cumulative energy flux (Π>0 forward/down-scale cascade,
-  Π<0 inverse; Alexakis–Biferale 2018).
+- `k_shells::KS`: Representative wavenumber for each shell (midpoint of its edges).
+- `shell_edges::E`: The shell boundaries (length = number of shells + 1).
+- `transfer_spectrum::V`: `T(k_n) = −dE_n/dt` from the nonlinear term, `E_n` the energy of shell `n`:
+  the shell's content, a sum over its modes. `T(k_n)/(shell_edges[n+1] − shell_edges[n])` is the
+  transfer per unit wavenumber.
+- `flux::V`: `Π[n] = Σ_{m≤n} T(k_m)`, the flux through the wavenumber `shell_edges[n+1]` (Π > 0
+  forward/down-scale cascade, Π < 0 inverse; Alexakis–Biferale 2018).
 
-Parametric with no element-type bound (works with Float32/Float64/Dual/Unitful, etc.). `k_shells`
-(host-side shell wavenumbers) is parametrised separately from the `transfer_spectrum`/`flux` data so
-a device computation can return device data while `k_shells` stays a host vector.
+`k_shells` and `shell_edges` are host vectors whatever array type the transfer is computed on.
 """
-struct SpectralFluxResult{KS<:AbstractVector, V<:AbstractVector}
+struct SpectralFluxResult{KS<:AbstractVector, E<:AbstractVector, V<:AbstractVector}
     k_shells::KS
+    shell_edges::E
     transfer_spectrum::V
     flux::V
 end
-SpectralFluxResult(k, T, f) = SpectralFluxResult{typeof(k), typeof(T)}(k, T, f)
+SpectralFluxResult(k, e, T, f) = SpectralFluxResult{typeof(k), typeof(e), typeof(T)}(k, e, T, f)
 
 """
     SphericalTransferResult{V<:AbstractVector, T<:Real}
@@ -799,29 +838,29 @@ struct DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
 end
 
 """
-    CompressibleFluxResult{KS, TS, FL, CH, PD}
+    CompressibleFluxResult{KS, ES, TS, FL, CH, PD}
 
 Result of a compressible kinetic-energy spectral-transfer computation (Singh–Tiwari–Sharma–Verma
-2025). The transfer is momentum-weighted (`v = ρu`), so unlike the incompressible
-diagnostics it needs the density field and — for the KE↔internal-energy exchange — the pressure.
+2025). The transfer is momentum-weighted (`v = ρu`), so it needs the density field and, for the
+KE↔internal-energy exchange, the pressure.
 
 # Fields
 - `k_shells::KS`: representative wavenumber per shell.
+- `shell_edges::ES`: the shell boundaries (length = number of shells + 1).
 - `transfer_spectrum::TS`: `T_u(k) = −dE_u(k)/dt` of the momentum-weighted KE from the nonlinear
   terms, the sign of the incompressible transfer. Conserves total KE where the products are
   dealiased: `Σ_k T_u(k) ≈ 0`.
-- `flux::FL`: `Π(K) = Σ_{k≤K} T_u(k)` — cumulative flux; its last entry is `Σ_k T_u`, the residual
-  of conservation.
+- `flux::FL`: `Π[n] = Σ_{m≤n} T_u(k_m)`, the flux through `shell_edges[n+1]`; its last entry is
+  `Σ_k T_u`, the residual of conservation.
 - `channels::CH`: rotational/compressive (Helmholtz `u = u_R + u_C`) flux channels as a `NamedTuple`
-  `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested.
+  `(rotational, compressive, rot_to_comp, comp_to_rot)`, or `nothing` if not requested; `rot_to_comp`
+  is the flux the rotational part gives the compressive part, `comp_to_rot` the reverse.
 - `pressure_dilatation::PD`: KE↔IE conversion `(rotational = Q_{I,R}(k), compressive = Q_{I,C}(k))`
   as a `NamedTuple`, or `nothing` if no pressure field was supplied.
-
-Each array field carries its own type parameter (element-type/container generic — no shared or
-`<:AbstractVector`-bounded param); optional `CH`/`PD` resolve to `Nothing` or a concrete `NamedTuple`.
 """
-struct CompressibleFluxResult{KS, TS, FL, CH, PD}
+struct CompressibleFluxResult{KS, ES, TS, FL, CH, PD}
     k_shells::KS
+    shell_edges::ES
     transfer_spectrum::TS
     flux::FL
     channels::CH
@@ -848,9 +887,10 @@ end
 CoarseGrainingFluxResult(s, a, m) = CoarseGrainingFluxResult{typeof(s), typeof(a)}(s, a, m)
 
 """
-    CoarseGrainingFluxResultWithDiagnostics{S, A}
+    CoarseGrainingFluxResultWithDiagnostics{S, A, T}
 
-Result of a coarse-graining energy flux computation including stress/strain diagnostics.
+Result of a coarse-graining energy flux computation including stress/strain diagnostics, returned
+when `return_diagnostics=true`.
 
 # Fields
 - `filter_scale::S`: Filter scale ℓ used.
@@ -858,10 +898,6 @@ Result of a coarse-graining energy flux computation including stress/strain diag
 - `mean_flux::S`: Area-weighted spatial mean ⟨Π_ℓ⟩.
 - `stress_tensor::T`: τ̄ᵢʲ (component-indexed array, e.g. `(Nx,Ny,2,2)`).
 - `strain_rate::T`: S̄ᵢʲ (same array type as `stress_tensor`).
-
-Returned instead of `CoarseGrainingFluxResult` when `return_diagnostics=true`.
-The tensor diagnostics carry their own type parameter `T` (higher-rank than the scalar
-`flux_field::A`); all fields are always present — no `Union{Nothing,...}` type instability.
 """
 struct CoarseGrainingFluxResultWithDiagnostics{S, A<:AbstractArray, T<:AbstractArray}
     filter_scale::S
@@ -874,7 +910,7 @@ CoarseGrainingFluxResultWithDiagnostics(s, a, m, st, sr) =
     CoarseGrainingFluxResultWithDiagnostics{typeof(s), typeof(a), typeof(st)}(s, a, m, st, sr)
 
 """
-    ShellToShellResult{V, M, E}
+    ShellToShellResult{V, W, M}
 
 Result of a shell-to-shell energy transfer computation.
 
@@ -883,41 +919,48 @@ Result of a shell-to-shell energy transfer computation.
 - `shell_edges::V`: Shell boundary wavenumbers (length = N_shells + 1).
 - `transfer_matrix::M`: T(n,m) — N_shells × N_shells matrix; T[n,m] is the rate at which shell n
   gives energy to shell m.
-- `net_transfer::V`: Σ_m T(n,m) = −dE_n/dt, equal to the spectral transfer `T(k_n)`.
-- `max_antisymmetry_error::E`: max |T(n,m) + T(m,n)| — antisymmetry validation metric.
+- `net_transfer::W`: Σ_m T(n,m) = −dE_n/dt, equal to the spectral transfer `T(k_n)`.
 
-Parametric on vector type `V`, matrix type `M`, and scalar type `E = eltype(M)`.
+`V` carries the wavenumber axes' element type; `W` and `M` carry the field's.
 """
-struct ShellToShellResult{V<:AbstractVector, M<:AbstractMatrix, E}
+struct ShellToShellResult{V<:AbstractVector, W<:AbstractVector, M<:AbstractMatrix}
     shell_centers::V
     shell_edges::V
     transfer_matrix::M
-    net_transfer::V
-    max_antisymmetry_error::E
+    net_transfer::W
 end
-ShellToShellResult(c, e, T, n, a) =
-    ShellToShellResult{typeof(c), typeof(T), eltype(T)}(c, e, T, n, a)
+ShellToShellResult(c, e, T, n) =
+    ShellToShellResult{typeof(c), typeof(n), typeof(T)}(c, e, T, n)
 
 """
-    ModeToModeTriadResult{I, KS, A, S}
+    ModeToModeTriadResult{I, KS, W, A, S}
 
-Result of a fully mode-resolved triad transfer computation.
+Result of a mode-resolved triad transfer, indexed by the stored coefficients ("slots") of the spectral
+layout.
+
+Slot `k` stands for `w(k)` modes of the full spectrum (`weights`): 1 everywhere on a full layout; on a
+half layout 2 on the interior of the halved axis, where the slot also stands for its unstored mirror
+`−k`, and 1 on its `k₁ = 0` and Nyquist planes. Its slot field is `u_k(x) = w(k)·Re{û(k) e^{ik·x}}`, a
+real field, and the slot fields sum to the velocity.
 
 # Fields
 - `invariant::I`: The invariant that was accumulated (e.g. `KineticEnergy()`).
-- `ks::KS`: The wavenumber vectors `(kx, ky[, kz])` defining the spectral grid.
-- `net_transfer::A`: `T(k) = Σ_p S(k|p)` — net per-mode transfer (shape `ns`); equals the
-  spectral transfer from `calculate_spectral_flux`.
-- `transfer::S`: the resolved `S(k|p)` — the rate at which mode `k` gives energy to mode `p`
-  (mediated by `q=k−p`), shape `(ns..., ns...)` (mode `k`'s indices then mode `p`'s).
-  Antisymmetric (`S(k|p)=−S(p|k)`); summed over `p` gives `net_transfer`; summed over shells
-  gives the shell-to-shell matrix.
+- `ks::KS`: The wavenumber axes of the spectral grid.
+- `weights::W`: `w(k)` for every slot (shape `ms`).
+- `net_transfer::A`: `T(k) = Σ_p S(k|p)` — net per-slot transfer (shape `ms`); equals the spectral
+  transfer from `calculate_spectral_flux`.
+- `transfer::S`: `S(k|p) = Re{û*(k)·[(u·∇)u_p]^(k)}`, the rate at which slot `k` gives energy to the
+  slot field `u_p`, shape `(ms..., ms...)` (slot `k`'s indices then slot `p`'s).
 
-Parametric on all array/field types — GPU-array friendly.
+`w(k)·S(k|p) = ⟨u_k·(u·∇)u_p⟩` is the transfer between the two slot fields. For a divergence-free,
+dealiased field it is antisymmetric, `w(k)S(k|p) = −w(p)S(p|k)`, and `Σ_k Σ_p w(k)S(k|p) = 0`; on a
+full layout these read `S(k|p) = −S(p|k)`. Summing `w(k)S(k|p)` over the slots of two shells gives the
+shell-to-shell matrix.
 """
-struct ModeToModeTriadResult{I, KS, A, S}
+struct ModeToModeTriadResult{I, KS, W, A, S}
     invariant::I
     ks::KS
+    weights::W
     net_transfer::A
     transfer::S
 end
@@ -938,9 +981,6 @@ Result container for Triadic Orthogonal Decomposition.
   Same shape as `mode_bispectrum`.
 - `expansion_coefficients::EC`: Expansion coefficients, or `nothing` if not requested.
 - `auxiliary_modes::XM`: Dict mapping `(l, n)` to donor/catalyst modes, or `nothing`.
-
-All fields are typed — the optional `EC`/`XM` parameters resolve to `Nothing` or the concrete
-container type at construction, so the struct is type-stable (no untyped `Any` fields).
 """
 struct TriadicOrthogonalDecompositionResult{V<:AbstractVector, A3<:AbstractArray, PM, EC, XM}
     frequencies::V

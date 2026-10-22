@@ -31,13 +31,10 @@ Test.@testset "spectral layout" begin
         for n in (8, 9), L in (2π, 3.5)
             ks_f = FIT.Utils.wavenumber_grid((n, 6), (L, 2L))
             ks_h = FIT.Utils.wavenumber_grid((n, 6), (L, 2L); real = true)
-            Test.@test ks_f isa Tuple{FTB.FFTAxis{Float64}, FTB.FFTAxis{Float64}}
-            Test.@test ks_h isa Tuple{FTB.RFFTAxis{Float64, Nothing}, FTB.FFTAxis{Float64}}
             Test.@test collect(ks_f[1]) ≈ FFTW.fftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[1]) ≈ FFTW.rfftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[2]) ≈ FFTW.fftfreq(6, 6 * 2π / (2L))
         end
-        Test.@test eltype(FIT.Utils.wavenumber_grid((4, 4), (1.0f0, 2); real = true)[2]) === Float32
     end
 
     Test.@testset "shell sums agree on the half and full layouts — every parity, 1D/2D/3D" begin

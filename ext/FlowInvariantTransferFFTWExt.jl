@@ -17,60 +17,62 @@ end
 # ---------------------------------------------------------------------------
 
 # Forward/backward FFT plans for `x` at `nthreads` FFTW threads, built under FFTW.jl's planner lock
-# with the planner count set for the build and restored after (`FFTW.set_num_threads(f, n)`). FFTW
-# reads the count into a plan when it is built, so the plan executes at exactly this many threads.
-# The array type picks the library (FFTW for a host `Array`, cuFFT for a `CuArray`), and a device
-# library ignores the count. `nthreads = 1` suits the loop-heavy methods, whose shell/mode/band/channel
-# loop is threaded with one single-threaded FFT per task, and the serial path; spectral flux and the
-# compressible transfer pass more when their outer loop is narrower than the core count.
+# with the planner count set for the build and restored after (`FFTW.set_num_threads(f, n)`); a plan
+# executes at the count it was built with. The array type picks the library (FFTW for a host `Array`,
+# cuFFT for a `CuArray`), and a device library ignores the count.
 _plan_fft_bfft(x; nthreads::Int = 1) =
     FFTW.set_num_threads(() -> (FFTW.plan_fft(x), FFTW.plan_bfft(x)), nthreads)
 
-# Reusable scratch + preplanned transforms on the padded (≈3N/2) grid, built at workspace
-# construction ONLY when PaddedThreeHalves is requested (so the common 2/3 path never allocates the
-# larger buffers). Fully parametric — buffers follow the same `(Ms..., C)` layout as
-# `NonlinearTermWorkspace`, and the forward normalization is computed inline in the field eltype.
-# One type per spectral layout, matching the two plan sets below.
-struct ComplexPaddedScratch{PF, PB, CA, RA, GA, EM}
+# Preplanned transforms on the padded grid of the workspace's `Workspaces.PaddedGrid`, built only for
+# PaddedThreeHalves; every buffer but the complex layout's transform output is the padded grid's own.
+# Coefficients move between the caller's grid and the padded one through FlowTransformBindings'
+# `PaddedMaps` (gathers built in the field's array type) and the padded derivative wavenumbers, so the
+# padded term runs on the field's own device. `spec1`/`out1` are `(Msp..., 1)` reshapes of `spec`/`out`,
+# sharing their memory, in the shape the maps take. One type per spectral layout, matching the two
+# plan sets below.
+struct ComplexPaddedScratch{PF, PB, CA, C1, RA, GA, PM, KD, R}
     p_fft::PF      # unnormalized forward c2c plan on the padded grid
     p_bfft::PB     # unnormalized backward c2c plan on the padded grid
-    spec::CA       # complex (Msp...) scratch: embed target / transform input
-    out::CA        # complex (Msp...) scratch: transform output
-    u_phys::RA     # real (Ms..., nd) advecting-velocity physical buffer
-    g_phys::GA     # real (Ms...) gradient physical scratch (reused per component/direction)
-    n_phys::RA     # real (Ms..., M) nonlinear-term physical buffer
-    emap::EM       # length-prod(ms) Vector{CartesianIndex}: ms→Msp index permutation, built once so
-                   # embed/truncate are O(1)-lookup zero-pads (no fftshift allocations)
+    spec::CA       # complex (Msp...) embed target / forward input
+    spec1::C1
+    out::CA        # complex (Msp...) transform output
+    out1::C1
+    u_phys::RA     # real (Ms..., nd) advecting velocity
+    g_phys::GA     # real (Ms...) one gradient at a time
+    n_phys::RA     # real (Ms..., M) nonlinear term
+    maps::PM       # FlowTransformBindings.PaddedMaps
+    kd::KD         # padded derivative wavenumbers, one array per axis
+    invM::R        # 1 / prod(Ms), the forward normalization
 end
 
-struct RealPaddedScratch{PF, PB, CA, RA, GA, EM}
+struct RealPaddedScratch{PF, PB, CA, C1, RA, GA, PM, KD, R}
     p_rfft::PF     # real (Ms...) → complex (Msp...)
-    p_brfft::PB    # complex (Msp...) → real (Ms...), unnormalized
-    spec::CA       # complex (Msp...) scratch
+    p_brfft::PB    # complex (Msp...) → real (Ms...), unnormalized; consumes its input
+    spec::CA
+    spec1::C1
     u_phys::RA
     g_phys::GA
     n_phys::RA
-    emap::EM
+    maps::PM
+    kd::KD
+    invM::R
 end
 
 const AnyPaddedScratch = Union{ComplexPaddedScratch, RealPaddedScratch}
 
-# What `NonlinearTermWorkspace.plans` holds: the pre-planned FFTW transforms, the scratch buffers
-# they read and write, and the wavenumber / dealias factors the hot path multiplies by — so
-# `_nonlinear_term_fft!` allocates nothing. Which of the two applies is set by the field's spectral
-# layout, and the hot path dispatches on the type.
+# `NonlinearTermWorkspace.plans`: the pre-planned FFTW transforms, the scratch buffers they read and
+# write, and the wavenumber / dealias factors of the hot path. The field's spectral layout selects the
+# type.
 #
 # `ComplexFFTPlans` — a field stored on the full fftfreq grid. Both legs are c2c on `(ms...)`; the
 # backward transform writes to its own output buffer and the physical value is the real part.
 #
 # `RealFFTPlans` — a real field stored on the non-redundant half. The backward leg is a c2r
-# (`brfft`) writing a real array directly and the forward leg an r2c (`rfft`): half the spectral
-# memory, no real↔complex widening, no conjugate half to carry. FFTW's multi-dimensional c2r
-# consumes its input, so `spec` holds no live value across a backward transform.
+# (`brfft`) writing a real array directly and the forward leg an r2c (`rfft`). FFTW's
+# multi-dimensional c2r consumes its input, so `spec` holds no live value across a backward transform.
 #
 # Both keep the wavenumber components and the dealias keep-mask as `nd` per-axis arrays reshaped to
-# broadcast along their own axis (`FlowTransformBindings.wavenumber_arrays` / `dealias_factors`): the hot
-# broadcasts fuse against `Σ_d m_d` stored numbers.
+# broadcast along their own axis (`FlowTransformBindings.wavenumber_arrays` / `dealias_factors`).
 struct ComplexFFTPlans{PF, PB, CA, KC, KM, PS}
     p_fft::PF      # unnormalized forward c2c plan on a single (ms...) component
     p_bfft::PB     # unnormalized backward c2c plan on a single (ms...) component
@@ -78,8 +80,7 @@ struct ComplexFFTPlans{PF, PB, CA, KC, KM, PS}
     spec2::CA      # complex (ms...) scratch
     kg::KC         # nd wavenumber arrays, reshaped to broadcast along their own axis
     keep::KM       # nd dealias keep factors, likewise reshaped
-    pad::PS        # PaddedScratch when built for FIT.Types.PaddedThreeHalves, else `nothing` — concrete either
-                   # way, so `plans.pad` access is type-stable (no dynamic dispatch in the hot path).
+    pad::PS        # padded scratch when built for FIT.Types.PaddedThreeHalves, else `nothing`
 end
 
 struct RealFFTPlans{PF, PB, CA, KC, KM, PS}
@@ -93,65 +94,73 @@ end
 
 const AnyFFTPlans = Union{ComplexFFTPlans, RealFFTPlans}
 
-# Custom one-line `show`: NEVER recurse into a live FFTW/cuFFT plan — the default field-by-field show
-# calls `show(::IO, ::FFTW.Plan)` → the C `fftw_sprint_plan`, which can SEGFAULT on a fragile/closed
-# plan (see the plan-show hazard). These make displaying any workspace that holds the bundle safe.
 Base.show(io::IO, p::AnyPaddedScratch) = print(io, nameof(typeof(p)), "(…)")
 Base.show(io::IO, ::MIME"text/plain", p::AnyPaddedScratch) = show(io, p)
 Base.show(io::IO, b::AnyFFTPlans) =
     print(io, nameof(typeof(b)), "(", b.pad === nothing ? "2/3 dealias" : "3/2 padded", ")")
 Base.show(io::IO, ::MIME"text/plain", b::AnyFFTPlans) = show(io, b)
 
-# More specific than the core fallback `_make_fft_plans(::Any, ::Any, ::Any) = nothing`, so this ADDS
-# a method (no overwriting) — dispatched only for complex spectral fields when FFTW is loaded. The
-# `dealiasing` is known at workspace construction, so the (larger) padded scratch is built here ONLY
-# for PaddedThreeHalves and its concrete type flows into the plan set's `pad` — keeping every
-# `plans.pad` access type-stable with no allocation on the common 2/3 path.
-function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, dealiasing, fft_nthreads::Int)
-    nd = length(ks)
+# More specific than the core `_make_fft_plans`, so the extension adds a method without overwriting
+# one. The padded plans are built only when the workspace has a padded grid.
+#
+# `AbstractFFTs.plan_fft` dispatches on the array type (FFTW for an `Array`, cuFFT for a `CuArray`). An
+# array type with no FFT provider (a JLArray) makes the planner throw a `MethodError`; the workspace
+# then holds `nothing`, and an FFT compute on it throws an `ArgumentError` naming the array type
+# (`_require_plans`).
+function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, pad, fft_nthreads::Int)
     ns = FTB.full_size(ks)        # physical grid
     ms = FTB.spectral_size(ks)    # coefficient grid
     FT = real(eltype(velocity_hat))
-    twothirds = dealiasing isa FIT.Types.OrszagTwoThirds
-    # `derivative = true`: axis d's array carries 0 at ITS OWN Nyquist mode, where the grid
-    # derivative along d vanishes. A mode at Nyquist on some OTHER axis keeps a well-defined (and
-    # Hermitian) derivative along d, so the zero belongs in the wavenumber, not in a product mask.
+    # `derivative = true`: axis d's array is 0 at axis d's own Nyquist mode, where the grid derivative
+    # along d vanishes. A mode at Nyquist on another axis keeps a well-defined, Hermitian derivative
+    # along d, so the zero goes in the per-axis wavenumber array.
     kg   = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
-    keep = FTB.dealias_factors(velocity_hat, FT, ks, twothirds)
-    pad  = dealiasing isa FIT.Types.PaddedThreeHalves ? _make_padded_scratch(velocity_hat, ks, fft_nthreads) : nothing
+    # The 2/3 keep factors; the legs apply them only when called to truncate.
+    keep = FTB.dealias_factors(velocity_hat, FT, ks, true)
 
     if FTB.is_halved(ks)
-        rp = try
-            _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads)
-        catch err
-            err isa MethodError || rethrow()
-            nothing
-        end
+        rp = _plans_or_nothing(() -> _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads))
         rp === nothing && return nothing
         p_rfft, p_brfft = rp
-        return RealFFTPlans(p_rfft, p_brfft, similar(velocity_hat, ms...), kg, keep, pad)
+        return RealFFTPlans(p_rfft, p_brfft, similar(velocity_hat, ms...), kg, keep,
+                            _padded_scratch(velocity_hat, ks, pad, fft_nthreads))
     end
 
     ct  = similar(velocity_hat, ms...)   # complex (ms...) — device-generic
     ct2 = similar(velocity_hat, ms...)
-    # `AbstractFFTs.plan_fft` dispatches by array type (FFTW for host `Array`s, cuFFT for `CuArray`s,
-    # …), so this one engine runs on CPU and device. ESTIMATE planning does not overwrite the array;
-    # serialize because FFTW planning is not thread-safe (the threaded backend builds a ws per task).
-    # `_plan_fft_bfft` dispatches BY ARRAY TYPE (FFTW imports+extends `AbstractFFTs.plan_fft`): a host
-    # `Array` → FFTW plan, a `CuArray` (CUDA loaded) → cuFFT plan — one device-generic engine, built
-    # single-threaded. If the array type has no registered FFT provider (e.g. a JLArray test surrogate),
-    # planning throws a `MethodError`: catch it and return `nothing` so workspace construction still
-    # succeeds; the FFT compute path then errors clearly (never silently) if `SpectralBackends.FFTSpectralBackend` is requested.
-    plans = try
-        _plan_fft_bfft(ct; nthreads = fft_nthreads)
-    catch err
-        err isa MethodError || rethrow()
-        nothing
-    end
+    plans = _plans_or_nothing(() -> _plan_fft_bfft(ct; nthreads = fft_nthreads))
     plans === nothing && return nothing
     p_fft, p_bfft = plans
-    return ComplexFFTPlans(p_fft, p_bfft, ct, ct2, kg, keep, pad)
+    return ComplexFFTPlans(p_fft, p_bfft, ct, ct2, kg, keep,
+                           _padded_scratch(velocity_hat, ks, pad, fft_nthreads))
 end
+
+# `f()`, or `nothing` when the planner has no method for the array type.
+function _plans_or_nothing(f)
+    try
+        return f()
+    catch err
+        err isa MethodError || rethrow()
+        return nothing
+    end
+end
+
+_padded_scratch(velocity_hat, ks, pad::FIT.Workspaces.PaddedGrid, fft_nthreads) =
+    _make_padded_scratch(velocity_hat, ks, pad, fft_nthreads)
+_padded_scratch(velocity_hat, ks, ::Nothing, fft_nthreads) = nothing
+
+# The workspace's plan set; a workspace whose array type has no FFT provider holds `nothing`.
+_require_plans(ws) = _require_plans(ws.plans, ws)
+_require_plans(p::AnyFFTPlans, ws) = p
+_require_plans(::Nothing, ws) = throw(ArgumentError(
+    "no FFT plans for $(nameof(typeof(ws.N̂))) arrays: AbstractFFTs has no plan for this array type. " *
+    "Pass an array type with an FFT provider (an Array with FFTW, a CuArray with CUDA), or " *
+    "transform = SpectralBackends.DirectSumSpectralBackend() for host arrays."))
+
+_require_pad(p::AnyFFTPlans) = _require_pad(p.pad)
+_require_pad(pad::AnyPaddedScratch) = pad
+_require_pad(::Nothing) = throw(ArgumentError(
+    "PaddedThreeHalves needs a workspace built for it — construct with dealiasing=PaddedThreeHalves()."))
 
 # Real-to-complex pair for the half layout: `rfft` on a real `(ns...)` component and the
 # unnormalized inverse `brfft` back. Planned as the c2c pair is; `plan_brfft` is planned on a scratch
@@ -161,63 +170,31 @@ function _plan_r2c_c2r(proto, ::Type{FT}, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}
     # either a complex coefficient array or a real physical one.
     rbuf = similar(proto, FT, ns...)
     cbuf = similar(proto, complex(FT), ms...)
-    # UNALIGNED: the physical side of these transforms is a component slice of an `(ns…, C)` buffer,
+    # `UNALIGNED`: the physical side of these transforms is a component slice of an `(ns…, C)` buffer,
     # whose base pointer moves by `prod(ns)*sizeof(FT)` per component. A plan built on a freshly
-    # allocated array records that array's SIMD alignment and rejects any argument that does not match
-    # it, which those slices do not. Writing through the slice keeps the transform's result where it
-    # is used; the alternative costs a full-grid copy per component.
+    # allocated array records that array's SIMD alignment and rejects arguments that do not match it,
+    # as those slices do not.
     flags = FFTW.ESTIMATE | FFTW.UNALIGNED
     return FFTW.set_num_threads(nthreads) do
         (FFTW.plan_rfft(rbuf; flags = flags), FFTW.plan_brfft(cbuf, ns[1]; flags = flags))
     end
 end
 
-# Build the padded (≈3N/2) scratch once, for the exact-3/2 nonlinear term. `similar(velocity_hat,…)`
-# propagates the array kind + eltype (fully generic — no hardcoded Float64).
-function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks, fft_nthreads::Int)
-    nd   = length(ks)
-    ns   = FTB.full_size(ks)
-    ms   = FTB.spectral_size(ks)
-    half = FTB.is_halved(ks)
-    M    = size(velocity_hat, nd + 1)
-    FT   = real(eltype(velocity_hat))
-    Ms   = ntuple(d -> FTB.padded_length(ns[d]), nd)  # padded physical grid
-    Msp  = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], nd)  # padded coefficient grid
-    spec   = similar(velocity_hat, Msp...)
-    u_phys = similar(velocity_hat, FT, Ms..., nd)
-    g_phys = similar(velocity_hat, FT, Ms...)
-    n_phys = similar(velocity_hat, FT, Ms..., M)
-    # ms→Msp permutation: mode index i on axis d carries the signed wavenumber `km`, landing at
-    # padded index km≥0 ? km+1 : Msp+km+1 (positive frequencies at the front, negative at the back).
-    # A half layout's first axis holds only km ≥ 0, so that axis takes the first branch throughout.
-    emap = _padded_map(ks, ms, Msp, FT)
-    if half
+# The padded plans over the buffers and gather tables of `pad`, in `velocity_hat`'s array type.
+function _make_padded_scratch(velocity_hat::AbstractArray{<:Complex}, ks, pad::FIT.Workspaces.PaddedGrid,
+                              fft_nthreads::Int)
+    FT  = real(eltype(velocity_hat))
+    Ms  = FTB.full_size(pad.ks)          # padded physical grid
+    Msp = FTB.spectral_size(pad.ks)      # padded coefficient grid
+    if FTB.is_halved(ks)
         p_rfft, p_brfft = _plan_r2c_c2r(velocity_hat, FT, Ms, Msp; nthreads = fft_nthreads)
-        return RealPaddedScratch(p_rfft, p_brfft, spec, u_phys, g_phys, n_phys, emap)
+        return RealPaddedScratch(p_rfft, p_brfft, pad.spec, pad.spec1,
+                                 pad.u_phys, pad.g_phys, pad.n_phys, pad.maps, pad.kd, pad.invM)
     end
-    p_fft, p_bfft = _plan_fft_bfft(spec; nthreads = fft_nthreads)
-    return ComplexPaddedScratch(p_fft, p_bfft, spec, similar(velocity_hat, Msp...),
-                                u_phys, g_phys, n_phys, emap)
-end
-
-"""
-    _nonlinear_term_fft!(ws, velocity_hat, ks; truncate=true, advecting_hat=velocity_hat)
-
-Allocation-free pseudospectral nonlinear term N̂ = FFT[(u_adv·∇)u] written into `ws.N̂`, using
-the pre-planned transforms / scratch in `ws.plans`. The 2/3 input truncation is folded into the
-spectral copies (no temporary dealiased array) and the output is re-zeroed above the cutoff.
-Normalisation: `ifft = bfft/Np`, and the forward result is divided by `Np` (package coefficient
-convention). `N_i = (u_adv)_j ∂_j u_i`: `u_phys` is the advecting velocity and `g_phys` carries one
-advected gradient at a time.
-"""
-function FIT.NonlinearTerm._nonlinear_term_fft!(
-    ws,
-    velocity_hat,
-    ks;
-    truncate::Bool = true,
-    advecting_hat = velocity_hat,
-)
-    return _nlt!(ws.plans, ws, velocity_hat, ks, truncate, advecting_hat)
+    out = similar(velocity_hat, Msp...)
+    p_fft, p_bfft = _plan_fft_bfft(pad.spec; nthreads = fft_nthreads)
+    return ComplexPaddedScratch(p_fft, p_bfft, pad.spec, pad.spec1, out, reshape(out, Msp..., 1),
+                                pad.u_phys, pad.g_phys, pad.n_phys, pad.maps, pad.kd, pad.invM)
 end
 
 # Product of the per-axis dealias keep factors at every mode. A lazy broadcast: fusing it into the
@@ -226,42 +203,42 @@ end
 @inline _keepmask(keep, ::Val{2}) = Broadcast.broadcasted(*, keep[1], keep[2])
 @inline _keepmask(keep, ::Val{3}) = Broadcast.broadcasted(*, keep[1], keep[2], keep[3])
 
-# The term splits into three legs, each usable on its own: synthesise the advecting velocity,
-# accumulate `Σ_j u_j ∂_j f` into `N_phys`, transform that forward. The mode-to-mode driver reuses the
-# first and third and supplies its own middle leg, whose giver is a single mode.
-function _nlt!(pb::AnyFFTPlans, ws, velocity_hat, ks, truncate::Bool, advecting_hat)
-    _synth_advecting!(pb, ws, advecting_hat, ks, truncate)
-    _accumulate_advection!(pb, ws, velocity_hat, ks, truncate)
-    _forward_nhat!(pb, ws, ks, truncate)
-    return ws.N̂
-end
+# The nonlinear term `N̂ = FFT[(u_adv·∇)f]/Np` on the preplanned transforms in `ws.plans`, in three legs:
+# synthesise the advecting velocity into `u_phys`, accumulate `Σ_j u_j ∂_j f` into `N_phys` with one
+# gradient at a time in `g_phys`, transform that forward. The 2/3 input truncation is folded into the
+# spectral copies and the output is zeroed above the cutoff. Synthesis is the unnormalized `bfft`.
 
 # --- leg 1: advecting velocity into ws.u_phys ---
-# `u_phys[...,j] = Σ_k û e^{ik·x}` — an UNNORMALIZED inverse, since `û` already carries the `1/Nᵈ` of
+# `u_phys[...,j] = Σ_k û e^{ik·x}` — an unnormalized inverse, since `û` already carries the `1/Nᵈ` of
 # the package convention. `j = 1:nd` (spatial directions only).
-function _synth_advecting!(pb::ComplexFFTPlans, ws, advecting_hat, ks, truncate::Bool)
+_synth_advecting!(pb::AnyFFTPlans, ws, advecting_hat, ks, truncate::Bool) =
+    _synth_components!(pb, ws.u_phys, advecting_hat, ks, length(ks), truncate)
+
+# `dest[…, j] = Σ_k src[k, j] e^{ik·x}` for `j = 1:ncomp`, the inputs truncated to the kept band when
+# `truncate`.
+function _synth_components!(pb::ComplexFFTPlans, dest, src_hat, ks, ncomp::Int, truncate::Bool)
     nd = length(ks)
     keep = _keepmask(pb.keep, Val(nd))
-    for j in 1:nd
-        a_j = selectdim(advecting_hat, nd + 1, j)
+    for j in 1:ncomp
+        a_j = selectdim(src_hat, nd + 1, j)
         truncate ? (pb.spec .= keep .* a_j) : (pb.spec .= a_j)
         LinearAlgebra.mul!(pb.spec2, pb.p_bfft, pb.spec)
-        selectdim(ws.u_phys, nd + 1, j) .= real.(pb.spec2)
+        selectdim(dest, nd + 1, j) .= real.(pb.spec2)
     end
-    return ws.u_phys
+    return dest
 end
 
 # `brfft` reconstructs the sum over the full Hermitian spectrum from the stored half, so the physical
 # field comes out real and unnormalized — the value the c2c engine gets from `real(bfft(û))`.
-function _synth_advecting!(pb::RealFFTPlans, ws, advecting_hat, ks, truncate::Bool)
+function _synth_components!(pb::RealFFTPlans, dest, src_hat, ks, ncomp::Int, truncate::Bool)
     nd = length(ks)
     keep = _keepmask(pb.keep, Val(nd))
-    for j in 1:nd
-        a_j = selectdim(advecting_hat, nd + 1, j)
+    for j in 1:ncomp
+        a_j = selectdim(src_hat, nd + 1, j)
         truncate ? (pb.spec .= keep .* a_j) : (pb.spec .= a_j)
-        LinearAlgebra.mul!(selectdim(ws.u_phys, nd + 1, j), pb.p_brfft, pb.spec)
+        LinearAlgebra.mul!(selectdim(dest, nd + 1, j), pb.p_brfft, pb.spec)
     end
-    return ws.u_phys
+    return dest
 end
 
 # --- leg 2: 𝒩_i = Σ_j (u_adv)_j ∂_j f_i, one gradient at a time through ws.g_phys ---
@@ -274,7 +251,7 @@ function _accumulate_advection!(pb::ComplexFFTPlans, ws, velocity_hat, ks, trunc
         fill!(Nc, zero(FT))
         for j in 1:nd
             kj = pb.kg[j]
-            pb.spec .= (im .* kj) .* keep .* v_c
+            truncate ? (pb.spec .= (im .* kj) .* keep .* v_c) : (pb.spec .= (im .* kj) .* v_c)
             LinearAlgebra.mul!(pb.spec2, pb.p_bfft, pb.spec)
             ws.g_phys .= real.(pb.spec2)
             Nc .+= selectdim(ws.u_phys, nd + 1, j) .* ws.g_phys
@@ -292,7 +269,7 @@ function _accumulate_advection!(pb::RealFFTPlans, ws, velocity_hat, ks, truncate
         fill!(Nc, zero(FT))
         for j in 1:nd
             kj = pb.kg[j]
-            pb.spec .= (im .* kj) .* keep .* v_c
+            truncate ? (pb.spec .= (im .* kj) .* keep .* v_c) : (pb.spec .= (im .* kj) .* v_c)
             LinearAlgebra.mul!(ws.g_phys, pb.p_brfft, pb.spec)
             Nc .+= selectdim(ws.u_phys, nd + 1, j) .* ws.g_phys
         end
@@ -326,189 +303,147 @@ function _forward_nhat!(pb::RealFFTPlans, ws, ks, truncate::Bool)
     return ws.N̂
 end
 
-# Entry points the core mode-to-mode driver calls (stubs live in `NonlinearTerm`).
+# The legs `NonlinearTerm` calls (its stubs).
 FIT.NonlinearTerm._nlt_synth_advecting_fft!(ws, advecting_hat, ks, truncate::Bool) =
-    _synth_advecting!(ws.plans, ws, advecting_hat, ks, truncate)
+    _synth_advecting!(_require_plans(ws), ws, advecting_hat, ks, truncate)
+function FIT.NonlinearTerm._nlt_advect_fft!(ws, advected_hat, ks, truncate::Bool)
+    pb = _require_plans(ws)
+    _accumulate_advection!(pb, ws, advected_hat, ks, truncate)
+    return _forward_nhat!(pb, ws, ks, truncate)
+end
 FIT.NonlinearTerm._nlt_forward_fft!(ws, ks, truncate::Bool) =
-    _forward_nhat!(ws.plans, ws, ks, truncate)
+    _forward_nhat!(_require_plans(ws), ws, ks, truncate)
+
+# ---------------------------------------------------------------------------
+# Rotational form 𝒩̂ = FFT[ω × u] (stub and contract in `NonlinearTerm.compute_rotational_term!`)
+# ---------------------------------------------------------------------------
+
+# `ω̂ = i k × v̂` into `out`, with the per-axis derivative wavenumbers `kg` (zero at an even axis's
+# Nyquist slot). Broadcasts over the coefficient grid, so it runs on device arrays.
+function _curl_hat!(out, v, kg)
+    d = ndims(out)
+    v1 = selectdim(v, d, 1); v2 = selectdim(v, d, 2); v3 = selectdim(v, d, 3)
+    o1 = selectdim(out, d, 1); o2 = selectdim(out, d, 2); o3 = selectdim(out, d, 3)
+    k1 = kg[1]; k2 = kg[2]; k3 = kg[3]
+    @. o1 = im * (k2 * v3 - k3 * v2)
+    @. o2 = im * (k3 * v1 - k1 * v3)
+    @. o3 = im * (k1 * v2 - k2 * v1)
+    return out
+end
+
+# ω̂ is formed in `ws.N̂`, synthesised into `ws.N_phys` beside u in `ws.u_phys`, crossed in place, and
+# `ws.N̂` then takes the forward transform of `ω × u`.
+function FIT.NonlinearTerm._rotational_term_fft!(ws, velocity_hat, vortex_hat, ks, truncate::Bool)
+    pb = _require_plans(ws)
+    _curl_hat!(ws.N̂, vortex_hat, pb.kg)
+    _synth_components!(pb, ws.N_phys, ws.N̂, ks, 3, truncate)
+    _synth_components!(pb, ws.u_phys, velocity_hat, ks, 3, truncate)
+    FIT.NonlinearTerm._cross_in_place!(ws.N_phys, ws.u_phys, ws.g_phys)
+    return _forward_nhat!(pb, ws, ks, truncate)
+end
+
+# The same on the padded grid: ω̂ on the caller's grid with its derivative wavenumbers, both fields
+# embedded and synthesised on the padded grid, the product formed there and truncated back.
+function FIT.NonlinearTerm._rotational_term_padded_fft!(ws, velocity_hat, vortex_hat, ks)
+    pb = _require_plans(ws)
+    pad = _require_pad(pb)
+    _curl_hat!(ws.N̂, vortex_hat, pb.kg)
+    _padded_synth!(pad, pad.n_phys, ws.N̂, 3)
+    _padded_synth!(pad, pad.u_phys, velocity_hat, 3)
+    FIT.NonlinearTerm._cross_in_place!(pad.n_phys, pad.u_phys, pad.g_phys)
+    return _padded_forward!(pad, ws.N̂)
+end
 
 # ---------------------------------------------------------------------------
 # Exact 3/2 zero-padded nonlinear term (PaddedThreeHalves)
 # ---------------------------------------------------------------------------
 
-# Coarse ↔ padded mode correspondence (`FlowTransformBindings.padded_images`), precomputed once. Each coarse
-# mode is halved once per axis on which it sits at Nyquist and duplicated on every full such axis;
-# `wt` inverts that on the way back, so `truncate ∘ embed` is the identity on every mode.
-struct PaddedMap{NDIM, FT, VI <: AbstractVector{<:Integer}, VF <: AbstractVector{FT}, VC <: AbstractVector{<:CartesianIndex{NDIM}}}
-    src::VI                   # linear index into the coarse (ms) array
-    dst::VC     # padded index
-    we::VF                      # embed weight
-    wt::VF                     # truncate weight
-    nyq_row::Int                          # coarse axis-1 Nyquist row to recombine, 0 when there is none
-end
-
-function _padded_map(ks, ms::NTuple{nd,Int}, Msp::NTuple{nd,Int}, ::Type{FT}) where {nd, FT}
-    src = Int[]; dst = CartesianIndex{nd}[]; we = FT[]; wt = FT[]
-    # On a half first axis the coarse Nyquist plane is stored once and is its own image under k ↦ −k,
-    # so truncation has to recombine it (see `_sym_nyquist_row!`). Any other layout needs nothing.
-    nyq_row = (FTB.is_halved(ks) && iseven(FTB.full_length(ks[1]))) ? ms[1] : 0
-    lin = LinearIndices(ms)
-    for I in CartesianIndices(ms)
-        opts = ntuple(d -> FTB.padded_images(ks[d], I[d], Msp[d]), nd)
-        nyq_axes = count(d -> FTB.is_nyquist(ks[d], I[d]), 1:nd)
-        halving = FT(1) / FT(2)^nyq_axes           # amplitude split across the Nyquist images
-        ntar = prod(length, opts)
-        for choice in Iterators.product(opts...)
-            push!(src, lin[I])
-            push!(dst, CartesianIndex(choice))
-            push!(we, halving)
-            push!(wt, FT(1) / (FT(ntar) * halving))
-        end
-    end
-    return PaddedMap{nd, FT, typeof(src), typeof(we), typeof(dst)}(src, dst, we, wt, nyq_row)
-end
-
-# Recombine the coarse Nyquist plane of a half first axis.
-#
-# That plane is stored once and is its own image under `k ↦ −k`, so its value is the sum of the two
-# padded modes `±n₁/2` carry. `PaddedMap` names one unmirrored target per coarse mode, so the
-# accumulation leaves each entry holding twice its own padded image; the `(k₂…, −k₂…)` pair combines
-# here into `(a + conj(b))/2`, which is self-conjugate — the condition for the plane to belong to a
-# real field's spectrum. Each unordered pair is visited once, and a self-mirrored entry becomes real.
-function _sym_nyquist_row!(dst::AbstractArray{CT}, r::Int) where {CT}
-    nd = ndims(dst)
-    tail = ntuple(d -> size(dst, d + 1), nd - 1)
-    lin = LinearIndices(tail)
-    @inbounds for J in CartesianIndices(tail)
-        t = Tuple(J)
-        Jm = CartesianIndex(ntuple(d -> t[d] == 1 ? 1 : tail[d] - t[d] + 2, nd - 1))
-        lin[J] <= lin[Jm] || continue
-        tm = Tuple(Jm)
-        v = (dst[r, t...] + conj(dst[r, tm...])) / 2
-        dst[r, t...] = v
-        dst[r, tm...] = conj(v)
-    end
-    return dst
-end
-
-# In-place zero-pad through the coarse→padded map, rest zeroed. No fftshift, no allocation.
-function _embed!(dest, src, pm::PaddedMap)
-    fill!(dest, zero(eltype(dest)))
-    @inbounds for i in eachindex(pm.src)
-        dest[pm.dst[i]] += pm.we[i] * src[pm.src[i]]
-    end
-    return dest
-end
-
-# In-place embed of the spectral derivative i·k_j·src through the same map. `kgj`/`dkj` are the
-# axis-`j` wavenumber and derivative-keep arrays reshaped to broadcast along axis `j`; each holds one
-# value per index on that axis, so the linear index `I[j]` selects the entry for mode `I`. `dkj`
-# zeroes the Nyquist derivative, so the split entries there contribute nothing.
-function _embed_deriv!(dest, src, kgj, j::Int, pm::PaddedMap, ms)
-    fill!(dest, zero(eltype(dest)))
-    cis = CartesianIndices(ms)
-    @inbounds for i in eachindex(pm.src)
-        I = cis[pm.src[i]]
-        dest[pm.dst[i]] += pm.we[i] * (im * kgj[I[j]]) * src[I]
-    end
-    return dest
-end
-
-# In-place truncate + normalization, accumulating the padded images of each coarse mode.
-function _truncate_scaled!(dst, src, pm::PaddedMap, scale)
-    fill!(dst, zero(eltype(dst)))
-    @inbounds for i in eachindex(pm.src)
-        dst[pm.src[i]] += pm.wt[i] * src[pm.dst[i]] * scale
-    end
-    pm.nyq_row == 0 || _sym_nyquist_row!(dst, pm.nyq_row)
-    return dst
-end
-
-"""
-    _nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
-
-Exact 3/2 zero-padded pseudospectral nonlinear term `𝒩 = (u_adv·∇)f` written into `ws.N̂`. Each
-field is embedded in a `(3N/2)`-point grid, the product is formed there (so the quadratic generates
-no aliasing into the resolved band), then transformed back and truncated to the original `N` modes.
-Allocation-free: uses the preplanned transforms + reusable `(Ms…)` buffers in `ws.plans.pad`
-(built for `PaddedThreeHalves` at workspace construction) and in-place `mul!` / fused broadcasts.
-Physical normalization: `N̂[k] = DFT_Ms(𝒩)[k] / Mtot` (unnormalized synthesis; see NonlinearTerm docstring).
-"""
-function FIT.NonlinearTerm._nonlinear_term_padded_fft!(ws, velocity_hat, ks; advecting_hat=velocity_hat)
-    pad = ws.plans.pad
-    pad === nothing && throw(ArgumentError(
-        "PaddedThreeHalves needs a workspace built for it — construct with dealiasing=PaddedThreeHalves()."))
-    return _nlt_padded!(pad, ws, velocity_hat, ks, advecting_hat)
-end
-
-# Number of physical points of the padded grid, from the padded buffer that is sized by it.
-_padded_points(pad) = length(pad.g_phys)
-
-function _nlt_padded!(pad::ComplexPaddedScratch, ws, velocity_hat, ks, advecting_hat)
-    nd   = length(ks)
-    M    = size(velocity_hat, nd + 1)
-    FT   = real(eltype(velocity_hat))
-    emap = pad.emap
-    kg   = ws.plans.kg
-    ms   = FTB.spectral_size(ks)
-    invM = FT(1) / FT(_padded_points(pad))     # 1/Mtot forward normalization
-
-    for j in 1:nd
-        _embed!(pad.spec, selectdim(advecting_hat, nd + 1, j), emap)
+# `dest[…, j]` for `j = 1:ncomp`: the coefficients of `src_hat` embedded in the padded grid
+# (`FlowTransformBindings.padded_embed!`, which splits an even axis's Nyquist slot across `±n/2`) and
+# synthesised there.
+function _padded_synth!(pad::ComplexPaddedScratch, dest, src_hat, ncomp::Int)
+    nd = ndims(pad.g_phys)
+    for j in 1:ncomp
+        FTB.padded_embed!(pad.spec1, FIT.NonlinearTerm._component(src_hat, j), pad.maps)
         LinearAlgebra.mul!(pad.out, pad.p_bfft, pad.spec)
-        selectdim(pad.u_phys, nd + 1, j) .= real.(pad.out)
+        selectdim(dest, nd + 1, j) .= real.(pad.out)
     end
-
-    for c in 1:M
-        nc  = selectdim(pad.n_phys, nd + 1, c)
-        v_c = selectdim(velocity_hat, nd + 1, c)
-        fill!(nc, zero(FT))
-        for j in 1:nd
-            _embed_deriv!(pad.spec, v_c, kg[j], j, emap, ms)
-            LinearAlgebra.mul!(pad.out, pad.p_bfft, pad.spec)
-            pad.g_phys .= real.(pad.out)
-            nc .+= selectdim(pad.u_phys, nd + 1, j) .* pad.g_phys
-        end
-    end
-
-    for c in 1:M
-        pad.spec .= selectdim(pad.n_phys, nd + 1, c)          # real → complex (fused, no allocation)
-        LinearAlgebra.mul!(pad.out, pad.p_fft, pad.spec)      # DFT_Ms(𝒩_c)
-        _truncate_scaled!(selectdim(ws.N̂, nd + 1, c), pad.out, emap, invM)
-    end
-    return ws.N̂
+    return dest
 end
 
-function _nlt_padded!(pad::RealPaddedScratch, ws, velocity_hat, ks, advecting_hat)
-    nd   = length(ks)
-    M    = size(velocity_hat, nd + 1)
-    FT   = real(eltype(velocity_hat))
-    emap = pad.emap
-    kg   = ws.plans.kg
-    ms   = FTB.spectral_size(ks)
-    invM = FT(1) / FT(_padded_points(pad))
-
-    for j in 1:nd
-        _embed!(pad.spec, selectdim(advecting_hat, nd + 1, j), emap)
-        LinearAlgebra.mul!(selectdim(pad.u_phys, nd + 1, j), pad.p_brfft, pad.spec)
+function _padded_synth!(pad::RealPaddedScratch, dest, src_hat, ncomp::Int)
+    nd = ndims(pad.g_phys)
+    for j in 1:ncomp
+        FTB.padded_embed!(pad.spec1, FIT.NonlinearTerm._component(src_hat, j), pad.maps)
+        LinearAlgebra.mul!(selectdim(dest, nd + 1, j), pad.p_brfft, pad.spec)
     end
+    return dest
+end
 
-    for c in 1:M
+# `∂_j` of the coefficients `src_c` (a `(ms..., 1)` view) synthesised on the padded grid into
+# `pad.g_phys`. The padded derivative wavenumbers are zero on the images of the caller's Nyquist slot,
+# where the caller's grid derivative vanishes.
+function _padded_grad!(pad::ComplexPaddedScratch, src_c, j::Int)
+    FTB.padded_embed!(pad.spec1, src_c, pad.maps)
+    pad.spec .*= im .* pad.kd[j]
+    LinearAlgebra.mul!(pad.out, pad.p_bfft, pad.spec)
+    pad.g_phys .= real.(pad.out)
+    return pad.g_phys
+end
+
+function _padded_grad!(pad::RealPaddedScratch, src_c, j::Int)
+    FTB.padded_embed!(pad.spec1, src_c, pad.maps)
+    pad.spec .*= im .* pad.kd[j]
+    LinearAlgebra.mul!(pad.g_phys, pad.p_brfft, pad.spec)
+    return pad.g_phys
+end
+
+# Every component of `pad.n_phys` transformed forward, divided by the padded point count and returned
+# to the caller's grid in `N̂` (`FlowTransformBindings.padded_truncate!`).
+function _padded_forward!(pad::ComplexPaddedScratch, N̂)
+    nd = ndims(pad.g_phys)
+    for c in 1:size(N̂, nd + 1)
+        pad.spec .= selectdim(pad.n_phys, nd + 1, c)
+        LinearAlgebra.mul!(pad.out, pad.p_fft, pad.spec)
+        pad.out .*= pad.invM
+        FTB.padded_truncate!(FIT.NonlinearTerm._component(N̂, c), pad.out1, pad.maps)
+    end
+    return N̂
+end
+
+function _padded_forward!(pad::RealPaddedScratch, N̂)
+    nd = ndims(pad.g_phys)
+    for c in 1:size(N̂, nd + 1)
+        LinearAlgebra.mul!(pad.spec, pad.p_rfft, selectdim(pad.n_phys, nd + 1, c))
+        pad.spec .*= pad.invM
+        FTB.padded_truncate!(FIT.NonlinearTerm._component(N̂, c), pad.spec1, pad.maps)
+    end
+    return N̂
+end
+
+# The exact 3/2 zero-padded term `𝒩 = (u_adv·∇)f`: both fields are embedded in the padded grid, the
+# product is formed there, so the quadratic aliases nothing into the resolved band, and the forward
+# transform is truncated back, `N̂[k] = DFT_Ms(𝒩)[k] / Mtot`. The advecting velocity is synthesised into
+# `pad.u_phys` once; each advected field then takes the gradients and the forward leg.
+function FIT.NonlinearTerm._nlt_padded_synth_fft!(ws, advecting_hat, ks)
+    pad = _require_pad(_require_plans(ws))
+    return _padded_synth!(pad, pad.u_phys, advecting_hat, length(ks))
+end
+
+function FIT.NonlinearTerm._nlt_padded_advect_fft!(ws, advected_hat, ks)
+    pad = _require_pad(_require_plans(ws))
+    nd = length(ks)
+    FT = real(eltype(advected_hat))
+    for c in 1:size(advected_hat, nd + 1)
         nc  = selectdim(pad.n_phys, nd + 1, c)
-        v_c = selectdim(velocity_hat, nd + 1, c)
+        v_c = FIT.NonlinearTerm._component(advected_hat, c)
         fill!(nc, zero(FT))
         for j in 1:nd
-            _embed_deriv!(pad.spec, v_c, kg[j], j, emap, ms)
-            LinearAlgebra.mul!(pad.g_phys, pad.p_brfft, pad.spec)
+            _padded_grad!(pad, v_c, j)
             nc .+= selectdim(pad.u_phys, nd + 1, j) .* pad.g_phys
         end
     end
-
-    for c in 1:M
-        LinearAlgebra.mul!(pad.spec, pad.p_rfft, selectdim(pad.n_phys, nd + 1, c))
-        _truncate_scaled!(selectdim(ws.N̂, nd + 1, c), pad.spec, emap, invM)
-    end
-    return ws.N̂
+    return _padded_forward!(pad, ws.N̂)
 end
 
 # ---------------------------------------------------------------------------
@@ -516,11 +451,11 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _shell_to_shell_fft!(result, ws, velocity_hat, ks; dealiasing, verify_antisymmetry)
+    _shell_to_shell_fft!(result, ws, velocity_hat, ks; dealiasing, invariant, advecting_hat) -> result
 
-FFT-accelerated shell-to-shell energy transfer T(n,m) using Alexakis et al. (2005)
-antisymmetric definition. Writes into `result` using workspace `ws`.
-Reuses ws.û_m and ws.nonlinear.N̂ buffers per mediator shell — no N_sh-fold allocations.
+FFT-accelerated shell-to-shell transfer T(n,m) in the antisymmetric definition of Alexakis, Mininni &
+Pouquet (2005), written into `result.transfer_matrix` and `result.net_transfer` with the buffers of
+`ws`.
 """
 function FIT.ShellToShellTransfer._shell_to_shell_fft!(
     result::FIT.Types.ShellToShellResult,
@@ -528,7 +463,6 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
     velocity_hat,
     ks;
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
-    verify_antisymmetry::Bool = true,
     invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
     advecting_hat = velocity_hat,
 )
@@ -538,23 +472,22 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
     FT    = real(eltype(velocity_hat))
     N_sh  = size(result.transfer_matrix, 1)
 
-    # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{c*·N̂_m}, N̂_m = (u·∇)f_m (full velocity advects band-m; AMP 2005).
-    # One mediator `m` at a time, reusing ws.û_m / ws.nonlinear.N̂ / ws.transfer_density. The per-mediator
-    # nonlinear term is delegated to the allocation-free `compute_nonlinear_term!` FFT path (preplanned
-    # transforms in ws.nonlinear.plans, in-place `mul!`) — it handles input truncation/output zeroing for
-    # OrszagTwoThirds and the exact PaddedThreeHalves engine, so no dealias copies or per-mediator FFT
-    # temporaries are allocated here. For energy A is antisymmetric and reduces as Σ_m A[n,m] = T(n).
+    # T(n,m) = A[n,m] = Σ_{I∈S_n} Re{c*·N̂_m}, N̂_m = (u·∇)f_m: the full velocity advects the band-m
+    # field (Alexakis–Mininni–Pouquet 2005). The advecting velocity is synthesised once; each mediator
+    # `m` then takes the advection of its band field. For energy A is antisymmetric and
+    # Σ_m A[n,m] = T(n).
     fill!(result.transfer_matrix, zero(FT))
     col = ws.net_transfer            # length-N_sh scratch, rewritten per mediator then copied out
+    fft = SpectralBackends.FFTSpectralBackend()
+    FIT.NonlinearTerm.synthesize_advecting!(ws.nonlinear, advecting_hat, ks; dealiasing = dealiasing, transform = fft)
     for m in 1:N_sh
         fill!(ws.û_m, zero(eltype(ws.û_m)))
         @inbounds for I in CartesianIndices(ns)
             ws.shell_idx[I] == m || continue
             for c in 1:M; ws.û_m[I, c] = velocity_hat[I, c]; end
         end
-        FIT.NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-            dealiasing=dealiasing, spectral=SpectralBackends.FFTSpectralBackend(), advecting_hat=advecting_hat)
-        # Density and receiver-shell scatter in one pass over the modes.
+        FIT.NonlinearTerm.compute_advection!(ws.nonlinear, ws.û_m, ks; dealiasing = dealiasing, transform = fft)
+        # Density and shell scatter in one pass over the modes.
         FIT.Invariants.transfer_density_scatter!(col, invariant, velocity_hat, ws.nonlinear.N̂, ks, ws.shell_idx)
         @inbounds for n in 1:N_sh
             result.transfer_matrix[n, m] = col[n]
@@ -567,18 +500,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
         result.net_transfer[n] = s
     end
 
-    max_asym = if verify_antisymmetry
-        v = zero(FT)
-        for n in 1:N_sh, m in 1:N_sh
-            a = abs(result.transfer_matrix[n, m] + result.transfer_matrix[m, n])
-            a > v && (v = a)
-        end
-        v
-    else
-        FT(NaN)
-    end
-
-    return max_asym
+    return result
 end
 
 # ---------------------------------------------------------------------------
@@ -586,11 +508,9 @@ end
 # ---------------------------------------------------------------------------
 
 # A reusable FFTW plan + scratch for a whole `(nDFT, nx)` block, built once per `TODWorkspace` and
-# batched over the time axis: one transform per (block, variable) in place of `nx` length-`nDFT` ones.
-# A real segment takes the r2c plan, whose `nDFT÷2+1` output is the non-redundant half of a spectrum
-# that is Hermitian by construction; `_temporal_block_dft_fft!` mirrors it back to the full bin range
-# the triad indexing needs. `plan_fft`/`plan_rfft` are the AbstractFFTs generics, so a device-array
-# prototype plans on its own library (cuFFT) and the block transform runs device-resident.
+# batched over the time axis. A real segment takes the r2c plan, whose `nDFT÷2+1` output is the
+# non-redundant half of a Hermitian spectrum; `_temporal_block_dft_fft!` mirrors it back to the full
+# bin range the triad indexing needs. A device-array prototype plans on its own library (cuFFT).
 function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(
     nDFT, nx, isreal_data::Bool, ::SpectralBackends.FFTSpectralBackend, ::Type{RT}, proto,
 ) where {RT}
@@ -632,7 +552,6 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     #
     # `shift` is `nDFT÷2`, so the first run's sources all lie in the stored `1 … nDFT÷2+1` half; the
     # second run splits at `nh`, above which a source is the conjugate of its mirror, `û(−k) = conj(û(k))`.
-    # Both bounds are loop-invariant, so neither run carries a division or a branch per element.
     nh = size(spec, 1)
     n2 = nDFT - shift                 # length of the run that maps to the tail of the destination
     s0 = n2 + 1                       # first source of the run that maps to the head
@@ -652,12 +571,10 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
 end
 
 # ---------------------------------------------------------------------------
-# FFT transform context for the compressible spectral transfer (SpectralBackends.FFTSpectralBackend). Provides the
-# O(Nᵈ log Nᵈ) analysis/synthesis/gradient primitives the compressible core assembly calls through
-# `FIT.Compressible.TransformContext`, replacing its dependency-free explicit-DFT (SpectralBackends.DirectSumSpectralBackend).
-# One forward + one backward plan and two (ns...) scratch buffers are shared across every component
-# and every transform in a call (created once, under FFTW.jl's planner lock). Convention matches the core:
-# synthesis u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
+# FFT transform context for the compressible spectral transfer (`SpectralBackends.FFTSpectralBackend`),
+# the `FIT.Compressible.TransformContext` of `O(Nᵈ log Nᵈ)` primitives. One forward and one backward
+# plan and the coefficient scratch serve every component and transform of a call. Synthesis
+# u = Σ û e^{ik·x} = bfft(û); analysis û = fft(u)/Nᵈ; gradient ∂_d f = bfft(i k_d f̂).
 # ---------------------------------------------------------------------------
 function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft_nthreads::Int = 1) where {nd}
     FT = real(eltype(velocity_hat))
@@ -665,11 +582,10 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft
     Np = FT(prod(ns))
     ms = FTB.spectral_size(ks)
     half = FTB.is_halved(ks)
-    # Device-generic: buffers are built in `velocity_hat`'s own array type, `kg` (the per-axis derivative
-    # wavenumbers) is too, and every per-component transfer writes a contiguous last-dim slice (no scalar
-    # indexing), so the compressible transform runs on CPU `Array`s (FFTW) and on device arrays (cuFFT
-    # via AbstractFFTs) unchanged. The physical side is real on both layouts: `brfft` on the half,
-    # `real(bfft(·))` on the full.
+    # The buffers and `kg` (the per-axis derivative wavenumbers) are in `velocity_hat`'s array type, and
+    # every per-component transfer writes a contiguous last-dim slice, so host and device arrays share
+    # this code. The physical side is real on both layouts: `brfft` on the half, `real(bfft(·))` on the
+    # full.
     cbuf = similar(velocity_hat, CT, ms)
 
     if half
@@ -728,11 +644,7 @@ function FIT.Compressible._fft_tf(velocity_hat, ks, ns::NTuple{nd, Int}, kg; fft
             return g
         end
     end
-    # Out-of-place siblings allocate a device-kind output then delegate to the in-place kernels.
-    idft = fh -> idft!(similar(fh, FT, ns..., size(fh, nd + 1)), fh)
-    dft  = fp -> dft!(similar(fp, CT, ms..., size(fp, nd + 1)), fp)
-    grad = fh -> grad!(similar(fh, FT, ns..., size(fh, nd + 1), nd), fh)
-    return FIT.Compressible.TransformContext(idft, dft, grad, idft!, dft!, grad!)
+    return FIT.Compressible.TransformContext(idft!, dft!, grad!)
 end
 
 end # module FlowInvariantTransferFFTWExt

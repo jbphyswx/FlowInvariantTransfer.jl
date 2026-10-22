@@ -43,14 +43,15 @@ wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D,Real}; real::Bool = false) where
 """
     wavenumber_magnitude_grid(ks) -> Array{T, D}
 
-Compute the isotropic wavenumber magnitude |k| at every grid point.
+The isotropic wavenumber magnitude `|k|` at every stored mode of the layout `ks`.
 
 # Arguments
 - `ks::NTuple{D, AbstractVector}`: Tuple of 1D wavenumber vectors (e.g., from `wavenumber_grid`).
 
 # Returns
-`D`-dimensional array of the same size as the full grid, with entry `[i₁,…,i_D] = sqrt(ks[1][i₁]² + … + ks[D][i_D]²)`
-and element type `T`, the promotion of the axes' element types.
+`D`-dimensional array of the coefficient shape of `ks` (the halved first axis included), with entry
+`[i₁,…,i_D] = sqrt(ks[1][i₁]² + … + ks[D][i_D]²)` and element type `T`, the promotion of the axes'
+element types.
 """
 function wavenumber_magnitude_grid(ks::NTuple{D, <:AbstractVector}) where {D}
     FT    = promote_type(map(eltype, ks)...)
@@ -92,40 +93,47 @@ function validate_velocity_input(velocity_components::Tuple, dims::Int)
 end
 
 """
-    validate_uniform_grid(coords_vecs; tol=1e-10)
+    validate_uniform_grid(coords_vecs; tol = nothing) -> NTuple{D}
 
-Check that each coordinate vector represents a uniform (equi-spaced) grid,
-returning the spacing tuple.
+The spacing `Δ = (x_N − x_1)/(N − 1)` of each coordinate vector, in its float type, after checking
+that every step equals `Δ` to `tol` relative to the coordinates' magnitude `max(|x_1|, |x_N|, |Δ|)`
+(`tol = nothing`: `√eps` of the coordinates' float type). A vector of fewer than two points has spacing
+zero.
 
-Throws `ArgumentError` if any dimension is non-uniform beyond `tol`.
+Throws `ArgumentError` if a step differs from `Δ` by more than that.
 """
-function validate_uniform_grid(coords_vecs::NTuple{D, <:AbstractVector}; tol::Float64 = 1e-10) where {D}
-    spacings = ntuple(Val(D)) do d
+function validate_uniform_grid(coords_vecs::NTuple{D, <:AbstractVector}; tol::Union{Nothing, Real} = nothing) where {D}
+    return ntuple(Val(D)) do d
         cv = coords_vecs[d]
-        length(cv) < 2 && return 0.0
-        Δ = (cv[end] - cv[begin]) / (length(cv) - 1)
+        FT = float(eltype(cv))
+        length(cv) < 2 && return zero(FT)
+        Δ = FT(cv[end] - cv[begin]) / (length(cv) - 1)
+        rtol = tol === nothing ? sqrt(eps(FT)) : FT(tol)
+        bound = rtol * max(abs(FT(cv[begin])), abs(FT(cv[end])), abs(Δ))
         for i in 2:length(cv)
-            abs((cv[i] - cv[i-1]) - Δ) > tol * abs(Δ) + tol &&
-                throw(ArgumentError("Coordinate dimension $d is not uniform (spacing varies beyond tol=$tol)."))
+            abs(FT(cv[i] - cv[i-1]) - Δ) > bound && throw(ArgumentError(
+                "coordinate direction $d is not uniform: step $(cv[i] - cv[i-1]) at index $i against the " *
+                "mean spacing $Δ (tolerance $bound)."))
         end
         return Δ
     end
-    return spacings
 end
 
 """
-    domain_size_from_coords(coords_vecs) -> NTuple{D, Float64}
+    domain_size_from_coords(coords_vecs) -> NTuple{D}
 
-Infer the physical domain size from coordinate vectors, assuming uniform periodic grids
-where spacing Δ = (max − min) / N (so domain = N * Δ).
+The period `L = NΔ` of each coordinate vector read as `N` periodic samples `x_1, x_1 + Δ, …,
+x_1 + (N−1)Δ`, the last one step short of `x_1 + L`, in the coordinates' float type. A vector that
+ends at `x_1 + L` repeats the first sample and does not meet this contract. A vector of fewer than two
+points has period 1.
 """
 function domain_size_from_coords(coords_vecs::NTuple{D, <:AbstractVector}) where {D}
     return ntuple(Val(D)) do d
         cv = coords_vecs[d]
+        FT = float(eltype(cv))
         N = length(cv)
-        N < 2 && return 1.0
-        Δ = (cv[end] - cv[begin]) / (N - 1)
-        return N * Δ
+        N < 2 && return one(FT)
+        return N * (FT(cv[end] - cv[begin]) / (N - 1))
     end
 end
 

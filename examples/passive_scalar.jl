@@ -21,15 +21,15 @@ function run_passive_scalar_example(; N=32)
     û, θ̂, ks, L = evolve_taylor_green(; N=N, with_scalar=true)
 
     b = FIT.Types.LinearBinning(2π / L)
-    flux = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    flux = FIT.calculate_scalar_flux(û, θ̂, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend())
     s2s  = FIT.calculate_scalar_shell_to_shell_transfer(û, θ̂, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
-        verify_antisymmetry=true, spectral=FIT.SpectralBackends.FFTSpectralBackend())
+        transform=FIT.SpectralBackends.FFTSpectralBackend())
+    T = s2s.transfer_matrix
 
     println("Peak variance flux Π_θ = ", round(maximum(flux.flux); sigdigits=4))
     println("antisymmetry of T_θ(n,m) = ",
-            round(s2s.max_antisymmetry_error / sqrt(sum(abs2, s2s.transfer_matrix)); sigdigits=3))
+            round(maximum(abs, T .+ T') / sqrt(sum(abs2, T)); sigdigits=3))
 
-    T = s2s.transfer_matrix
     Tlim = maximum(abs, T)
     kmax = findlast(n -> any(>(0.01Tlim), abs.(T[n, :])) || any(>(0.01Tlim), abs.(T[:, n])), 1:size(T,1))
     kmax = something(kmax, size(T, 1)); sh = 1:kmax
@@ -45,8 +45,9 @@ function run_passive_scalar_example(; N=32)
 
     ax2 = CairoMakie.Axis(fig[1, 2], title=θsub("Variance flux Π", "(K)  (>0 ⇒ forward)"), xlabel="K",
         ylabel=θsub("Π", "(K)"))
-    CairoMakie.band!(ax2, flux.k_shells, zero(flux.flux), flux.flux; color=(:darkorange, 0.18))
-    CairoMakie.lines!(ax2, flux.k_shells, flux.flux, color=:darkorange, linewidth=2.5)
+    K = flux.shell_edges[2:end]            # Π_θ[n] is the flux through the upper edge of shell n
+    CairoMakie.band!(ax2, K, zero(flux.flux), flux.flux; color=(:darkorange, 0.18))
+    CairoMakie.lines!(ax2, K, flux.flux, color=:darkorange, linewidth=2.5)
     CairoMakie.hlines!(ax2, [0]; color=:black, linewidth=0.8, linestyle=:dot)
 
     ax3 = CairoMakie.Axis(fig[1, 3], title=θsub("Shell-to-shell T", "(n,m)  (blue: n gives to m)"),

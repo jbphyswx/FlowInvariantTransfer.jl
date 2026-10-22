@@ -20,51 +20,52 @@ responsible for a distinct concern:
 
 ```
 FlowInvariantTransfer (top-level)
-├── Types              # All type definitions (methods, invariants, backends, results)
-├── Utils              # Wavenumber grids, magnitude, dealiasing masks
+├── Types              # Method, invariant, decomposition, binning, geometry, dealiasing and result types
+├── Utils              # Wavenumber grids, magnitude, input validation
 ├── Invariants         # Per-mode transfer density for each invariant
-├── Decomposition      # Field decomposition stubs (Helmholtz etc.)
+├── Decomposition      # Field decompositions (helical, toroidal/poloidal; Helmholtz stubs)
 ├── ShellBinning       # Shell edge/center/assignment logic
 ├── Filters            # Spectral filter responses and application
 ├── Workspaces         # Preallocated buffer structs for zero-alloc paths
-├── NonlinearTerm      # Pseudospectral (u·∇)u computation
-├── SpectralFlux       # Π(K) and T(k) accumulation
+├── NonlinearTerm      # Pseudospectral (u·∇)f computation
+├── SpectralFlux       # Π(K), T(k) and the partial fluxes
 ├── CoarseGrainingFlux # Wrapper for CoarseGrainingEnergyFluxes.jl
 ├── ShellToShellTransfer    # T(n,m) matrix computation
-├── ModeToModeTransfer    # S(k|p|q) triad computation
-└── TriadicOrthogonalDecomposition  # TOD (frequency-domain SVD)
+├── BandTransfer       # Smooth band-to-band T(K,Q) and band energies
+├── TriadicOrthogonalDecomposition  # TOD (frequency-domain SVD)
+├── ModeToModeTransfer    # S(k|p) triad computation
+├── Compressible       # Momentum-weighted compressible transfer
+└── Spherical          # Spherical (degree-spectrum) transfer
 ```
 
-### Architecture Pattern: Method × Backend
+### Architecture Pattern: Method × Invariant × Backends
 
-FlowInvariantTransfer.jl uses a **method–backend composition** pattern:
+A diagnostic is selected by composing independent choices:
 
 ```
 Spectral data (û, ks)
     ↓
-[Method Type] ← Specifies WHICH diagnostic to compute
+[Method]            ← which diagnostic to compute
     ↓
-[Invariant Trait] ← Specifies WHICH quadratic invariant (KE/H/Ω)
+[Invariant trait]   ← which quadratic invariant (KE / helicity / enstrophy / scalar variance)
     ↓
-[Execution Backend] ← Specifies HOW to compute (Serial/FFT/GPU/...)
+[transform]         ← which transform (direct sum / FFT / …)
+[execution]         ← how the work runs (serial / threaded / distributed / GPU)
     ↓
-Result Container ← Stores transfer spectra, matrices, modes
+Result container    ← transfer spectra, matrices, modes
 ```
 
-Example:
+Example, with `const FIT = FlowInvariantTransfer`:
 ```julia
-# Method: "Compute shell-to-shell transfer"
-method = ShellToShellTransferMethod(LinearBinning(1.0))
-
-# Invariant: "Accumulate enstrophy"
-# Backend: "Use 4 threads"
+# Method: shell-to-shell transfer; invariant: enstrophy; execution: threads
+method = FIT.Types.ShellToShellTransferMethod(FIT.Types.LinearBinning(1.0))
 result = calculate_energy_transfer(method, û, ks;
-    invariant = Enstrophy(),
-    backend = ThreadedBackend())
+    invariant = FIT.Types.Enstrophy(),
+    execution = FIT.ComputationalBackends.ThreadedBackend())
 ```
 
-The **method type** determines *what* to calculate. The **invariant trait** determines
-*which* physical quantity to track. The **backend type** determines *how* to execute.
+The **method type** determines *what* to calculate, the **invariant trait** *which* physical quantity
+to track, and the `transform` and `execution` keywords *how* to execute.
 
 ---
 
@@ -76,9 +77,11 @@ The **method type** determines *what* to calculate. The **invariant trait** dete
 AbstractEnergyTransferMethod (abstract)
 ├── SpectralFluxMethod{B}
 ├── ShellToShellTransferMethod{B}
-├── ModeToModeTransferMethod{B, I}
-├── CoarseGrainingFluxMethod{F}
-└── TriadicOrthogonalDecompositionMethod{N, O, M}
+├── ModeToModeTransferMethod{I}
+├── CoarseGrainingFluxMethod{F, S}
+├── TriadicOrthogonalDecompositionMethod{N, O, M}
+├── SphericalTransferMethod{T}
+└── DivergentSphericalTransferMethod{T}
 ```
 
 ### Invariant Traits
@@ -87,7 +90,8 @@ AbstractEnergyTransferMethod (abstract)
 AbstractInvariant (abstract)
 ├── KineticEnergy       # E = ½∫|u|²  (default)
 ├── Helicity            # H = ∫u·ω    (3D only)
-└── Enstrophy           # Ω = ½∫ω²   (2D only)
+├── Enstrophy           # Ω = ½∫ω²   (2D conserved, 3D with stretching)
+└── PassiveScalar       # E_θ = ½∫θ²
 ```
 
 ### Field Decompositions
@@ -97,22 +101,32 @@ AbstractFieldDecomposition (abstract)
 ├── NoDecomposition              # Full velocity (default)
 ├── HelmholtzDecomposition       # Both rot + div
 ├── RotationalDecomposition      # Rot component only
-└── DivergentDecomposition       # Div component only
+├── DivergentDecomposition       # Div component only
+├── HelicalDecomposition         # ±-helicity components (3D)
+└── ToroidalPoloidalDecomposition  # Craya–Herring toroidal/poloidal (3D)
 ```
 
-### Execution Backends
+### Backends
+
+The transform tags come from `SpectralBackends` (the NUFFT library tags from FlowTransformBindings),
+the execution tags from `ComputationalBackends`:
 
 ```
-AbstractExecutionBackend (abstract)
-├── SerialBackend           # Reference O(N²) implementation
-├── FFTSpectralBackend              # O(N log N) via FFTW
-├── ThreadedBackend         # OhMyThreads parallelism
-├── DistributedBackend      # Distributed.jl + SharedArrays
-├── GPUBackend{B}           # KernelAbstractions (parametric on device)
-├── AutoBackend             # Auto-detect best available
+SpectralBackends.AbstractSpectralBackend (abstract)
+├── AutoSpectralBackend           # FFT when FFTW is loaded, else the direct sum
+├── DirectSumSpectralBackend      # Reference O(N²ᴰ) direct sums
+├── FFTSpectralBackend            # O(Nᴰ log N) via FFTW
 ├── FlowTransformBindings NUFFT tags  # Non-uniform FFT (NonuniformFFTs / FINUFFT)
-├── FSHTSpectralBackend              # Regular spherical harmonics (FSH)
-└── NUFSHTSpectralBackend           # Scattered spherical harmonics (NUFSHT)
+├── FSHTSpectralBackend           # Regular spherical harmonics (FSH)
+└── NUFSHTSpectralBackend         # Scattered spherical harmonics (NUFSHT)
+
+ComputationalBackends.AbstractExecutionBackend (abstract)
+├── SerialBackend           # Default
+├── ThreadedBackend         # OhMyThreads parallelism
+├── DistributedBackend      # Distributed.jl worker processes
+├── GPUBackend{B}           # KernelAbstractions (parametric on device)
+├── MPIBackend              # Per-rank backend of the MPI pencil axis
+└── AutoBackend             # Threaded when available, else serial
 ```
 
 ### Shell Binning
@@ -137,24 +151,29 @@ AbstractFilter (abstract)
 ### Result Containers
 
 ```
-SpectralFluxResult{V}                           # k_shells, T(k), Π(K)
-ShellToShellResult{V, M, E}                     # T(n,m) matrix, net transfer
-ModeToModeTriadResult{I, KS, A, S}              # net_transfer T(k), resolved S(k|p)
+SpectralFluxResult{KS, E, V}                    # k_shells, shell_edges, T(k), Π(K)
+ShellToShellResult{V, W, M}                     # T(n,m) matrix, net transfer
+ModeToModeTriadResult{I, KS, W, A, S}           # weights, net_transfer T(k), resolved S(k|p)
+CompressibleFluxResult{KS, ES, TS, FL, CH, PD}  # T_u(k), Π, channels, pressure-dilatation
 CoarseGrainingFluxResult{S, A}                  # Π_ℓ(x) field
-CoarseGrainingFluxResultWithDiagnostics{S, A}   # + stress/strain tensors
-TriadicOrthogonalDecompositionResult{V, A3, PM} # mode bispectrum, modes, energy budget
+CoarseGrainingFluxResultWithDiagnostics{S, A, T}  # + stress/strain tensors
+TriadicOrthogonalDecompositionResult{V, A3, PM, EC, XM}  # mode bispectrum, modes, energy budget
+SphericalTransferResult{V, T}                   # T_E(l), T_Z(l) and fluxes
+DivergentSphericalTransferResult{V, T}          # T(l), rotational/divergent channels and fluxes
 ```
 
-All result types are **fully parametric** on their array/scalar types — no hardcoded
-`Vector{Float64}`. This means they work natively with `Float32`, GPU arrays, AD dual
-numbers, and Unitful quantities.
+The result types are parametric on their array and scalar types, so they hold `Float32` and device
+arrays as they come.
 
 ### Workspace Types
 
 ```
-NonlinearTermWorkspace    # FFT plans, physical-space buffers, N̂
+NonlinearTermWorkspace    # FFT plans, physical-space buffers, N̂, the padded grid under PaddedThreeHalves
 SpectralFluxWorkspace     # T_spec, flux accumulators
 ShellToShellWorkspace     # Shell-filtered velocity, shell_idx
+BandTransferWorkspace     # Band weights, band field, density scratch
+CompressibleWorkspace     # Transform context and every field-sized intermediate
+TODWorkspace              # Temporal-DFT output, plans, per-triad SVD scratch
 ```
 
 Workspaces **own all temporaries** for their respective computations. Preallocate once,
@@ -177,13 +196,13 @@ calculate_energy_transfer(::ShellToShellTransferMethod, û, ks; ...) →
     calculate_shell_to_shell_transfer(û, ks; binning=method.binning, ...)
 
 calculate_energy_transfer(::ModeToModeTransferMethod, û, ks; ...) →
-    calculate_mode_to_mode_transfer(û, ks; binning=method.binning, ...)
+    calculate_mode_to_mode_transfer(û, ks; invariant=method.invariant, ...)
 ```
 
 ### Backend Dispatch (Two Levels)
 
-Each diagnostic function dispatches on the `backend` keyword via an internal
-`_calculate_*!` method. The core module defines:
+Each diagnostic function dispatches on the `execution` keyword (and on the resolved `transform`) via
+an internal `_calculate_*!` method. The core module defines:
 
 1. **`SerialBackend`** — the reference implementation (always available)
 2. **Stubs** for other backends that throw informative errors
@@ -192,9 +211,8 @@ Extensions then **override the stubs** when their trigger packages are loaded:
 
 ```julia
 # In core (src/ShellToShell/ShellToShellTransfer.jl):
-function _calculate_shell_to_shell!(result, ws, û, ks, ::ThreadedBackend; ...)
-    _shell_to_shell_threaded!(...)  # stub → throws helpful error
-end
+_calculate_shell_to_shell!(result, ws, û, ks, ::ThreadedBackend, spectral; kwargs...) =
+    _shell_to_shell_threaded!(result, ws, û, ks, spectral; kwargs...)  # stub → throws helpful error
 
 # In extension (ext/FlowInvariantTransferOhMyThreadsExt.jl):
 function FIT.ShellToShellTransfer._shell_to_shell_threaded!(...)
@@ -202,11 +220,10 @@ function FIT.ShellToShellTransfer._shell_to_shell_threaded!(...)
 end
 ```
 
-This ensures:
-- ✅ No runtime overhead choosing between backends (static dispatch)
-- ✅ Clear error messages when a backend's dependency isn't loaded
-- ✅ Each backend can use its optimal algorithm
-- ✅ Type-stable throughout
+This gives:
+- static dispatch between backends
+- a clear error when a backend's dependency isn't loaded
+- a free choice of algorithm per backend
 
 ---
 
@@ -222,18 +239,19 @@ Optional dependencies are loaded only when needed via Julia's `[weakdeps]` +
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 OhMyThreads = "67456a42-1dca-4109-a031-0a68de7e3ad5"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
-# ... 8 more
+# ... (the rest in Project.toml)
 
 [extensions]
 FlowInvariantTransferFFTWExt = "FFTW"
 FlowInvariantTransferOhMyThreadsExt = "OhMyThreads"
-FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
-# ... 8 more
+FlowInvariantTransferDistributedExt = "Distributed"
+# ... (the rest in Project.toml)
 ```
 
 **Benefits:**
 - Users who don't use GPU pay zero cost (no KernelAbstractions load time)
-- Fresh Julia sessions start fast (only `LinearAlgebra` + `PrecompileTools` in `[deps]`)
+- Fresh Julia sessions load only `ComputationalBackends`, `FlowTransformBindings`, `LinearAlgebra`,
+  `PrecompileTools` and `SpectralBackends` from `[deps]`
 - Each extension is a self-contained module overriding specific stubs
 
 ---
@@ -244,46 +262,52 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
 
 | File | Purpose |
 |------|---------|
-| `src/FlowInvariantTransfer.jl` | Top-level module: includes, re-exports, unified entry point, precompilation |
-| `src/types.jl` | All type definitions (methods, invariants, backends, results) |
-| `src/utils.jl` | Wavenumber grids, magnitude, dealiasing masks, input validation |
-| `src/Invariants.jl` | Per-mode transfer density for KE, helicity, enstrophy |
-| `src/Decomposition.jl` | Field decomposition dispatch (stubs for Helmholtz ext) |
-| `src/ShellToShell/ShellBinning.jl` | Shell edge/center computation, `assign_shells` |
+| `src/FlowInvariantTransfer.jl` | Top-level module: includes, exports, unified entry point, `to_spectral`/`from_spectral`, precompilation |
+| `src/Types.jl` | Method, invariant, decomposition, binning, geometry, dealiasing and result types; backend resolution |
+| `src/Utils.jl` | Wavenumber grids, magnitude, input validation |
+| `src/Invariants.jl` | Per-mode transfer density for KE, helicity, enstrophy, passive scalar |
+| `src/Decomposition.jl` | Helical and toroidal/poloidal decompositions; stubs for the Helmholtz extension |
+| `src/ShellBinning.jl` | Shell edge/center computation, `assign_shells` |
 | `src/Filters.jl` | Filter response functions and spectral application |
 | `src/Workspaces.jl` | Preallocated workspace structs |
-| `src/NonlinearTerm.jl` | Pseudospectral (u·∇)u — Serial and FFT paths |
-| `src/SpectralFlux.jl` | Spectral flux Π(K) and transfer spectrum T(k) |
+| `src/NonlinearTerm.jl` | Pseudospectral (u·∇)f — direct-sum path and the FFTW-extension stubs |
+| `src/SpectralFlux.jl` | Spectral flux Π(K), transfer spectrum T(k), partial fluxes |
 | `src/CoarseGrainingFlux.jl` | Wrapper stub for CGEF extension |
 | `src/Scattered.jl` | Scattered-Cartesian NUFFT entries (coarse-graining flux, `to_spectral`) over FlowTransformBindings' plans |
 | `src/ShellToShell/ShellToShellTransfer.jl` | Shell-to-shell T(n,m) — Serial core |
-| `src/ScaleToScale/ModeToModeTransfer.jl` | Mode-to-mode S(k\|p\|q) — Serial core |
+| `src/BandTransfer.jl` | Smooth band-to-band T(K,Q) and band energies |
+| `src/ScaleToScale/ModeToModeTransfer.jl` | Mode-to-mode S(k\|p) — Serial core |
 | `src/ScaleToScale/TriadicOrthogonalDecomposition/` | TOD implementation |
+| `src/Compressible/CompressibleTransfer.jl` | Compressible momentum-weighted transfer |
+| `src/Spherical/SphericalTransfer.jl` | Spherical transfer workspaces and degree-spectrum reductions |
 
 ### Extension Files
 
 | File | Trigger | Overrides |
 |------|---------|-----------|
-| `ext/FlowInvariantTransferFFTWExt.jl` | FFTW | FFT-based nonlinear term, spectral flux, shell-to-shell |
-| `ext/FlowInvariantTransferOhMyThreadsExt.jl` | OhMyThreads | Threaded shell-to-shell and scale-to-scale |
-| `ext/FlowInvariantTransferDistributedExt.jl` | Distributed+SharedArrays | Distributed shell-to-shell and scale-to-scale |
-| `ext/FlowInvariantTransferKernelAbstractionsExt.jl` | KernelAbstractions | GPU kernels for all transfer densities and triads |
+| `ext/FlowInvariantTransferFFTWExt.jl` | FFTW | FFT nonlinear term, shell-to-shell, TOD temporal DFT, compressible transform context |
+| `ext/FlowInvariantTransferOhMyThreadsExt.jl` | OhMyThreads | Threaded loops of every diagnostic and the batches |
+| `ext/FlowInvariantTransferDistributedExt.jl` | Distributed | Distributed loops of every diagnostic and the batches |
+| `ext/FlowInvariantTransferKernelAbstractionsExt.jl` | KernelAbstractions | GPU kernels for the transfer densities, shell reductions and mode-to-mode slots |
+| `ext/FlowInvariantTransferGPUArraysCoreExt.jl` | GPUArraysCore | Device-array methods of the compressible transfer and TOD |
+| `ext/FlowInvariantTransferMPIExt.jl` | MPI | `mpi_batch_map` (batch axis) |
+| `ext/FlowInvariantTransferPencilFFTsExt.jl` | MPI + PencilFFTs + PencilArrays | `pencil_spectral_flux` (pencil axis) |
 | `ext/FlowInvariantTransferCGEFExt.jl` | CoarseGrainingEnergyFluxes | Coarse-graining flux computation |
 | `ext/FlowInvariantTransferHelmholtzDecompositionExt.jl` | HelmholtzDecomposition | Physical and spectral Helmholtz decomposition |
 | `ext/FlowInvariantTransferNUFSHTExt.jl` | NUFSHT | Scattered spherical front-end |
-| `ext/FlowInvariantTransferFSHExt.jl` | FastSphericalHarmonics | Regular spherical front-end |
-| `ext/FlowInvariantTransferFlowFieldSpectraExt.jl` | FlowFieldSpectra | Spectral analysis integration |
+| `ext/FlowInvariantTransferFSHExt.jl` | FastSphericalHarmonics + FFTW | Regular spherical front-end |
+| `ext/FlowInvariantTransferFlowFieldSpectraExt.jl` | FlowFieldSpectra | Physical ↔ spectral on uniform and `FlowGeometries` grids |
+| `ext/FlowInvariantTransferFlowGeometriesExt.jl` | FlowGeometries | Spherical transfer and scattered NUFFT entries on `FlowGeometries` grids |
 | `ext/FlowInvariantTransferCairoMakieExt.jl` | CairoMakie | Plotting recipes |
 
 ---
 
 ## Design Principles
 
-1. **Type Dispatch** — use Julia's type system for all method/backend/invariant selection.
-   No string dispatch, no runtime branching. The compiler resolves everything statically.
+1. **Type Dispatch** — Julia's type system selects the method, backend and invariant.
 
-2. **Zero-Cost Abstraction** — backend dispatch adds no runtime overhead. Each backend
-   is a singleton type resolved at compile time.
+2. **Static backend dispatch** — the backend argument's type selects the implementation at compile
+   time.
 
 3. **`!`-First Design** — every hot function has a mutating variant that writes into
    preallocated workspaces. The allocating convenience API calls the `!` variant internally.
@@ -292,11 +316,10 @@ FlowInvariantTransferDistributedExt = ["Distributed", "SharedArrays"]
    shell indices) are owned by workspace structs. Preallocate once, reuse across timesteps.
 
 5. **Parametric Result Types** — result containers are parametric on array/scalar types.
-   `Float32`, GPU arrays, AD dual numbers all work without specialization.
 
-6. **Lean Core** — only `LinearAlgebra` and `PrecompileTools` in hard dependencies.
-   Everything else is a weak dependency loaded on demand via extensions.
+6. **Lean Core** — the hard dependencies are `ComputationalBackends`, `FlowTransformBindings`,
+   `LinearAlgebra`, `PrecompileTools` and `SpectralBackends`. Everything else is a weak dependency
+   loaded on demand via extensions.
 
-7. **Invariant Traits** — switching between kinetic energy, helicity, and enstrophy
-   requires changing only one keyword argument. The algorithm structure is identical;
-   only the per-mode inner product changes.
+7. **Invariant Traits** — switching between kinetic energy, helicity, enstrophy and scalar variance
+   is one keyword argument; the per-mode inner product is the only part that changes.

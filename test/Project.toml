@@ -1,6 +1,5 @@
 [deps]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 CoarseGrainingEnergyFluxes = "a8c2fbc6-778a-4d2b-8a8c-9c98efc7e8cf"
 ComputationalBackends = "5c6e2104-4040-447f-8fc0-66ec2223b019"

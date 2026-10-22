@@ -21,15 +21,14 @@ function run_shell_to_shell_example(; N=32)
 
     b = FIT.Types.LinearBinning(2π / L)
     result = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
-        verify_antisymmetry=true, spectral=FIT.SpectralBackends.FFTSpectralBackend())
+        transform=FIT.SpectralBackends.FFTSpectralBackend())
+    T = result.transfer_matrix
 
-    Tn = sqrt(sum(abs2, result.transfer_matrix))
     println("Shells: ", length(result.shell_centers))
     println("antisymmetry max|T(n,m)+T(m,n)| / ‖T‖ = ",
-            round(result.max_antisymmetry_error / Tn; sigdigits=3))
+            round(maximum(abs, T .+ T') / sqrt(sum(abs2, T)); sigdigits=3))
 
     # Trim to the active shells (those carrying ≳1% of the peak transfer) for a readable plot.
-    T = result.transfer_matrix
     Tlim = maximum(abs, T)
     kmax = findlast(n -> any(>(0.01Tlim), abs.(T[n, :])) || any(>(0.01Tlim), abs.(T[:, n])),
                     1:size(T, 1))
