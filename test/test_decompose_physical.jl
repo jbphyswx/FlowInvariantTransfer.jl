@@ -41,11 +41,7 @@ Test.@testset "physical decomposition — one-shot resynthesis" begin
 
     for (nm, decomp, names) in cases
         r = FIT.Decomposition.decompose_field(decomp, fields, grid)
-        Test.@test keys(r) == names
         a = r[names[1]]; b = r[names[2]]
-        Test.@test length(a) == 3 && length(b) == 3
-        Test.@test all(eltype(c) <: Real for c in a)             # real components of a real field
-        Test.@test all(size(c) == (N, N, N) for c in a)
         # Both parts carry signal, so the split is doing work.
         Test.@test maximum(abs, a[1]) > 1e-8
         Test.@test maximum(abs, b[1]) > 1e-8

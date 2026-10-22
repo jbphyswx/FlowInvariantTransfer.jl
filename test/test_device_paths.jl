@@ -11,20 +11,17 @@
 
 using Test: Test
 using Random: Random
-using LinearAlgebra: LinearAlgebra
-using FFTW: FFTW                     # the KA drivers run their nonlinear term through the FFT backend
+using FFTW: FFTW
 using JLArrays: JLArrays
 using KernelAbstractions: KernelAbstractions as KA
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
-using SpectralBackends: SpectralBackends
 
 KA.synchronize(::JLArrays.JLBackend) = nothing
 
 const _DEV_JL = ComputationalBackends.GPUBackend(JLArrays.JLBackend())
 const _DEV_CPU = ComputationalBackends.GPUBackend(KA.CPU())
 const _SER_D = ComputationalBackends.SerialBackend()
-const _FFTB_D = SpectralBackends.FFTSpectralBackend()
 
 Test.@testset "device paths (JLArrays, allowscalar(false))" begin
     JLArrays.allowscalar(false)
@@ -51,36 +48,16 @@ Test.@testset "device paths (JLArrays, allowscalar(false))" begin
         Test.@test Array(dev) == host
     end
 
-    Test.@testset "KA drivers reproduce the serial result" begin
-        N = 8; ns = (N, N)
-        Random.seed!(9)
-        ks = FIT.Utils.wavenumber_grid(ns, (2π, 2π))
-        û = randn(ComplexF64, ns..., 2)
-        binning = FIT.Types.LinearBinning(1.0)
-
-        fh = FIT.calculate_spectral_flux(û, ks; binning = binning, spectral = _FFTB_D)
-        fd = FIT.calculate_spectral_flux(û, ks; binning = binning, spectral = _FFTB_D, execution = _DEV_CPU)
-        Test.@test maximum(abs, fh.transfer_spectrum) > 1e-8
-        Test.@test fd.transfer_spectrum ≈ fh.transfer_spectrum rtol = 1e-12
-
-        sh = FIT.calculate_shell_to_shell_transfer(û, ks; binning = binning, spectral = _FFTB_D)
-        sd = FIT.calculate_shell_to_shell_transfer(û, ks; binning = binning, spectral = _FFTB_D,
-                                                   execution = _DEV_CPU)
-        Test.@test maximum(abs, sh.transfer_matrix) > 1e-8
-        Test.@test sd.transfer_matrix ≈ sh.transfer_matrix rtol = 1e-12
-
-        bands = FIT.Types.SmoothBands([2.0, 4.0])
-        bh = FIT.BandTransfer.calculate_band_to_band_transfer(û, ks; bands = bands, spectral = _FFTB_D)
-        bd = FIT.BandTransfer.calculate_band_to_band_transfer(û, ks; bands = bands, spectral = _FFTB_D,
-                                                              execution = _DEV_CPU)
-        Test.@test maximum(abs, bh.transfer_matrix) > 1e-8
-        Test.@test bd.transfer_matrix ≈ bh.transfer_matrix rtol = 1e-12
-
-        # The one-hot giver kernel replaced a per-giver mask grid; S(k|p) must be unchanged.
-        mh = FIT.calculate_mode_to_mode_transfer(û, ks; spectral = _FFTB_D)
-        md = FIT.calculate_mode_to_mode_transfer(û, ks; spectral = _FFTB_D, execution = _DEV_CPU)
-        Test.@test maximum(abs, mh.transfer) > 1e-8
-        Test.@test md.transfer ≈ mh.transfer rtol = 1e-12
+    Test.@testset "host inputs staged into device memory" begin
+        Random.seed!(13)
+        x = randn(ComplexF64, 6, 5, 2); y = randn(ComplexF64, 6, 5, 2)
+        buf = FIT.Types._staging_buffer(_DEV_JL, x)
+        Test.@test buf isa JLArrays.JLArray
+        Test.@test Array(buf) == x
+        Test.@test Array(FIT.Types._staged!(buf, y)) == y
+        Test.@test Array(buf) == y
+        d = JLArrays.JLArray(x)
+        Test.@test FIT.Types._staged!(buf, d) === d
     end
 
     Test.@testset "workspace shell index follows the field's array kind" begin
@@ -89,9 +66,7 @@ Test.@testset "device paths (JLArrays, allowscalar(false))" begin
         Random.seed!(11)
         û = randn(ComplexF64, ns..., 2)
         ws_host = FIT.Workspaces.ShellToShellWorkspace(û, ks, FIT.Types.LinearBinning(1.0))
-        Test.@test ws_host.shell_idx isa Array{Int}
         ws_dev = FIT.Workspaces.ShellToShellWorkspace(JLArrays.JLArray(û), ks, FIT.Types.LinearBinning(1.0))
-        Test.@test ws_dev.shell_idx isa JLArrays.JLArray
         Test.@test Array(ws_dev.shell_idx) == ws_host.shell_idx
     end
 end

@@ -1,20 +1,20 @@
 # ---------------------------------------------------------------------------
 # End-to-end equivalence of the two spectral layouts.
 #
-# `test_layout.jl` pins the Hermitian weight identity itself. This file pins the consequence: every
-# public diagnostic, run on the half spectrum of a real field, must return what it returns on that
-# same field's full complex spectrum. The half layout is the default for real input, so a divergence
-# here is a wrong answer for the ordinary user.
+# Every public diagnostic, run on the half spectrum of a real field, returns what it returns on that
+# same field's full complex spectrum.
 #
 # Every comparison asserts the full-layout reference carries signal before comparing to it: on a small
-# grid a 2/3-dealiased band can leave a reference that is only round-off, and any two round-off
-# numbers agree to any tolerance.
+# grid a 2/3-dealiased band can leave a reference that is only round-off.
 # ---------------------------------------------------------------------------
 
 using Test: Test
 using Random: Random
 using FFTW: FFTW
+using KernelAbstractions: KernelAbstractions as KA
+using JLArrays: JLArrays
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
 const FFTB_HE = SpectralBackends.FFTSpectralBackend()
@@ -46,24 +46,24 @@ Test.@testset "half vs full layout — every Cartesian diagnostic" begin
     Test.@testset "2D $(ns)" for ns in ((16, 16), (18, 14))
         _, ûf, ksf, ûh, ksh = _he_field(ns, 2)
 
-        rf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, spectral = FFTB_HE)
-        rh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, spectral = FFTB_HE)
+        rf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, transform = FFTB_HE)
+        rh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, transform = FFTB_HE)
         _he_same(rh.transfer_spectrum, rf.transfer_spectrum)
         _he_same(rh.flux, rf.flux)
 
-        zf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, spectral = FFTB_HE,
+        zf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, transform = FFTB_HE,
                                          invariant = FIT.Types.Enstrophy())
-        zh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, spectral = FFTB_HE,
+        zh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, transform = FFTB_HE,
                                          invariant = FIT.Types.Enstrophy())
         _he_same(zh.transfer_spectrum, zf.transfer_spectrum)
 
-        sf = FIT.calculate_shell_to_shell_transfer(ûf, ksf; binning = binning, spectral = FFTB_HE)
-        sh = FIT.calculate_shell_to_shell_transfer(ûh, ksh; binning = binning, spectral = FFTB_HE)
+        sf = FIT.calculate_shell_to_shell_transfer(ûf, ksf; binning = binning, transform = FFTB_HE)
+        sh = FIT.calculate_shell_to_shell_transfer(ûh, ksh; binning = binning, transform = FFTB_HE)
         _he_same(sh.transfer_matrix, sf.transfer_matrix)
 
         bands = FIT.Types.SmoothBands([2.0, 4.0])
-        bf = FIT.BandTransfer.calculate_band_to_band_transfer(ûf, ksf; bands = bands, spectral = FFTB_HE)
-        bh = FIT.BandTransfer.calculate_band_to_band_transfer(ûh, ksh; bands = bands, spectral = FFTB_HE)
+        bf = FIT.BandTransfer.calculate_band_to_band_transfer(ûf, ksf; bands = bands, transform = FFTB_HE)
+        bh = FIT.BandTransfer.calculate_band_to_band_transfer(ûh, ksh; bands = bands, transform = FFTB_HE)
         _he_same(bh.transfer_matrix, bf.transfer_matrix)
 
         # Compressible: needs a density field on the same layout.
@@ -71,28 +71,33 @@ Test.@testset "half vs full layout — every Cartesian diagnostic" begin
         Np = prod(ns)
         ρ̂f = reshape(FFTW.fft(ρ) ./ Np, size(ûf)[1:2]..., 1)
         ρ̂h = reshape(FFTW.rfft(ρ) ./ Np, size(ûh)[1:2]..., 1)
-        cf = FIT.calculate_compressible_flux(ûf, ρ̂f, ksf; binning = binning, spectral = FFTB_HE)
-        ch = FIT.calculate_compressible_flux(ûh, ρ̂h, ksh; binning = binning, spectral = FFTB_HE)
-        _he_same(ch.transfer_spectrum, cf.transfer_spectrum)
-        _he_same(ch.channels.rotational, cf.channels.rotational)
+        for da in (FIT.Types.OrszagTwoThirds(), FIT.Types.PaddedThreeHalves())
+            cf = FIT.calculate_compressible_flux(ûf, ρ̂f, ksf; binning = binning, transform = FFTB_HE,
+                                                 dealiasing = da, pressure_hat = ρ̂f)
+            ch = FIT.calculate_compressible_flux(ûh, ρ̂h, ksh; binning = binning, transform = FFTB_HE,
+                                                 dealiasing = da, pressure_hat = ρ̂h)
+            _he_same(ch.transfer_spectrum, cf.transfer_spectrum)
+            _he_same(ch.channels.rotational, cf.channels.rotational)
+            _he_same(ch.pressure_dilatation.compressive, cf.pressure_dilatation.compressive)
+        end
     end
 
     Test.@testset "3D $(ns)" for ns in ((12, 12, 12), (12, 10, 14))
         _, ûf, ksf, ûh, ksh = _he_field(ns, 3)
 
-        rf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, spectral = FFTB_HE)
-        rh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, spectral = FFTB_HE)
+        rf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, transform = FFTB_HE)
+        rh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, transform = FFTB_HE)
         _he_same(rh.transfer_spectrum, rf.transfer_spectrum)
 
-        hf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, spectral = FFTB_HE,
+        hf = FIT.calculate_spectral_flux(ûf, ksf; binning = binning, transform = FFTB_HE,
                                          invariant = FIT.Types.Helicity())
-        hh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, spectral = FFTB_HE,
+        hh = FIT.calculate_spectral_flux(ûh, ksh; binning = binning, transform = FFTB_HE,
                                          invariant = FIT.Types.Helicity())
         _he_same(hh.transfer_spectrum, hf.transfer_spectrum)
 
         # Helical partial fluxes exercise the decomposition on both layouts.
-        pf = FIT.calculate_helical_partial_fluxes(ûf, ksf; binning = binning, spectral = FFTB_HE)
-        ph = FIT.calculate_helical_partial_fluxes(ûh, ksh; binning = binning, spectral = FFTB_HE)
+        pf = FIT.calculate_helical_partial_fluxes(ûf, ksf; binning = binning, transform = FFTB_HE)
+        ph = FIT.calculate_helical_partial_fluxes(ûh, ksh; binning = binning, transform = FFTB_HE)
         _he_same(ph.total.flux, pf.total.flux)
     end
 
@@ -104,12 +109,75 @@ Test.@testset "half vs full layout — every Cartesian diagnostic" begin
         _, ûf, ksf, ûh, ksh = _he_field(ns, nd)
         wf = FIT.Workspaces.NonlinearTermWorkspace(ûf, ksf; dealiasing = dealias)
         wh = FIT.Workspaces.NonlinearTermWorkspace(ûh, ksh; dealiasing = dealias)
-        FIT.NonlinearTerm.compute_nonlinear_term!(wf, ûf, ksf; dealiasing = dealias, spectral = FFTB_HE)
-        FIT.NonlinearTerm.compute_nonlinear_term!(wh, ûh, ksh; dealiasing = dealias, spectral = FFTB_HE)
+        FIT.NonlinearTerm.compute_nonlinear_term!(wf, ûf, ksf; dealiasing = dealias, transform = FFTB_HE)
+        FIT.NonlinearTerm.compute_nonlinear_term!(wh, ûh, ksh; dealiasing = dealias, transform = FFTB_HE)
         # The half N̂ is the leading k₁ ≥ 0 block of the full one, mode for mode.
         colons = ntuple(_ -> Colon(), nd - 1)
         nh = size(wh.N̂, 1)
         ref = view(wf.N̂, 1:nh, colons..., :)
         _he_same(wh.N̂, ref; rtol = 1e-10)
+    end
+end
+
+# The device kernels reduce the half spectrum with the same Hermitian weight and derivative wavenumber
+# as the host, so a real field's half spectrum on `GPUBackend(KA.CPU())` returns the serial full-layout
+# result. `NoDealiasing` keeps the Nyquist modes, where the derivative wavenumber is zero.
+Test.@testset "half layout on GPUBackend(KA.CPU()) == serial full layout" begin
+    gpu = ComputationalBackends.GPUBackend(KA.CPU())
+    binning = FIT.Types.LinearBinning(1.0)
+    bands = FIT.Types.SmoothBands([2.0, 4.0])
+    Test.@testset "$(nameof(typeof(dealias))) $(ns)" for
+            dealias in (FIT.Types.OrszagTwoThirds(), FIT.Types.NoDealiasing()),
+            ns in ((16, 16), (15, 14), (8, 8, 8), (9, 8, 10))
+        nd = length(ns)
+        _, ûf, ksf, ûh, ksh = _he_field(ns, nd)
+        kw = (; binning, transform = FFTB_HE, dealiasing = dealias)
+        invs = nd == 2 ? (FIT.Types.KineticEnergy(), FIT.Types.Enstrophy()) :
+                         (FIT.Types.KineticEnergy(), FIT.Types.Helicity(), FIT.Types.Enstrophy())
+        for inv in invs
+            rf = FIT.calculate_spectral_flux(ûf, ksf; kw..., invariant = inv)
+            rg = FIT.calculate_spectral_flux(ûh, ksh; kw..., invariant = inv, execution = gpu)
+            _he_same(rg.transfer_spectrum, rf.transfer_spectrum)
+        end
+        sf = FIT.calculate_shell_to_shell_transfer(ûf, ksf; kw...)
+        sg = FIT.calculate_shell_to_shell_transfer(ûh, ksh; kw..., execution = gpu)
+        _he_same(sg.transfer_matrix, sf.transfer_matrix)
+        bf = FIT.BandTransfer.calculate_band_to_band_transfer(ûf, ksf; bands, transform = FFTB_HE,
+                                                              dealiasing = dealias)
+        bg = FIT.BandTransfer.calculate_band_to_band_transfer(ûh, ksh; bands, transform = FFTB_HE,
+                                                              dealiasing = dealias, execution = gpu)
+        _he_same(bg.transfer_matrix, bf.transfer_matrix)
+        if nd == 3
+            # Against the serial half layout: the helical frame at an even axis's Nyquist slot is built
+            # from the raw `k`, which the two layouts store as `+n/2` and `−n/2`.
+            ph = FIT.calculate_helical_partial_fluxes(ûh, ksh; kw...)
+            pg = FIT.calculate_helical_partial_fluxes(ûh, ksh; kw..., execution = gpu)
+            _he_same(pg.total.flux, ph.total.flux)
+        end
+    end
+    # Mode-to-mode on a small grid: the half-layout `S(k|p)` columns are the stored modes of the full one.
+    Test.@testset "mode-to-mode $(ns)" for ns in ((8, 8), (7, 6))
+        _, ûf, ksf, ûh, ksh = _he_field(ns, 2)
+        mf = FIT.calculate_mode_to_mode_transfer(ûf, ksf; transform = FFTB_HE)
+        mg = FIT.calculate_mode_to_mode_transfer(ûh, ksh; transform = FFTB_HE, execution = gpu)
+        mh = FIT.calculate_mode_to_mode_transfer(ûh, ksh; transform = FFTB_HE)
+        _he_same(mg.transfer, mh.transfer; rtol = 1e-10)
+        _he_same(mg.net_transfer, view(mf.net_transfer, 1:size(ûh, 1), :); rtol = 1e-10)
+    end
+    # The device compressible helpers on device arrays, against the host methods on the half layout.
+    Test.@testset "compressible device helpers $(ns)" for ns in ((16, 16), (15, 14))
+        _, _, _, ûh, ksh = _he_field(ns, 2)
+        ms = size(ûh)[1:2]
+        dh = similar(ûh); FIT.Compressible._copy_trunc!(dh, ûh, ksh, ms, true)
+        dd = JLArrays.JLArray(similar(ûh)); FIT.Compressible._copy_trunc!(dd, JLArrays.JLArray(ûh), ksh, ms, true)
+        Test.@test Array(dd) == dh
+        td = real.(ûh[:, :, 1] .* conj.(ûh[:, :, 2]))
+        k = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ksh)
+        edges = FIT.ShellBinning.shell_edges(binning, maximum(k))
+        sidx = FIT.ShellBinning.assign_shells(k, edges)
+        Nsh = length(edges) - 1
+        Th = FIT.Compressible._bin(td, sidx, Nsh, Float64, ksh, ms)
+        Td = FIT.Compressible._bin(JLArrays.JLArray(td), sidx, Nsh, Float64, ksh, ms)
+        _he_same(Td, Th; rtol = 1e-13)
     end
 end

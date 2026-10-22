@@ -2,17 +2,17 @@
 Building a Domain Application on FlowInvariantTransfer.jl — Incompressible MHD
 
 FlowInvariantTransfer is a *general* cross-scale-transfer toolkit: a pseudospectral nonlinear
-term `(u·∇)f` for any advected field `f`, plus generic invariant/flux/shell machinery. It does NOT
-hard-code any particular physical system. This example shows how a downstream domain — here
-incompressible **magnetohydrodynamics** — is assembled entirely from the package's *public*
-primitives, with the MHD-specific physics living here, not in the package.
+term `(u·∇)f` for any advected field `f`, plus generic invariant/flux/shell machinery, with no
+particular physical system built in. This example assembles a downstream domain — incompressible
+**magnetohydrodynamics** — entirely from the package's *public* primitives; the MHD-specific physics
+lives in this script.
 
 Incompressible MHD: ∂_t u = −(u·∇)u + (b·∇)b − ∇P,  ∂_t b = −(u·∇)b + (b·∇)u. This example builds
 the **total-energy budget** ½⟨|u|²+|b|²⟩: the kinetic and magnetic flux contributions come from the
 four advection terms (all from `compute_nonlinear_term` with `advecting_hat`) combined with the MHD
 sign bookkeeping below. Other MHD invariants follow the same recipe from the same primitives —
 cross-helicity ⟨u·b⟩ from the cross `transfer_density`, and magnetic helicity ⟨a·b⟩ from one extra,
-genuinely MHD-specific term (the EMF `u×b`) — they are noted here but not computed in this script.
+genuinely MHD-specific term (the electromotive force `u×b`); this script computes neither.
 
 Run from the repo root:
     julia --project=examples examples/mhd_on_top.jl
@@ -23,15 +23,15 @@ using FFTW: FFTW
 using CairoMakie: CairoMakie
 include(joinpath(@__DIR__, "flows.jl"))
 
-# Bin a real per-mode density into shells → (centers, T(k), Π(K)=cumsum) using public helpers.
+# Bin a real per-mode density (full spectrum) into shells with public helpers → (K, T, Π), where
+# `Π[n] = Σ_{m≤n} T[m]` is the flux through `K[n]`, the upper edge of shell `n`.
 function shell_flux(density, ks, binning)
     kmag  = FIT.Utils.wavenumber_magnitude_grid(ks)
     edges = FIT.ShellBinning.shell_edges(binning, maximum(kmag))
     idx   = FIT.ShellBinning.assign_shells(kmag, edges)
-    K     = FIT.ShellBinning.shell_centers(binning, maximum(kmag))
-    T = zeros(length(K))
+    T = zeros(length(edges) - 1)
     for I in CartesianIndices(size(density)); n = idx[I]; n == 0 && continue; T[n] += density[I]; end
-    return K, T, cumsum(T)
+    return edges[2:end], T, cumsum(T)
 end
 
 # Re{ carrier*(k)·N(k) } via the package's transfer_density (kinetic-energy form = the dot product).
@@ -42,13 +42,13 @@ function run_mhd_on_top_example(; N=128)
     û, b̂, ks, L = evolve_orszag_tang(; N=N)
     da, sp = FIT.Types.OrszagTwoThirds(), FIT.SpectralBackends.FFTSpectralBackend()
 
-    # --- the four advection terms, all from the GENERAL nonlinear-term engine -------------------
-    N_uu = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)u
-    N_bb = FIT.NonlinearTerm.compute_nonlinear_term(b̂, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)b
-    N_ub = FIT.NonlinearTerm.compute_nonlinear_term(b̂, ks; advecting_hat=û, dealiasing=da, spectral=sp)  # (u·∇)b
-    N_bu = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; advecting_hat=b̂, dealiasing=da, spectral=sp)  # (b·∇)u
+    # --- the four advection terms, all from the package's general nonlinear-term engine ----------
+    N_uu = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; advecting_hat=û, dealiasing=da, transform=sp)  # (u·∇)u
+    N_bb = FIT.NonlinearTerm.compute_nonlinear_term(b̂, ks; advecting_hat=b̂, dealiasing=da, transform=sp)  # (b·∇)b
+    N_ub = FIT.NonlinearTerm.compute_nonlinear_term(b̂, ks; advecting_hat=û, dealiasing=da, transform=sp)  # (u·∇)b
+    N_bu = FIT.NonlinearTerm.compute_nonlinear_term(û, ks; advecting_hat=b̂, dealiasing=da, transform=sp)  # (b·∇)u
 
-    # MHD energy budget (the sign bookkeeping IS the MHD equations — domain code, lives here):
+    # MHD energy budget, the signs of the MHD equations' terms:
     t_KE = redot(û, N_uu, ks) .- redot(û, N_bb, ks)   # kinetic: advection − Lorentz work
     t_ME = redot(b̂, N_ub, ks) .- redot(b̂, N_bu, ks)   # magnetic: induction
     b = FIT.Types.LinearBinning(2π / L)
@@ -63,7 +63,7 @@ function run_mhd_on_top_example(; N=128)
 
     # current sheets j = ∂x b_y − ∂y b_x (the developed-state signature)
     kx = [ks[1][i] for i in 1:N, j in 1:N]; ky = [ks[2][j] for i in 1:N, j in 1:N]
-    jph = real.(FFTW.ifft(im .* kx .* b̂[:, :, 2] .- im .* ky .* b̂[:, :, 1]))
+    jph = real.(FFTW.bfft(im .* kx .* b̂[:, :, 2] .- im .* ky .* b̂[:, :, 1]))   # b̂ = fft(b)/N²
     ax0 = CairoMakie.Axis(fig[1, 1], title="current density j (developed state)",
         xlabel="x", ylabel="y", aspect=CairoMakie.DataAspect())
     xp = range(0, 2π; length=N+1)[1:N]; cl = maximum(abs, jph)

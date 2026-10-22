@@ -37,41 +37,45 @@ end
 
 """
     calculate_shell_to_shell_transfer(velocity_hat, ks;
-        binning, dealiasing=OrszagTwoThirds(), verify_antisymmetry=true,
-        spectral=SpectralBackends.DirectSumSpectralBackend(), execution=ComputationalBackends.SerialBackend())
+        binning, dealiasing=OrszagTwoThirds(), invariant=KineticEnergy(),
+        transform=SpectralBackends.AutoSpectralBackend(), execution=ComputationalBackends.SerialBackend(),
+        advecting_hat=velocity_hat, geometry=IsotropicShells())
         -> ShellToShellResult
 
 Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 
 # Arguments
-- `velocity_hat`: Complex array of size `(ns..., D)` — Fourier coefficients of
+- `velocity_hat`: Complex array of size `(ms..., D)` — Fourier coefficients of
   the D velocity components on a periodic uniform grid.
-- `ks`: Tuple of D 1D physical-wavenumber vectors.
+- `ks`: Tuple of `nd` 1D physical-wavenumber vectors.
 
 # Keyword Arguments
-- `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(1.0)`.
+- `binning::AbstractShellBinning`: Shell binning; default `LinearBinning(Δk)` with `Δk` the smallest
+  nonzero `|k|` on any axis.
 - `dealiasing::AbstractDealiasing=OrszagTwoThirds()`: Apply 2/3 rule dealiasing.
-- `verify_antisymmetry::Bool=true`: Compute `max|T(n,m)+T(m,n)|` and store in result.
-- `spectral::SpectralBackends.AbstractSpectralBackend`: transform — `SpectralBackends.DirectSumSpectralBackend()` (default) or `SpectralBackends.FFTSpectralBackend()` (FFTW).
+- `transform::SpectralBackends.AbstractSpectralBackend`: `SpectralBackends.AutoSpectralBackend()`
+  (default; `FFTSpectralBackend()` when FFTW is loaded), `SpectralBackends.FFTSpectralBackend()`, or
+  `SpectralBackends.DirectSumSpectralBackend()`.
 - `execution::ComputationalBackends.AbstractExecutionBackend`: outer (mediator-loop) parallelism — `ComputationalBackends.SerialBackend()` (default),
-  `ComputationalBackends.ThreadedBackend()` (OhMyThreads), `ComputationalBackends.DistributedBackend()`, or `ComputationalBackends.GPUBackend(...)`.
+  `ComputationalBackends.ThreadedBackend()` (OhMyThreads), `ComputationalBackends.DistributedBackend()`, or `ComputationalBackends.GPUBackend(dev)`,
+  which copies host fields to `dev` once per call.
+- `invariant`, `advecting_hat`, `geometry`: as for
+  [`calculate_spectral_flux`](@ref FlowInvariantTransfer.calculate_spectral_flux).
 
 # Returns
 `ShellToShellResult` with:
-- `transfer_matrix[n,m]`: Energy transferred from shell m to shell n.
-- `net_transfer[n]` = Σ_m T(n,m): net energy gain of shell n.
-- `max_antisymmetry_error`: validation diagnostic.
+- `transfer_matrix[n,m]`: the rate at which shell n gives energy to shell m.
+- `net_transfer[n]` = Σ_m T(n,m) = −dE_n/dt, the spectral transfer of shell n.
 
-# Algorithm (Verma 2002 formulation)
-For each pair of receiver shell n and mediator shell m:
-  T(n,m) = Σ_{k∈S_n} Re{ û_n*(k) · N̂_m(k) }
-where N̂_m(k) = FFT[(u_m · ∇)u], u_m = IFFT(û · χ_m).
-
-This formulation uses the mediator velocity restricted to shell m, so:
+# Algorithm (Alexakis–Mininni–Pouquet 2005 formulation)
+For each pair of shells n and m:
+  T(n,m) = Σ_{k∈S_n} Re{ û*(k) · N̂_m(k) }
+where N̂_m(k) = FFT[(u · ∇)u_m], u_m = IFFT(û · χ_m): the full velocity advects the shell-m field.
+For a divergence-free u, ∫u_n·(u·∇)u_m = −∫u_m·(u·∇)u_n, so
   T(n,m) + T(m,n) = 0  exactly (antisymmetry).
 
 # Cost
-O(N_shells² · N^D log N^D) with FFTW; O(N_shells² · N^{2D}) direct-sum.
+One advection per mediator shell: O(N_shells · Nᴰ log N) with FFTW, O(N_shells · N²ᴰ) by direct sums.
 
 # References
 - Verma et al. (2002), arXiv:nlin/0204027
@@ -80,37 +84,34 @@ O(N_shells² · N^D log N^D) with FFTW; O(N_shells² · N^{2D}) direct-sum.
 function calculate_shell_to_shell_transfer(
     velocity_hat,
     ks;
-    binning::Types.AbstractShellBinning = _default_binning(ks),
+    binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
-    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
+    transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
+    exec    = Types.resolve_execution(execution)
+    velocity_hat, advecting_hat = Types._fields_to_execution(exec, velocity_hat, advecting_hat)
     ws      = Workspaces.ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
     edges   = ShellBinning.shell_edges(binning, maximum(k_mag))
     centers = ShellBinning.shell_centers(binning, maximum(k_mag))
     N_sh    = length(centers)
     FT      = real(eltype(velocity_hat))
-    T_mat   = Matrix{FT}(undef, N_sh, N_sh)
-    net     = Vector{FT}(undef, N_sh)
-    # Use a mutable wrapper so ! variants can write max_asym back
-    result_mut = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-    max_asym = _calculate_shell_to_shell!(result_mut, ws, velocity_hat, ks, Types.resolve_execution(execution), spectral;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
-        advecting_hat=advecting_hat)
-    return Types.ShellToShellResult(centers, edges, T_mat, net, max_asym)
+    result  = Types.ShellToShellResult(centers, edges, Matrix{FT}(undef, N_sh, N_sh), Vector{FT}(undef, N_sh))
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, exec, transform; dealiasing=dealiasing,
+        invariant=invariant, advecting_hat=advecting_hat)
+    return result
 end
 
 """
     calculate_shell_to_shell_transfer!(result, ws, velocity_hat, ks; kwargs...)
 
-In-place version. Writes into `result` using preallocated buffers from `ws`.
-Zero heap allocations in the hot path.
+In-place [`calculate_shell_to_shell_transfer`](@ref), writing `result.transfer_matrix` and
+`result.net_transfer` with the buffers of `ws`; zero heap allocations in the hot path.
 """
 function calculate_shell_to_shell_transfer!(
     result::Types.ShellToShellResult,
@@ -118,67 +119,64 @@ function calculate_shell_to_shell_transfer!(
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
 )
-    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
-    _calculate_shell_to_shell!(result, ws, velocity_hat, ks, Types.resolve_execution(execution), spectral;
-        dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
-        advecting_hat=advecting_hat)
+    transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
+    _calculate_shell_to_shell!(result, ws, velocity_hat, ks,
+        Types.resolve_execution(execution), transform; dealiasing=dealiasing,
+        invariant=invariant, advecting_hat=advecting_hat)
     return result
 end
 
 """
-    calculate_shell_to_shell_transfer_batch(velocity_hats, ks; binning, dealiasing, verify_antisymmetry,
-        invariant, spectral, geometry, execution) -> Vector{ShellToShellResult}
+    calculate_shell_to_shell_transfer_batch(velocity_hats, ks; binning, dealiasing,
+        invariant, transform, geometry, execution) -> Vector{ShellToShellResult}
 
 Shell-to-shell transfer for a batch of snapshots that share one grid (`velocity_hats` an iterable of
-`(ns..., D)` coefficient arrays). The shell structure is built ONCE and each worker reuses a single
-`ShellToShellWorkspace` across its snapshots; `execution = ThreadedBackend()` (requires `using
-OhMyThreads`) threads over snapshots with a **serial** inner transform (the batch is the outer parallel
-axis, so no nested threading). Results are in input order, bit-identical to calling
-[`calculate_shell_to_shell_transfer`](@ref) per snapshot (each snapshot self-advects).
+`(ms..., D)` coefficient arrays). The shell structure is built once and each worker reuses one
+`ShellToShellWorkspace` across its snapshots; `execution = ThreadedBackend()` (requires
+`using OhMyThreads`) threads over snapshots, each with a serial inner transform. Results are in input
+order, bit-identical to calling [`calculate_shell_to_shell_transfer`](@ref) per snapshot (each
+snapshot self-advects).
 """
 function calculate_shell_to_shell_transfer_batch(
     velocity_hats,
     ks;
-    binning::Types.AbstractShellBinning = _default_binning(ks),
+    binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    verify_antisymmetry::Bool = true,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
-    spectral = Types.resolve_spectral(Types.require_coefficient_spectral(spectral))
+    transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n = length(velocity_hats)
-    n == 0 && return Types.ShellToShellResult[]
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
     edges   = ShellBinning.shell_edges(binning, maximum(k_mag))
     centers = ShellBinning.shell_centers(binning, maximum(k_mag))
     N_sh    = length(centers)
-    results = Vector{Types.ShellToShellResult}(undef, n)
+    FT      = real(eltype(eltype(velocity_hats)))
+    results = Vector{Types.ShellToShellResult{typeof(centers), Vector{FT}, Matrix{FT}}}(undef, n)
+    n == 0 && return results
     _shell_to_shell_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, centers, edges, N_sh;
-        binning=binning, dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant,
-        spectral=spectral, geometry=geometry)
+        binning=binning, dealiasing=dealiasing, invariant=invariant, transform=transform, geometry=geometry)
     return results
 end
 
 # Serial reference: one workspace reused across the whole batch; each snapshot self-advects.
 function _shell_to_shell_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, centers, edges, N_sh;
-                                binning, dealiasing, verify_antisymmetry, invariant, spectral, geometry)
+                                binning, dealiasing, invariant, transform, geometry)
     FT = real(eltype(first(velocity_hats)))
     ws = Workspaces.ShellToShellWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
     for i in eachindex(velocity_hats)
         vh = velocity_hats[i]
-        T_mat = Matrix{FT}(undef, N_sh, N_sh); net = Vector{FT}(undef, N_sh)
-        res  = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-        max_asym = _calculate_shell_to_shell!(res, ws, vh, ks, ComputationalBackends.SerialBackend(), spectral;
-            dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant, advecting_hat=vh)
-        results[i] = Types.ShellToShellResult(centers, edges, T_mat, net, max_asym)
+        res = Types.ShellToShellResult(centers, edges, Matrix{FT}(undef, N_sh, N_sh), Vector{FT}(undef, N_sh))
+        _calculate_shell_to_shell!(res, ws, vh, ks, ComputationalBackends.SerialBackend(), transform;
+            dealiasing=dealiasing, invariant=invariant, advecting_hat=vh)
+        results[i] = res
     end
     return results
 end
@@ -191,44 +189,33 @@ end
 _shell_to_shell_batch!(::ComputationalBackends.AbstractThreadedBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
     _shell_to_shell_batch_threaded!(results, velocity_hats, ks, centers, edges, N_sh; kwargs...)
 
-# Distributed over the batch — overridden by the Distributed extension (snapshots partitioned across workers).
-function _shell_to_shell_batch_distributed!(args...; kwargs...)
-    throw(ArgumentError("execution = DistributedBackend() for the shell-to-shell batch requires Distributed. " *
-                        "Run `using Distributed` to load the extension."))
-end
-_shell_to_shell_batch!(::ComputationalBackends.AbstractDistributedBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
-    _shell_to_shell_batch_distributed!(results, velocity_hats, ks, centers, edges, N_sh; kwargs...)
-
-# GPU over the batch — loop the single-shot device kernel, reusing one device workspace (device inputs →
-# device buffers via `similar`). Requires the FFT backend (the DirectSum shell path is host scalar-indexed).
+# GPU over the batch: one workspace in the device's memory reused for every snapshot; host snapshots are
+# copied into the staging buffer.
 function _shell_to_shell_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, centers, edges, N_sh;
-                                binning, dealiasing, verify_antisymmetry, invariant, spectral, geometry)
-    spectral isa SpectralBackends.DirectSumSpectralBackend && throw(ArgumentError(
-        "calculate_shell_to_shell_transfer_batch on a GPUBackend requires spectral = SpectralBackends.FFTSpectralBackend() " *
-        "(cuFFT via AbstractFFTs); SpectralBackends.DirectSumSpectralBackend is a host-only reference."))
+                                binning, dealiasing, invariant, transform, geometry)
     FT = real(eltype(first(velocity_hats)))
-    ws = Workspaces.ShellToShellWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
+    buf = Types._staging_buffer(gpu, first(velocity_hats))
+    ws = Workspaces.ShellToShellWorkspace(buf === nothing ? first(velocity_hats) : buf, ks, binning;
+                                          geometry=geometry, dealiasing=dealiasing)
     for i in eachindex(velocity_hats)
-        vh = velocity_hats[i]
-        T_mat = Matrix{FT}(undef, N_sh, N_sh); net = Vector{FT}(undef, N_sh)
-        res  = Types.ShellToShellResult(centers, edges, T_mat, net, FT(NaN))
-        max_asym = _calculate_shell_to_shell!(res, ws, vh, ks, gpu, spectral;
-            dealiasing=dealiasing, verify_antisymmetry=verify_antisymmetry, invariant=invariant, advecting_hat=vh)
-        results[i] = Types.ShellToShellResult(centers, edges, T_mat, net, max_asym)
+        vh = Types._staged!(buf, velocity_hats[i])
+        res = Types.ShellToShellResult(centers, edges, Matrix{FT}(undef, N_sh, N_sh), Vector{FT}(undef, N_sh))
+        _calculate_shell_to_shell!(res, ws, vh, ks, gpu, transform;
+            dealiasing=dealiasing, invariant=invariant, advecting_hat=vh)
+        results[i] = res
     end
     return results
 end
 
-# Any other execution backend has no batch hook — refuse rather than silently run serial.
+# `DistributedBackend` and `MPIBackend` batches are methods of the Distributed and MPI extensions.
 _shell_to_shell_batch!(be::ComputationalBackends.AbstractExecutionBackend, results, velocity_hats, ks, centers, edges, N_sh; kwargs...) =
-    throw(ArgumentError("calculate_shell_to_shell_transfer_batch supports SerialBackend(), ThreadedBackend(), and DistributedBackend(); " *
-                        "got execution = $(typeof(be))."))
+    Types.batch_unavailable("calculate_shell_to_shell_transfer_batch", be)
 
 """
     calculate_scalar_shell_to_shell_transfer(velocity_hat, scalar_hat, ks; kwargs...) -> ShellToShellResult
 
-Shell-to-shell transfer of passive-scalar **variance** `T_θ(n,m)`: the rate at which scalar
-variance is transferred from scalar-shell `m` to scalar-shell `n`, mediated by the velocity:
+Shell-to-shell transfer of passive-scalar **variance** `T_θ(n,m)`: the rate at which scalar-shell
+`n` gives variance to scalar-shell `m`, mediated by the velocity:
 
     T_θ(n,m) = Σ_{k∈S_n} Re{ θ̂*(k) · 𝒩̂_m(k) },   𝒩̂_m = FFT[(u·∇)θ_m],   θ_m = θ̂·χ_m.
 
@@ -256,9 +243,8 @@ function calculate_scalar_shell_to_shell_transfer!(result, ws, velocity_hat, sca
         invariant=Types.PassiveScalar(), advecting_hat=velocity_hat, kwargs...)
 end
 
-# Dispatch on (execution, spectral). Serial loop: direct vs the optimized FFT path; the
-# threaded/distributed/GPU execution backends (extensions) parallelise the mediator loop and
-# pass the spectral backend down to each per-mediator nonlinear term.
+# Dispatch on (execution, transform). The threaded, distributed and GPU methods (extensions)
+# parallelise the mediator loop and pass the transform to each per-mediator nonlinear term.
 _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ComputationalBackends.SerialBackend, spectral::SpectralBackends.DirectSumSpectralBackend; kwargs...) =
     _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; kwargs...)
 
@@ -268,9 +254,8 @@ _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ComputationalBackends
 _calculate_shell_to_shell!(result, ws, velocity_hat, ks, ::ComputationalBackends.ThreadedBackend, spectral::SpectralBackends.AbstractSpectralBackend; kwargs...) =
     _shell_to_shell_threaded!(result, ws, velocity_hat, ks, spectral; kwargs...)
 
-# Distributed / GPU dispatch → named stubs overridden by the Distributed / KernelAbstractions
-# extensions (same pattern as the threaded path). Without the extension loaded these raise an
-# informative `using X` error rather than a bare `MethodError`.
+# Distributed / GPU: named stubs that throw until the Distributed / KernelAbstractions extension
+# defines them.
 _calculate_shell_to_shell!(result, ws, velocity_hat, ks, execution::ComputationalBackends.DistributedBackend, spectral::SpectralBackends.AbstractSpectralBackend; kwargs...) =
     _shell_to_shell_distributed!(result, ws, velocity_hat, ks, execution, spectral; kwargs...)
 _calculate_shell_to_shell!(result, ws, velocity_hat, ks, gpu::ComputationalBackends.GPUBackend, spectral::SpectralBackends.AbstractSpectralBackend; kwargs...) =
@@ -286,15 +271,15 @@ _shell_to_shell_gpu!(args...; kwargs...) = throw(ArgumentError(
 # ---------------------------------------------------------------------------
 
 """
-    _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; dealiasing, verify_antisymmetry, invariant)
+    _calculate_shell_to_shell_direct!(result, ws, velocity_hat, ks; dealiasing, invariant, advecting_hat) -> result
 
 Direct-sum (ComputationalBackends.SerialBackend) shell-to-shell transfer. Writes into `result` using
 workspace buffers from `ws` — no heap allocation in the hot path.
 
 For each mediator shell m:
   1. Build û_m = û restricted to shell m (using ws.shell_idx)
-  2. Compute N̂_m = FFT[(u_m·∇)u] using ws.nonlinear buffers
-  3. Accumulate T(n,m) for all receiver shells n
+  2. Compute N̂_m = FFT[(u·∇)u_m] using ws.nonlinear buffers
+  3. Accumulate T(n,m) for every shell n
 """
 function _calculate_shell_to_shell_direct!(
     result::Types.ShellToShellResult,
@@ -302,7 +287,6 @@ function _calculate_shell_to_shell_direct!(
     velocity_hat,
     ks;
     dealiasing::Types.AbstractDealiasing,
-    verify_antisymmetry::Bool,
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     advecting_hat = velocity_hat,
 )
@@ -314,6 +298,8 @@ function _calculate_shell_to_shell_direct!(
 
     fill!(result.transfer_matrix, zero(FT))
     col = ws.net_transfer            # length-N_sh scratch, rewritten per mediator then copied out
+    direct = SpectralBackends.DirectSumSpectralBackend()
+    NonlinearTerm.synthesize_advecting!(ws.nonlinear, advecting_hat, ks; dealiasing = dealiasing, transform = direct)
 
     for m in 1:N_sh
         # Build û_m: velocity restricted to shell m — reuse ws.û_m
@@ -325,24 +311,20 @@ function _calculate_shell_to_shell_direct!(
             end
         end
 
-        # N̂_m = (u·∇)u_m: the FULL velocity advects the band-m field (Alexakis–Mininni–Pouquet
-        # 2005). This makes A[n,m] = Σ_{k∈S_n} Re{û*·N̂_m} both antisymmetric (A[n,m]+A[m,n]=0)
-        # and correctly reducing (Σ_m A[n,m] = transfer_spectrum[n]) — no ½(A−Aᵀ) needed.
-        NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, ws.û_m, ks;
-                                dealiasing=dealiasing, spectral=SpectralBackends.DirectSumSpectralBackend(),
-                                advecting_hat=advecting_hat)
+        # N̂_m = (u·∇)u_m: the full velocity advects the band-m field (Alexakis–Mininni–Pouquet
+        # 2005), so A[n,m] = Σ_{k∈S_n} Re{û*·N̂_m} is antisymmetric (A[n,m] + A[m,n] = 0) and
+        # Σ_m A[n,m] = transfer_spectrum[n].
+        NonlinearTerm.compute_advection!(ws.nonlinear, ws.û_m, ks; dealiasing = dealiasing, transform = direct)
         N̂_m = ws.nonlinear.N̂
 
-        # A(n,m) = Σ_{k∈S_n} Re{û*·N̂_m} for every receiver shell n, in ONE pass over the modes:
-        # each mode contributes to exactly the shell it belongs to. Scanning the grid once per
-        # receiver shell instead costs N_sh passes for the same result.
+        # A(n,m) for every shell n in one pass over the modes, each mode adding to its own shell.
         Invariants.transfer_density_scatter!(col, invariant, velocity_hat, N̂_m, ks, ws.shell_idx)
         @inbounds for n in 1:N_sh
             result.transfer_matrix[n, m] = col[n]
         end
     end
 
-    # Net energy gain of each shell: Σ_m T(n,m)
+    # net_transfer[n] = Σ_m T(n,m) = −dE_n/dt
     for n in 1:N_sh
         s = zero(FT)
         for m in 1:N_sh
@@ -351,31 +333,7 @@ function _calculate_shell_to_shell_direct!(
         result.net_transfer[n] = s
     end
 
-    # Antisymmetry check: max |T(n,m) + T(m,n)| — in-place, no temp matrix
-    max_asym = if verify_antisymmetry
-        v = zero(FT)
-        for n in 1:N_sh, m in 1:N_sh
-            a = abs(result.transfer_matrix[n, m] + result.transfer_matrix[m, n])
-            a > v && (v = a)
-        end
-        v
-    else
-        FT(NaN)
-    end
-
-    return max_asym
-end
-
-function _default_binning(ks)
-    min_dk = Inf
-    for k_vec in ks
-        for k in k_vec
-            ak = abs(k)
-            ak > 0 && (min_dk = min(min_dk, ak))
-        end
-    end
-    min_dk = isfinite(min_dk) ? min_dk : 1.0
-    return Types.LinearBinning(min_dk)
+    return result
 end
 
 end # module ShellToShellTransfer

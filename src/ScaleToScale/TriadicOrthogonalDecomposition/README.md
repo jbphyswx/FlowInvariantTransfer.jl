@@ -41,19 +41,24 @@ The decomposition yields:
 
 ## Implementation Details
 
-The implementation is split into a core module and package extensions for optimal performance and modularity:
+The implementation is split into a core module and package extensions:
 
 1. **Core Module (`TriadicOrthogonalDecomposition.jl`):**
    - Handles parameter parsing and frequency triad index building (`frequency_axes`).
-   - Implements O(N²) direct-sum fallback for the temporal DFT (runs when `FFTW` is not loaded).
-   - Implements the serial SVD loop over all triads.
-   - Implements rank-truncated `sirovich_svd` and `lowrank_svd` to ensure correct dimensions when the system rank is less than the number of blocks.
+   - Implements the `O(nDFT²)` direct-sum temporal DFT (`transform = DirectSumSpectralBackend()`, and the `AutoSpectralBackend()` default when `FFTW` is not loaded).
+   - Implements the serial SVD loop over all triads: a thin QR of the weighted convective matrix, then the method-of-snapshots SVD of the reduced product, keeping the nonzero singular values when the rank is below the number of blocks.
 
 2. **FFTW Extension (`FlowInvariantTransferFFTWExt.jl`):**
-   - Overrides `_temporal_block_dft_fft!` using `FFTW.fft` for O(N log N) temporal transforms. This is highly recommended for any production run.
+   - Overrides `_temporal_dft_plan` and `_temporal_block_dft_fft!`: one FFTW plan per workspace, batched over the block and real-input for real data, for `O(N log N)` temporal transforms.
 
 3. **OhMyThreads Extension (`FlowInvariantTransferOhMyThreadsExt.jl`):**
-   - Overrides the triad loop using `OhMyThreads.@tasks` to parallelize SVD computations across all CPU cores.
+   - Overrides the triad loop to parallelize the per-triad SVDs across threads.
+
+4. **Distributed Extension (`FlowInvariantTransferDistributedExt.jl`):**
+   - Distributes the triads over worker processes.
+
+5. **GPUArraysCore Extension (`FlowInvariantTransferGPUArraysCoreExt.jl`):**
+   - Device-array methods of the temporal DFT, the nonlinearity, the per-triad SVD and the modal energy budget.
 
 ---
 
@@ -68,14 +73,14 @@ nt, nvar, nx = 512, 1, 64
 X = randn(nt, nvar, nx)
 
 # Configure the method
-method = TriadicOrthogonalDecompositionMethod(
+method = FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionMethod(
     nfft = 128,      # block size
     noverlap = 64,   # 50% overlap
     nmode = 2        # keep top 2 modes per triad
 )
 
-# Run TOD via the unified interface
-result = calculate_energy_transfer(method, X; dt=0.01, backend=FFTBackend())
+# Run TOD via the unified interface (the FFT temporal DFT, FFTW being loaded)
+result = calculate_energy_transfer(method, X; dt=0.01)
 
 # Inspect results
 result.frequencies         # shifted frequency axes

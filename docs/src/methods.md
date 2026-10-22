@@ -12,52 +12,54 @@ wavenumber threshold K from large to small scales.
 Starting from the spectral energy equation for incompressible flow,
 
 ```math
-\frac{\partial E(\mathbf{k})}{\partial t} = T(\mathbf{k}) + \text{dissipation} + \text{forcing}
+\frac{\partial E(\mathbf{k})}{\partial t} = -T(\mathbf{k}) + \text{dissipation} + \text{forcing}
 ```
 
-the *transfer spectrum* accumulated per isotropic shell ``S_n = \{|\mathbf{k}| \in [\kappa_n, \kappa_{n+1})\}``
-is
+the *transfer spectrum* of each isotropic shell ``S_n = \{|\mathbf{k}| \in [\kappa_n, \kappa_{n+1})\}``,
+``T(k_n) = -dE(k_n)/dt`` from the nonlinear term (positive when shell ``n`` gives energy to the
+others), is
 
 ```math
 T(k_n) = \sum_{|\mathbf{k}| \in S_n} \sum_i \text{Re}\bigl[\hat{u}_i^*(\mathbf{k})\,\hat{N}_i(\mathbf{k})\bigr]
 ```
 
 where ``\hat{N}_i(\mathbf{k}) = \widehat{(u \cdot \nabla) u_i}`` is the nonlinear advection term
-and ``\hat{u}_i^*`` its complex conjugate.  The cumulative flux is
+and ``\hat{u}_i^*`` its complex conjugate (Alexakis & Biferale 2018, Eq. 12). The flux through
+``K_{n+1}``, the energy the shells up to ``n`` pass to larger wavenumbers per unit time, is
 
 ```math
-\Pi(K_n) = -\sum_{m \le n} T(k_m).
+\Pi(K_{n+1}) = \sum_{m \le n} T(k_m).
 ```
 
 Positive Π indicates a **forward (downscale) energy cascade**; negative Π an inverse
-(upscale) cascade.
+(upscale) cascade. Every transfer in the package is ``-dE/dt`` of the shell, degree or mode it is
+indexed by, and every flux is its running sum, on Cartesian, spherical and compressible fields alike.
 
-**References:** Verma et al. (2002) [arXiv:nlin/0204027](https://arxiv.org/abs/nlin/0204027)
+**References:** Verma et al. (2002) [arXiv:nlin/0204027](https://arxiv.org/abs/nlin/0204027);
+Alexakis & Biferale (2018), Phys. Rep. 767–769, 1–101.
 
 ---
 
 ## Shell-to-Shell Transfer T(n, m)
 
-The shell-to-shell transfer matrix resolves *which* donor shell m sends energy to *which*
-receiver shell n.  Using the Alexakis et al. (2005) antisymmetrized definition:
+The shell-to-shell transfer matrix resolves the rate at which each shell n gives energy to each
+shell m:
 
 ```math
-T(n,m) = \frac{1}{2}\left[
-    \sum_{\mathbf{k} \in S_n} \text{Re}\bigl[\hat{u}^*(\mathbf{k}) \cdot \hat{N}_m(\mathbf{k})\bigr]
-  - \sum_{\mathbf{k} \in S_m} \text{Re}\bigl[\hat{u}^*(\mathbf{k}) \cdot \hat{N}_n(\mathbf{k})\bigr]
-\right]
+T(n,m) = \sum_{\mathbf{k} \in S_n} \text{Re}\bigl[\hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{N}_m(\mathbf{k})\bigr],
+\qquad \hat{N}_m = \widehat{(\mathbf{u} \cdot \nabla)\,\mathbf{u}_m},
 ```
 
-where ``\hat{N}_m`` is the nonlinear term computed with the velocity **band-filtered to shell m**
-as the advecting field.  This construction guarantees exact antisymmetry
+where ``\mathbf{u}_m`` is the velocity **band-filtered to shell m** and the full velocity advects it
+(Verma et al. 2002; Alexakis, Mininni & Pouquet 2005). For a divergence-free velocity
+``\int \mathbf{u}_n \cdot (\mathbf{u}\cdot\nabla)\mathbf{u}_m = -\int \mathbf{u}_m \cdot (\mathbf{u}\cdot\nabla)\mathbf{u}_n``,
+so
 
 ```math
-T(n,m) + T(m,n) = 0
+T(n,m) + T(m,n) = 0.
 ```
 
-by construction for divergence-free (incompressible) velocity fields.
-
-The net energy gain of shell n is ``\sum_m T(n,m)``.
+A positive ``T(n,m)`` is energy leaving shell n for shell m, and ``\sum_m T(n,m) = T(k_n)``.
 
 **References:** Alexakis, Mininni & Pouquet (2005) Phys. Rev. E 72, 046301.
 
@@ -65,26 +67,32 @@ The net energy gain of shell n is ``\sum_m T(n,m)``.
 
 ## Mode-to-Mode Triad Transfer S(k|p)
 
-The scale-to-scale transfer is the **finest** scale-to-scale object: the rate at which the invariant
-is delivered *to* receiver mode ``\mathbf{k}`` *from* giver mode ``\mathbf{p}`` (mediated by
-``\mathbf{q}=\mathbf{k}-\mathbf{p}``). It is built directly from the validated pseudospectral
-nonlinear term — for each giver mode ``\mathbf{p}``, ``\hat{N}_{\mathbf p}=\widehat{(u\cdot\nabla)u_{\mathbf p}}``
-(the full velocity advecting the single-mode field ``u_{\mathbf p}``), and
+The mode-to-mode transfer is the **finest** scale-to-scale object, indexed by the stored coefficients
+("slots") of the spectral layout. Slot ``\mathbf{p}`` stands for ``w(\mathbf{p})`` modes of the full
+spectrum (the Hermitian weight: 2 inside the halved axis of a real field's half layout, where the slot
+also stands for its mirror ``-\mathbf{p}``, and 1 elsewhere), and its slot field
+``u_{\mathbf p}(x) = w(\mathbf{p})\,\text{Re}\{\hat{\mathbf u}(\mathbf p)\,e^{i\mathbf p\cdot x}\}`` is real;
+the slot fields sum to ``u``. With ``\hat{N}_{\mathbf p}=\widehat{(u\cdot\nabla)u_{\mathbf p}}`` (the full
+velocity advecting the slot field),
 
 ```math
 S(\mathbf{k}|\mathbf{p}) = \text{Re}\bigl\{ \hat{\mathbf{u}}^*(\mathbf{k}) \cdot \hat{N}_{\mathbf p}(\mathbf{k}) \bigr\}
 ```
 
-(generalized per invariant via `transfer_density`). This construction is exact and inherits the
-correct structure (all verified by tests).
+(generalized per invariant via `transfer_density`), and ``w(\mathbf{k})S(\mathbf{k}|\mathbf{p})`` is the
+rate at which slot field ``u_{\mathbf k}`` gives energy to slot field ``u_{\mathbf p}``, mediated by
+``\mathbf{q}=\mathbf{k}-\mathbf{p}``.
 
 ### Properties
 - **Reduces:** ``\sum_{\mathbf p} S(\mathbf{k}|\mathbf{p}) = T(\mathbf{k})`` — the spectral transfer
-- **Antisymmetric:** ``S(\mathbf{k}|\mathbf{p}) = -S(\mathbf{p}|\mathbf{k})`` (incompressible)
-- **Conserves:** ``\sum_{\mathbf{k}}\sum_{\mathbf p} S(\mathbf{k}|\mathbf{p}) = 0``
+- **Antisymmetric** (divergence-free, dealiased):
+  ``w(\mathbf{k})S(\mathbf{k}|\mathbf{p}) = -w(\mathbf{p})S(\mathbf{p}|\mathbf{k})``, which reads
+  ``S(\mathbf{k}|\mathbf{p}) = -S(\mathbf{p}|\mathbf{k})`` on a full layout, where ``w \equiv 1``
+- **Conserves:** ``\sum_{\mathbf{k}}\sum_{\mathbf p} w(\mathbf{k})S(\mathbf{k}|\mathbf{p}) = 0``
 
-The result carries `net_transfer` (``T(k)``) and `transfer` (the resolved ``S(k|p)``, shape
-`(ns..., ns...)`). Summed over shells it gives the shell-to-shell matrix ``T(n,m)``.
+The result carries `weights` (``w``), `net_transfer` (``T(k)``) and `transfer` (the resolved
+``S(k|p)``, shape `(ms..., ms...)`). Summed over the slots of two shells, ``w(k)S(k|p)`` gives the
+shell-to-shell matrix ``T(n,m)``.
 
 ### Reduction Hierarchy
 
@@ -93,17 +101,17 @@ S(k|p)     resolved triads      finest, O(N^{2D})
    │  sum over shells (k,p)
    ▼
 T(n,m)     sharp Fourier shells (shell-to-shell)
-   │  sum over givers
+   │  sum over m
    ▼
 T(k), Π(K) spectral flux
 ```
 
 ### Computational Cost
 
-Resolving every receiver/giver pair is ``O(N_\text{modes})`` nonlinear-term evaluations —
-``O(N_\text{modes}\,N^D\log N)`` with `FFTSpectralBackend` and an ``O(N_\text{modes}^2)`` result tensor; a
-mode-count guard errors above `max_scales` (pass `force=true` to override). For the aggregates prefer
-the cheaper `calculate_spectral_flux` / `calculate_shell_to_shell_transfer`.
+One nonlinear-term evaluation per slot ``\mathbf{p}``: ``O(N_\text{modes})`` evaluations,
+``O(N_\text{modes}\,N^D\log N)`` with `FFTSpectralBackend`, and an ``O(N_\text{modes}^2)`` result
+tensor. The aggregates come cheaper from `calculate_spectral_flux` /
+`calculate_shell_to_shell_transfer`.
 
 **References:** Dar, Verma & Eswaran (2001); Verma (2004 review, 2019 book); Alexakis & Biferale (2018).
 
@@ -174,11 +182,16 @@ The decomposition is backed by `HelmholtzDecomposition.jl` and supports both phy
 `calculate_partial_fluxes(...; decomposition=...)` resolves the flux by the component of *each* of
 the three fields in a triad: with ``u=\sum_s u_s``,
 ``T^{s_k s_p s_q}(k)=\text{Re}\{\hat{u}_{s_k}^*\cdot\widehat{(u_{s_p}\cdot\nabla)u_{s_q}}\}``, giving
-``n^3`` channels that sum to the full flux. With `HelicalDecomposition` these are the **eight
-helical channels** — the homochiral ones (``s_k=s_p=s_q``) drive the inverse cascade, the
-heterochiral the forward (Waleffe 1992; Biferale, Musacchio & Toschi 2012; Alexakis 2017);
-`calculate_helical_partial_fluxes` is the shortcut. With `HelmholtzDecomposition` the off-diagonal
-channels are the **rotational↔divergent cross-flux** (zero for incompressible flow).
+``n^3`` channels that sum to the full flux. With `HelicalDecomposition` the channel term takes the
+rotational form of Alexakis (2017, Eq. 17),
+``\Pi^{s_1s_2s_3}(K) = -\langle u^{s_1}_{K<}\cdot(u^{s_2}\times\omega^{s_3})\rangle``, i.e.
+``T^{s_k s_p s_q}(k)=\text{Re}\{\hat{u}_{s_k}^*\cdot\widehat{\omega_{s_q}\times u_{s_p}}\}``, and the
+**eight helical channels** sum to the flux of the solenoidal part of ``u``. Pair sums over the last two
+labels equal those of the advective form; single heterochiral channels of the two forms differ. In
+Alexakis's simulations the homochiral sum ``\Pi^{+++}+\Pi^{---}`` is negative (an inverse flux) and the
+mixed-sign channels carry the forward flux (Waleffe 1992; Biferale, Musacchio & Toschi 2012; Alexakis
+2017); `calculate_helical_partial_fluxes` is the shortcut. With `HelmholtzDecomposition` the
+off-diagonal channels are the **rotational↔divergent cross-flux** (zero for incompressible flow).
 
 **References:** Aluie (2019); Buzzicotti, Storer, Khatri, Griffies & Aluie (2023).
 
@@ -195,9 +208,9 @@ channels are the **rotational↔divergent cross-flux** (zero for incompressible 
 replaces the sharp shell indicator with a graded log-Gaussian partition of unity (Eyink & Aluie
 2009); it is antisymmetric, conserves, and reduces to the band-summed transfer spectrum.
 
-**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; exact
-on ``|k|<N/3``), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
-that is alias-free over every retained mode to Nyquist (FFT path).
+**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; keeps
+``|m_d| \le \lfloor (N_d-1)/3 \rfloor``, exact there), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
+that is alias-free over every retained mode to Nyquist, on the FFT and the direct-sum transforms.
 
 ---
 
@@ -212,14 +225,16 @@ Both methods above require the nonlinear advection term
 
 computed pseudospectrally.
 
-**SerialBackend (reference):** Direct O(N²) DFT/IDFT summation.  Exact but slow.
+**DirectSumSpectralBackend (reference):** direct `O(N²ᴰ)` DFT summation. Exact but slow.
 
-**FFTSpectralBackend (production):** O(N log N) via FFTW:
-1. ``u_i(x) = \text{IFFT}(\hat{u}_i)``
-2. ``\partial_j u_i(x) = \text{IFFT}(i k_j \hat{u}_i)``
+**FFTSpectralBackend (production):** `O(Nᴰ log N)` via FFTW, with the unnormalized inverse
+(``\hat{u}`` carries the ``1/N_p``):
+1. ``u_i(x) = \sum_{\mathbf{k}} \hat{u}_i(\mathbf{k})\, e^{i\mathbf{k}\cdot x}``
+2. ``\partial_j u_i(x) = \sum_{\mathbf{k}} i k_j \hat{u}_i(\mathbf{k})\, e^{i\mathbf{k}\cdot x}``
 3. ``N_i(x) = \sum_j u_j(x)\,\partial_j u_i(x)``
 4. ``\hat{N}_i(\mathbf{k}) = \text{FFT}(N_i) \,/\, N_p`` (where ``N_p = \prod_d N_d``)
-5. 2/3 dealiasing: zero all modes with ``|k_d| \ge N_d/3`` along any dimension.
+5. 2/3 dealiasing: zero all modes with ``|m_d| > \lfloor (N_d-1)/3 \rfloor`` along any dimension, in
+   the inputs and the output — the largest band whose quadratic products alias outside it.
 
 ---
 
@@ -233,12 +248,12 @@ Available binning schemes:
 | Type | Description |
 |------|-------------|
 | `LinearBinning(Δk)` | Uniform shells of width Δk |
-| `LogarithmicBinning(k₀, λ)` | Shells with ``\kappa_n = k_0 \lambda^n`` |
+| `LogarithmicBinning(k₀, λ)` | Edges ``0, k_0, k_0\lambda, k_0\lambda^2, \ldots`` (first shell ``[0, k_0)``) |
 | `DyadicBinning(k₀)` | Logarithmic with ``\lambda = 2`` |
 | `CustomBinning(edges)` | User-supplied edge vector |
 
-Shell membership is computed once via `assign_shells(k_mag, edges)` — a single integer array
-allocation replacing the old `Vector{BitArray}` per-shell masks.
+Shell membership is computed once via `assign_shells(k_mag, edges)`, one integer shell index per mode
+(the last shell includes its upper edge).
 
 ---
 
@@ -307,7 +322,7 @@ transforms of real fields. A full-spectrum sum of such an ``f`` equals a weighte
 \sum_{k \in \text{full}} f(k) \;=\; \sum_{k \in \text{half}} w(k)\, f(k),
 ```
 
-with a weight that is **not** uniformly 2. The ``k_1 = 0`` hyperplane is stored whole and is mapped
+with a weight ``w(k) \in \{1, 2\}``. The ``k_1 = 0`` hyperplane is stored whole and is mapped
 onto itself by ``k \mapsto -k``, so each of its modes already has its mirror in the array: ``w = 1``.
 For even ``n_1`` the Nyquist plane ``k_1 = n_1/2 \equiv -n_1/2`` is the same situation: ``w = 1``.
 Every other stored mode stands for itself and its unstored mirror: ``w = 2``. On the full layout
@@ -317,8 +332,8 @@ Every other stored mode stands for itself and its unstored mirror: ``w = 2``. On
 
 That self-mirrored Nyquist slot holds ``+n/2`` and ``-n/2`` at once, so any operator **first order in
 ``k``** is not single-valued there for a real field, and it carries zero: the gradient ``\partial_d``,
-the vorticity ``i k \times \hat{u}`` behind the helicity density, and the Helmholtz projector. (The
-enstrophy density has two factors of ``k`` and is unaffected.) The ``3/2``-padded dealiasing instead
+the vorticity ``i k \times \hat{u}`` behind the helicity and enstrophy densities, and the Helmholtz
+projector. The ``3/2``-padded dealiasing instead
 **splits** that coefficient across ``\pm n/2`` on the finer grid — the unique real band-limited
 function it represents is ``\hat{u}_{\text{Nyq}} \cos(n x / 2)`` — and recombines the pair on the way
 back. The ``2/3`` rule discards the mode entirely.

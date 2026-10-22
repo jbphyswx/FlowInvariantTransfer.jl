@@ -17,16 +17,17 @@ const _HDDecomp = Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDe
 #
 # `helmholtz_decompose` covers `StructuredGrid` (spectral or iterative); every other grid goes to
 # `helmholtz_decompose_spectral`, the entry declared on `AbstractGrid`. Both return the 3-way Hodge
-# split `u_rot + u_div + u_harm` as component-last `(ns…, D)`; the harmonic (constant/mean,
-# divergence-free) part folds into the rotational component so rotational + divergent == the field,
-# matching the spectral path.
+# split `u_rot + u_div + u_harm` as component-last `(ns…, D)`. The harmonic part is both divergence-
+# and curl-free — the mean on a periodic domain, in general a nonconstant field on a bounded one — and it
+# folds into the rotational component, so rotational + divergent == the field and the rotational part
+# stays divergence-free, matching the spectral path. The parts come with the outcome of the potential
+# solves, `converged` only if every solve met its tolerance, `iterations` and `residual` the largest.
 function FIT.Decomposition._decompose_field_physical(
     decomp::_HDDecomp,
     velocity_fields::Tuple,
     grid::HDjl.FlowGeometries.Grids.AbstractGrid;
     solver::HDjl.AbstractPoissonSolver = HDjl.AutoSolver(),
-    boundary::HDjl.AbstractBoundaryCondition = HDjl.Neumann(),
-    kwargs...,          # the caller's own keywords (a filter scale, diagnostics flags) pass by
+    boundary::HDjl.FlowGeometries.Operators.AbstractBoundaryCondition = HDjl.FlowGeometries.Operators.Neumann(),
 )
     D = length(velocity_fields)
     nd = ndims(velocity_fields[1])
@@ -37,13 +38,17 @@ function FIT.Decomposition._decompose_field_physical(
     colons = ntuple(_ -> Colon(), nd)
     rot = ntuple(c -> res.u_rot[colons..., c] .+ res.u_harm[colons..., c], D)
     div = ntuple(c -> res.u_div[colons..., c], D)
-    if decomp isa FIT.Types.HelmholtzDecomposition
-        return (; rotational = rot, divergent = div)
-    elseif decomp isa FIT.Types.RotationalDecomposition
-        return rot
-    else
-        return div
-    end
+    parts = decomp isa FIT.Types.HelmholtzDecomposition ? (; rotational = rot, divergent = div) :
+            decomp isa FIT.Types.RotationalDecomposition ? (; rotational = rot) : (; divergent = div)
+    return merge(parts, _solve_outcome(res))
+end
+
+# The least converged of the potential solves of `res`.
+function _solve_outcome(res::HDjl.HelmholtzResult)
+    solves = (res.χ_solve, res.rot_solve...)
+    return (; converged = all(s -> s.converged, solves),
+              iterations = maximum(s -> s.iterations, solves),
+              residual = maximum(s -> s.residual, solves))
 end
 
 # Coordinate vectors state no topology, mask or geometry, and the solver is selected from all three, so
@@ -68,9 +73,9 @@ function FIT.Decomposition._decompose_field_spectral(
     velocity_hat::AbstractArray{<:Complex},
     ks
 )
-    # N-D Leray projection straight from the wavenumber vectors (no grid reconstruction): the sibling's
-    # `helmholtz_project_spectral(velocity_hat, ks)` is a device-generic pure-broadcast projection, so
-    # this works in 2D and 3D and on device arrays. Component-last (ns..., D) convention both ways.
+    # HD's Leray projection on FIT's wavenumber axes, which it reads as derivative wavenumbers, zero at
+    # an even axis's Nyquist slot as in FIT's own derivatives. A broadcast over component-last
+    # `(ns..., D)` arrays, host or device.
     res = HDjl.helmholtz_project_spectral(velocity_hat, ks)
 
     # SpectralCartesianResult is a 3-way Hodge split (u_rot + u_div + u_harm) with the k = 0

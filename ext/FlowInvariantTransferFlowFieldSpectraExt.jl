@@ -2,11 +2,12 @@ module FlowInvariantTransferFlowFieldSpectraExt
 
 using FlowFieldSpectra: FlowFieldSpectra as FFS
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 using SpectralBackends: SpectralBackends
 using ComputationalBackends: ComputationalBackends
 
 # Uniform-grid branch of the physical one-call `calculate_energy_transfer(method, fields, coords, ms;
-# spectral, …)` for the spectral-flux/shell/mode family (the non-NUFFT `_physical_energy_transfer`
+# transform, …)` for the spectral-flux/shell/mode family (the non-NUFFT `_physical_energy_transfer`
 # method; the NUFFT branch lives in core). Velocity component arrays `(u, v[, w])` on per-axis coordinate
 # vectors `coords_vecs = (xaxis, yaxis[, zaxis])` are transformed to spectral coefficients via
 # `FlowFieldSpectra.calculate_spectrum` and fed to the diagnostic.
@@ -14,34 +15,21 @@ using ComputationalBackends: ComputationalBackends
 const _FFSMethod = Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod,
                          FIT.Types.ModeToModeTransferMethod}
 
-# `FlowFieldSpectra.calculate_spectrum` returns `û = fft(u)/∏ms` on the `fftfreq` axes, and the
-# rfft-packed half `(m₁÷2+1, m₂…)` for a real field — the core's own convention, verified equal to
-# `rfft(u)/n^D` at 0.0. Its axes carry the layout in their own types, so they are restated here as the
-# core's analytic axes: `SpectralLayout.is_half` and `full_size` dispatch on those. The spacing is the
-# axis's own step, identical on both layouts.
-function _core_axes(ks::Tuple, ms::Tuple, ::Type{FT}) where {FT}
-    return ntuple(length(ms)) do d
-        a = ks[d]
-        dk = length(a) > 1 ? a[2] - a[1] : one(eltype(a))
-        (d == 1 && FT <: Real) ? FIT.SpectralLayout.HalfAxis(ms[d], dk) :
-                                 FIT.SpectralLayout.FullAxis(ms[d], dk)
-    end
-end
-
 # `FFS.calculate_spectrum` is declared on `FlowGeometries.Grids.AbstractGrid` and selects its transform
-# from the grid, so a grid passed here reaches whichever one its geometry and sampling admit.
+# from the grid, so a grid passed here reaches whichever one its geometry and sampling admit. It returns
+# `û = fft(u)/∏ms` on FlowTransformBindings' axes, the packed half for a real field, which is the input
+# every Fourier-coefficient diagnostic takes.
 function FIT._physical_energy_transfer(
     spectral::SpectralBackends.AbstractSpectralBackend,
     method::_FFSMethod,
     velocity_fields::Tuple,
     grid::FFS.FlowGeometries.Grids.AbstractGrid,
     ms::Tuple;
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     kwargs...
 )
     coeffs, ks = FFS.calculate_spectrum(grid, velocity_fields, ms; transform = spectral, execution = execution)
-    axes_ = _core_axes(ks, ms, eltype(first(velocity_fields)))
-    return FIT.calculate_energy_transfer(method, coeffs, axes_; kwargs...)
+    return FIT.calculate_energy_transfer(method, coeffs, ks; execution = execution, kwargs...)
 end
 
 # Coordinate-vector convenience: an all-periodic Cartesian grid over those axes. Pass each axis as a
@@ -77,16 +65,14 @@ end
     _ffs_workspace(proto, grid, ns, ET, D, spectral, execution) -> ToSpectralWorkspace
 
 The analysis and synthesis plans for one `(grid, ms, batch, element type)`, with the buffers each side
-sizes and types itself. `ET` is the FIELD's element type, and it fixes the coefficient layout on both
-plans: the packed half for a real field, the full cube for a complex one.
-
-The wavenumbers come from the analysis plan, so a halved axis arrives carrying the Nyquist twin the
-transform attached, and are restated as the core's analytic axes for `SpectralLayout` to dispatch on.
+sizes and types itself. `ET` is the field's element type, and it fixes the coefficient layout on both
+plans: the packed half for a real field, the full cube for a complex one. The wavenumbers are the
+analysis plan's: along an axis where `±N/2` are distinct modes the box holds both, an odd length.
 """
 function _ffs_workspace(proto, grid, ns::Tuple, ::Type{ET}, D::Int, spectral, execution) where {ET}
     ap = FFS.plan_spectrum(grid, ET, ns; transform = spectral, execution = execution, batch = (D,))
     sp = FFS.plan_synthesis(grid, ET, ns; transform = spectral, execution = execution, batch = (D,))
-    ks = _core_axes(FFS.wavenumbers(ap), ns, ET)
+    ks = FFS.wavenumbers(ap)
     field_phys = similar(proto, FFS.field_type(sp), FFS.field_size(sp)...)
     û = similar(proto, FFS.coefficient_type(ap), FFS.coefficient_size(ap)...)
     tf = (; dft!  = (out, fld) -> FFS.calculate_spectrum!(out, ap, fld),
@@ -113,7 +99,7 @@ function _check_fourier_grid(grid)
 end
 
 """
-    ToSpectralWorkspace(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; spectral, execution, real_layout)
+    ToSpectralWorkspace(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution, real_layout)
 
 Analysis workspace with the domain given as a `FlowGeometries` grid. The transform is
 `FlowFieldSpectra.plan_spectrum` on that grid, so the grid's own geometry, spacing and topology select
@@ -122,11 +108,10 @@ it; a real field takes the half layout.
 function FIT.ToSpectralWorkspace(
     velocity_fields::Tuple,
     grid::FFS.FlowGeometries.Grids.AbstractGrid;
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    # The thread count is baked into the transform plan, and a multithreaded plan spawns a task per
-    # thread on every execution, so this path allocates per call unless the plan is pinned. The rest of
-    # the package pins its transforms the same way (`fft_nthreads = 1`); pass
-    # `execution = ThreadedBackend()` to thread a single large transform.
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    # The thread count is fixed in the transform plan, and a multithreaded plan spawns a task per thread
+    # on every execution, so the default plans single-threaded; `execution = ThreadedBackend()` threads a
+    # single large transform.
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     real_layout::Bool = eltype(first(velocity_fields)) <: Real,
 )
@@ -134,10 +119,10 @@ function FIT.ToSpectralWorkspace(
     D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
     # This entry analyses gridded data onto a Cartesian mode grid. The spherical transforms and the
     # scattered-point providers answer a different question and are reached by their own entries.
-    spectral isa Union{FIT.Types.FINUFFTBackend, FIT.Types.NonuniformFFTsBackend,
-                       SpectralBackends.FSHTSpectralBackend,
-                       SpectralBackends.NUFSHTSpectralBackend} && throw(ArgumentError(
-        "`to_spectral` analyses gridded data; got spectral = $(nameof(typeof(spectral))). Scattered " *
+    transform isa Union{SpectralBackends.AbstractNUFFTSpectralBackend,
+                        SpectralBackends.FSHTSpectralBackend,
+                        SpectralBackends.NUFSHTSpectralBackend} && throw(ArgumentError(
+        "`to_spectral` analyses gridded data; got transform = $(nameof(typeof(transform))). Scattered " *
         "Cartesian points take `to_spectral(fields, points, ms; Ls)` with a NUFFT provider, and " *
         "spherical data `calculate_energy_transfer(SphericalTransferMethod(), field, grid)`."))
     real_layout && !(eltype(first(velocity_fields)) <: Real) && throw(ArgumentError(
@@ -149,30 +134,27 @@ function FIT.ToSpectralWorkspace(
     # non-redundant half, a complex one to the full cube. A real field asked for the full spectrum is
     # therefore staged complex.
     ET = real_layout ? FT : Complex{FT}
-    return _ffs_workspace(first(velocity_fields), grid, ns, ET, D, spectral, execution)
+    return _ffs_workspace(first(velocity_fields), grid, ns, ET, D, transform, execution)
 end
 
 """
-    to_spectral(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; spectral, execution, real_layout)
+    to_spectral(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution, real_layout)
 
 Physical → spectral on a `FlowGeometries` grid; see [`to_spectral`](@ref).
 """
 FIT.to_spectral(velocity_fields::Tuple, grid::FFS.FlowGeometries.Grids.AbstractGrid; kwargs...) =
     FIT.to_spectral!(FIT.ToSpectralWorkspace(velocity_fields, grid; kwargs...), velocity_fields)
 
-# Per-axis coordinate vectors describe the uniform periodic box `L = N·Δ` that `domain_size_from_coords`
-# reports and every spectral entry transforms on; the grid carries that period explicitly so the
-# wavenumbers are the ones the coordinate form has always produced.
 # The wavenumber axes fix the periodic box completely: each carries the full grid length `n` it indexes,
 # and its spacing is `Δk = 2π/L`. The grid rebuilt from them is the one the forward transform ran on.
 function FIT._to_spectral_workspace_on_coeffs(
     velocity_hat::AbstractArray, ks::Tuple;
-    spectral::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
 )
     nd = length(ks)
-    ns = FIT.SpectralLayout.full_size(ks)
-    ms = FIT.SpectralLayout.spectral_size(ks)
+    ns = FTB.full_size(ks)
+    ms = FTB.spectral_size(ks)
     size(velocity_hat)[1:nd] == ms || throw(DimensionMismatch(
         "coefficient size $(size(velocity_hat)[1:nd]) does not match the wavenumber grid $ms."))
     D = size(velocity_hat, nd + 1)
@@ -187,10 +169,12 @@ function FIT._to_spectral_workspace_on_coeffs(
     grid = FFS.FlowGeometries.Grids.StructuredGrid(
         geom, axes_...; topology = ntuple(_ -> true, nd), period = Ls)
     # A half layout is the transform of a real field, so the plans are built for one.
-    ET = FIT.SpectralLayout.is_half(ks) ? FT : Complex{FT}
-    return _ffs_workspace(velocity_hat, grid, ns, ET, D, spectral, execution)
+    ET = FTB.is_halved(ks) ? FT : Complex{FT}
+    return _ffs_workspace(velocity_hat, grid, ns, ET, D, transform, execution)
 end
 
+# Per-axis coordinate vectors describe the uniform periodic box `L = N·Δ` of `domain_size_from_coords`;
+# the grid carries that period explicitly.
 function FIT._to_spectral_workspace_on_axes(velocity_fields::Tuple, coords_vecs::Tuple; kwargs...)
     FIT.Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
     FIT.Utils.validate_uniform_grid(coords_vecs)
@@ -219,7 +203,7 @@ end
 const _SpectralOnlyDecomp = Union{FIT.Types.HelicalDecomposition, FIT.Types.ToroidalPoloidalDecomposition}
 
 """
-    decompose_field(decomp, velocity_fields::Tuple, grid; spectral, execution)
+    decompose_field(decomp, velocity_fields::Tuple, grid; transform, execution)
 
 Physical components of a spectral decomposition, on a `FlowGeometries` grid: the fields are analysed,
 split per mode, and each component synthesised back. Returns the decomposition's own names

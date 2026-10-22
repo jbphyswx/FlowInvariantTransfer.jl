@@ -10,8 +10,8 @@ small pseudospectral solver until a cascade is established, then diagnose that s
   - `evolve_2d_turbulence` : 2D decaying turbulence (small-N flow for the mode-to-mode diagnostic).
   - `evolve_orszag_tang`   : 2D Orszag–Tang vortex (canonical incompressible-MHD test).
 
-Velocities are returned as raw `fft` Fourier coefficients packed `(ns..., D)` — exactly the
-convention `FlowInvariantTransfer` expects (it applies the inverse transform internally).
+Velocities are returned as Fourier coefficients `û = fft(u)/Nᵈ` packed `(ns..., D)`, the convention
+`FlowInvariantTransfer` expects.
 """
 
 using FFTW: FFTW
@@ -84,8 +84,8 @@ function _evolve_ns3d(u0fun; N, ν, dt, steps, θ0fun=nothing, κ=0.005)
     end
 
     ks = ((2π/L).*k1d, (2π/L).*k1d, (2π/L).*k1d)
-    û  = cat(uh, vh, wh; dims=4)
-    return with_scalar ? (û, θh, ks, L) : (û, ks, L)
+    û  = cat(uh, vh, wh; dims=4) ./ N^3
+    return with_scalar ? (û, θh ./ N^3, ks, L) : (û, ks, L)
 end
 
 """
@@ -121,10 +121,10 @@ end
     evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
 
 Evolve 2D decaying turbulence from a divergence-free, band-limited random initial condition
-(energy seeded on shells ~3–5). Develops a 2D cascade with well-populated intermediate shells —
-a good small-`N` flow for the (cost-limited) mode-to-mode diagnostic. Returns `(û, ks, L)` with
-the velocity packed `(N, N, 2)`. Phases come from a fixed linear-congruential sequence keyed by
-`seed`, so no RNG dependency.
+(energy seeded on shells ~3–5, unit rms speed). Develops a 2D cascade with well-populated
+intermediate shells — a good small-`N` flow for the (cost-limited) mode-to-mode diagnostic. Returns
+`(û, ks, L)` with the velocity packed `(N, N, 2)`. Phases come from a fixed linear-congruential
+sequence keyed by `seed`, so no RNG dependency.
 """
 function evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
     L = 2π
@@ -153,6 +153,9 @@ function evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
     K2[1,1] = 0.0
     uh =  im .* KY .* ψh    # u =  ∂ψ/∂y
     vh = -im .* KX .* ψh    # v = -∂ψ/∂x
+    # Unit rms speed: Σₓ|u|² = Σₖ|uh|²/N² for the unnormalised FFT, so rms = √(Σₖ|uh|² + |vh|²)/N².
+    a = N^2 / sqrt(sum(abs2, uh) + sum(abs2, vh))
+    uh .*= a; vh .*= a
 
     dealias!(f) = (f .*= dmask2; f)
     proj2(Fx, Fy) = begin
@@ -174,7 +177,7 @@ function evolve_2d_turbulence(; N=24, ν=2e-3, dt=0.01, steps=300, seed=7)
         vh = (vh .+ 0.5dt.*(rv1.+rv2)).*visc
     end
     ks = ((2π/L).*k1d, (2π/L).*k1d)
-    return cat(uh, vh; dims=3), ks, L
+    return cat(uh, vh; dims=3) ./ N^2, ks, L
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,5 +242,5 @@ function evolve_orszag_tang(; N=128, ν=2e-3, η=2e-3, dt=0.01, steps=150)
     end
 
     ks = ((2π/L).*k1d, (2π/L).*k1d)
-    return cat(uh, vh; dims=3), cat(bxh, byh; dims=3), ks, L
+    return cat(uh, vh; dims=3) ./ N^2, cat(bxh, byh; dims=3) ./ N^2, ks, L
 end

@@ -21,9 +21,10 @@ using Random: Random
 using JSON3: JSON3
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
-# Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT providers are benchmarked axes.
+# Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT libraries are benchmarked axes.
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using FlowFieldSpectra: FlowFieldSpectra          # the physical → spectral transform `to_spectral` runs
+using FlowTransformBindings: FlowTransformBindings as FTB
 using NonuniformFFTs: NonuniformFFTs
 using FINUFFT: FINUFFT
 
@@ -72,32 +73,32 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
     # --- nonlinear term (the engine every Cartesian diagnostic sits on) ---
     nlw = FIT.Workspaces.NonlinearTermWorkspace(û, ks)
     group("nonlinear_term")[HOT * "/" * tag] =
-        BenchmarkTools.@benchmarkable FIT.NonlinearTerm.compute_nonlinear_term!($nlw, $û, $ks; spectral = $FFT) evals = 1
+        BenchmarkTools.@benchmarkable FIT.NonlinearTerm.compute_nonlinear_term!($nlw, $û, $ks; transform = $FFT) evals = 1
     push!(MEMROWS, ("NonlinearTermWorkspace $tag", nlw, ns))
 
     # --- spectral flux ---
     sfw = FIT.Workspaces.SpectralFluxWorkspace(û, ks, b)
-    sfres = FIT.Types.SpectralFluxResult(sh.centers, similar(sh.centers, RT), similar(sh.centers, RT))
+    sfres = FIT.Types.SpectralFluxResult(sh.centers, sh.edges, similar(sh.centers, RT), similar(sh.centers, RT))
     group("spectral_flux")[HOT * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.SpectralFlux.calculate_spectral_flux!(
-            $sfres, $sfw, $û, $ks, $(sh.idx); spectral = $FFT, execution = $SER) evals = 1
+            $sfres, $sfw, $û, $ks, $(sh.idx); transform = $FFT, execution = $SER) evals = 1
     group("spectral_flux")[CONV * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.SpectralFlux.calculate_spectral_flux(
-            $û, $ks; binning = $b, spectral = $FFT, execution = $SER) evals = 1
+            $û, $ks; binning = $b, transform = $FFT, execution = $SER) evals = 1
     push!(MEMROWS, ("SpectralFluxWorkspace $tag", sfw, ns))
 
     # --- shell-to-shell ---
     s2sw = FIT.Workspaces.ShellToShellWorkspace(û, ks, b)
     nsh = length(sh.centers)
     s2sres = FIT.Types.ShellToShellResult(sh.centers, sh.edges,
-                                          Matrix{RT}(undef, nsh, nsh), Vector{RT}(undef, nsh), RT(NaN))
+                                          Matrix{RT}(undef, nsh, nsh), Vector{RT}(undef, nsh))
     group("shell_to_shell")[HOT * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(
-            $s2sres, $s2sw, $û, $ks; spectral = $FFT, execution = $SER, verify_antisymmetry = false) evals = 1
+            $s2sres, $s2sw, $û, $ks; transform = $FFT, execution = $SER) evals = 1
     if THREADED
         group("shell_to_shell")[HOT * "/threaded/" * tag] =
             BenchmarkTools.@benchmarkable FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(
-                $s2sres, $s2sw, $û, $ks; spectral = $FFT, execution = $THR, verify_antisymmetry = false) evals = 1
+                $s2sres, $s2sw, $û, $ks; transform = $FFT, execution = $THR) evals = 1
     end
     push!(MEMROWS, ("ShellToShellWorkspace $tag  (N_sh=$nsh)", s2sw, ns))
 
@@ -108,17 +109,17 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
     Tb = zeros(RT, nb, nb); netb = zeros(RT, nb)
     group("band_to_band")[HOT * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.BandTransfer.calculate_band_to_band_transfer!(
-            $Tb, $netb, $bws, $û, $ks; spectral = $FFT, execution = $SER) evals = 1
+            $Tb, $netb, $bws, $û, $ks; transform = $FFT, execution = $SER) evals = 1
     push!(MEMROWS, ("BandTransferWorkspace $tag  (nb=$nb)", bws, ns))
 
     # --- compressible momentum-weighted flux ---
     ρ̂ = density_nd(ns)
-    cws = FIT.Compressible.CompressibleWorkspace(û, ks; spectral = FFT, binning = b)
+    cws = FIT.Compressible.CompressibleWorkspace(û, ks; transform = FFT, binning = b)
     group("compressible")[HOT * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.Compressible.calculate_compressible_flux!($cws, $û, $ρ̂, $ks) evals = 1
     group("compressible")[CONV * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.Compressible.calculate_compressible_flux(
-            $û, $ρ̂, $ks; binning = $b, spectral = $FFT) evals = 1
+            $û, $ρ̂, $ks; binning = $b, transform = $FFT) evals = 1
     push!(MEMROWS, ("CompressibleWorkspace $tag", cws, ns))
 
     # --- decomposition + partial fluxes (3D only: helical needs 3 components) ---
@@ -129,14 +130,14 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
         pfw = FIT.Workspaces.NonlinearTermWorkspace(û, ks)
         group("partial_fluxes")[HOT * "/helical/" * tag] =
             BenchmarkTools.@benchmarkable FIT.calculate_helical_partial_fluxes!(
-                $pfw, $û, $ks; binning = $b, spectral = $FFT) evals = 1
+                $pfw, $û, $ks; binning = $b, transform = $FFT) evals = 1
     end
 
     # --- uniform-grid physical → spectral (no workspace exists: convenience only) ---
     coords = ntuple(d -> range(0, 2π; length = ns[d] + 1)[1:ns[d]], D)
     uphys = ntuple(c -> real.(FFTW.bfft(view(û, ntuple(_ -> Colon(), D)..., c))), D)
     group("to_spectral_uniform")[CONV * "/" * tag] =
-        BenchmarkTools.@benchmarkable FIT.to_spectral($uphys, $coords; spectral = $FFT) evals = 1
+        BenchmarkTools.@benchmarkable FIT.to_spectral($uphys, $coords; transform = $FFT) evals = 1
 
     return nothing
 end
@@ -152,10 +153,11 @@ function add_mode_to_mode!()
     û_p = similar(û)
     S = similar(û, Float64, ns..., ns...)
     net = similar(û, Float64, ns...)
-    res = FIT.Types.ModeToModeTriadResult(FIT.Types.KineticEnergy(), ks, net, S)
+    res = FIT.Types.ModeToModeTriadResult(FIT.Types.KineticEnergy(), ks,
+                                          FIT.ModeToModeTransfer.mode_weights(û, Float64, ks), net, S)
     group("mode_to_mode")[HOT * "/2D/N16"] =
         BenchmarkTools.@benchmarkable FIT.calculate_mode_to_mode_transfer!(
-            $res, $ws, $û_p, $û, $ks; spectral = $FFT, execution = $SER) evals = 1
+            $res, $ws, $û_p, $û, $ks; transform = $FFT, execution = $SER) evals = 1
     return nothing
 end
 
@@ -169,20 +171,20 @@ function add_scattered!(D::Int, ms::NTuple{N,Int}) where {N}
     tag = "$(D)D/np$(NPTS)/ms$(ms[1])"
     ℓ = 0.5
     filt = FIT.Types.GaussianFilter()
-    for (name, be) in (("nonuniformffts", FIT.Types.NonuniformFFTsBackend()),
-                       ("finufft", FIT.Types.FINUFFTBackend()))
-        tsw = FIT.NUFFTToSpectralWorkspace(coords, ms; spectral = be, Ls = Ls, ncomponents = D, tol = 1e-9)
+    for (name, be) in (("nonuniformffts", FTB.NonuniformFFTsBackend()),
+                       ("finufft", FTB.FINUFFTBackend()))
+        tsw = FIT.NUFFTToSpectralWorkspace(coords, ms; transform = be, Ls = Ls, ncomponents = D, tol = 1e-9)
         group("to_spectral_scattered")[HOT * "/$name/" * tag] =
             BenchmarkTools.@benchmarkable FIT.to_spectral!($tsw, $fields) evals = 1
         push!(MEMROWS, ("NUFFTToSpectralWorkspace $name $tag", tsw, ms))
 
-        cgw = FIT.NUFFTCoarseGrainingWorkspace(coords, ms; spectral = be, Ls = Ls, tol = 1e-8)
+        cgw = FIT.NUFFTCoarseGrainingWorkspace(coords, ms; transform = be, Ls = Ls, tol = 1e-8)
         group("nufft_coarse_graining")[HOT * "/$name/" * tag] =
             BenchmarkTools.@benchmarkable FIT.nufft_coarse_graining_flux!(
                 $cgw, $fields, $ℓ, $filt, $ms) evals = 1
         group("nufft_coarse_graining")[CONV * "/$name/" * tag] =
             BenchmarkTools.@benchmarkable FIT.nufft_coarse_graining_flux(
-                $fields, $coords, $ℓ, $filt, $ms; spectral = $be, Ls = $Ls) evals = 1
+                $fields, $coords, $ℓ, $filt, $ms; transform = $be, Ls = $Ls) evals = 1
         push!(MEMROWS, ("NUFFTCoarseGrainingWorkspace $name $tag", cgw, ms))
     end
     return nothing
@@ -194,7 +196,7 @@ function add_cgef!(n::Int)
     v = [-cos(x) * sin(y) for x in xs, y in ys]
     ℓ = 2π / 16   # ~16 cells per filter window, sized off the grid rather than a fixed fraction
     filt = FIT.Types.GaussianFilter()
-    ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt; backend = SER)
+    ws = FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace((u, v), (xs, ys), ℓ, filt; execution = SER)
     tag = "2D/N$n"
     group("cgef_coarse_graining")[HOT * "/" * tag] =
         BenchmarkTools.@benchmarkable FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!($ws, ($u, $v)) evals = 1

@@ -1,7 +1,7 @@
 module Decomposition
 
 using ..Types: Types
-using ..SpectralLayout: SpectralLayout
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 export decompose_field, decompose_field!, helmholtz_project_spectral!
 
@@ -12,12 +12,16 @@ export decompose_field, decompose_field!, helmholtz_project_spectral!
 """
     decompose_field(decomp::AbstractFieldDecomposition, fields::Tuple, domain; kwargs...)
 
-Decompose a physical-space velocity field `fields` (e.g. `(u, v)`) with the given strategy, where
-`domain` is either the coordinate vectors of a Cartesian grid or a `FlowGeometries` grid. The solver
-selection reads the grid's geometry, sampling, mask and topology, so a grid reaches the transform its
-own layout admits; the coordinate-vector form builds a Cartesian grid and reaches the same selection.
+Decompose a physical-space velocity field `fields` (e.g. `(u, v)`) with the given strategy on the
+`FlowGeometries` grid `domain`. The solver is selected from the grid's geometry, sampling, mask and
+topology: the Helmholtz family through the HelmholtzDecomposition extension, the helical and
+toroidal/poloidal splits through the FlowFieldSpectra extension.
 
-`NoDecomposition` returns the components untouched and accepts either form.
+Returns a `NamedTuple` of component tuples keyed by the decomposition's names (`rotational`,
+`divergent`; `positive`, `negative`; `toroidal`, `poloidal`). The Helmholtz family solves for
+potentials and adds `converged`, `iterations` and `residual`, the least converged of its solves;
+`RotationalDecomposition`/`DivergentDecomposition` return that one component.
+`NoDecomposition` returns the components untouched and also accepts coordinate vectors.
 """
 function decompose_field(::Types.NoDecomposition, fields::Tuple, domain; kwargs...)
     return fields
@@ -28,11 +32,16 @@ function decompose_field(decomp::Types.AbstractFieldDecomposition, fields::Tuple
     return _decompose_field_physical(decomp, fields, domain; kwargs...)
 end
 
-# Stub overridden by FlowInvariantTransferHelmholtzDecompositionExt when HelmholtzDecomposition.jl is loaded
+# The package whose extension decomposes a physical field on a FlowGeometries grid.
+_physical_package(::Union{Types.HelicalDecomposition, Types.ToroidalPoloidalDecomposition}) = "FlowFieldSpectra"
+_physical_package(::Types.AbstractFieldDecomposition) = "HelmholtzDecomposition"
+
+# Reached when no extension method takes `domain`: the decomposition's package is not loaded, or
+# `domain` is not a FlowGeometries grid.
 function _decompose_field_physical(decomp::Types.AbstractFieldDecomposition, fields::Tuple, domain; kwargs...)
     throw(ArgumentError(
-        "Physical-space decomposition ($(typeof(decomp))) requires HelmholtzDecomposition.jl. " *
-        "Run `using HelmholtzDecomposition` to load the extension."
+        "physical-space $(nameof(typeof(decomp))) runs on a FlowGeometries grid with " *
+        "`using $(_physical_package(decomp))`; got a domain of type $(typeof(domain))."
     ))
 end
 
@@ -43,7 +52,16 @@ end
 """
     decompose_field(decomp::AbstractFieldDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
 
-Decompose a spectral-space velocity field `velocity_hat` along the wavenumbers `ks`.
+Decompose a spectral-space velocity field `velocity_hat` along the wavenumbers `ks`. Each returned
+array has the shape of `velocity_hat`.
+
+- [`HelicalDecomposition`](@ref FlowInvariantTransfer.Types.HelicalDecomposition) (3D) returns
+  `(positive = u₊, negative = u₋)`, the positive/negative-helicity vector components; for an
+  incompressible field `positive .+ negative ≈ velocity_hat`.
+- [`ToroidalPoloidalDecomposition`](@ref FlowInvariantTransfer.Types.ToroidalPoloidalDecomposition)
+  (3D) returns `(toroidal = u_tor, poloidal = u_pol)` in the
+  Craya–Herring frame; both are divergence-free and sum to the solenoidal part of `velocity_hat`.
+- `NoDecomposition` returns `velocity_hat`.
 """
 function decompose_field(::Types.NoDecomposition, velocity_hat::AbstractArray{<:Complex}, ks)
     return velocity_hat
@@ -57,13 +75,6 @@ end
 # Helical (Craya–Herring) decomposition — pure per-mode linear algebra, no external solver
 # ---------------------------------------------------------------------------
 
-"""
-    decompose_field(::HelicalDecomposition, velocity_hat, ks) -> (positive=u₊, negative=u₋)
-
-Project a 3D spectral velocity onto the positive/negative-helicity vector components (see
-[`HelicalDecomposition`](@ref)). Each returned array has the shape of `velocity_hat`; for an
-incompressible field `positive .+ negative ≈ velocity_hat`.
-"""
 # Craya–Herring frame at one mode: the two unit vectors ⊥ k̂. `e1 = k̂ × ẑ = (k̂y,−k̂x,0)` unless k̂ is
 # (nearly) ∥ ẑ, where `e1 = k̂ × x̂ = (0,k̂z,−k̂y)`; `e2 = k̂ × e1`. All zero at the DC mode.
 @inline function _craya_herring(kx::FT, ky::FT, kz::FT) where {FT}
@@ -105,17 +116,13 @@ end
 """
     decompose_field!(out::NamedTuple, decomp, velocity_hat, ks) -> out
 
-In-place spectral decomposition writing into caller-provided component buffers — allocation-free, for
-reuse across snapshots.
+Spectral decomposition into the caller-provided component buffers of `out` (`(positive, negative)` or
+`(toroidal, poloidal)`), allocation-free and device-generic.
 
-Each output component is one fused broadcast that recomputes the local frame from the per-axis
-wavenumbers inline, so the frame itself is never materialised. Device-generic: every step is an
-elementwise array op over the mode grid, with no scalar indexing.
-
-Both components are Hermitian for a real field, so they are representable on either spectral layout:
-under `k ↦ −k` the frame obeys `e1 ↦ −e1` and `e2 ↦ e2`, which carries `u_±(−k) = conj(u_±(k))`. The
-exception is the Nyquist mode of an even axis, whose `k` direction is not fixed by the mode (it is its
-own mirror); the 2/3 rule discards that mode before any decomposition-based diagnostic sees it.
+Both components are Hermitian for a real field, so either spectral layout represents them: under
+`k ↦ −k` the frame obeys `e1 ↦ −e1` and `e2 ↦ e2`, which carries `u_±(−k) = conj(u_±(k))`. The
+Nyquist mode of an even axis is its own mirror and fixes no `k` direction; the 2/3 rule discards that
+mode before any decomposition-based diagnostic sees it.
 """
 function decompose_field! end
 
@@ -126,7 +133,7 @@ function decompose_field!(out::NamedTuple, ::Types.HelicalDecomposition,
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     up = out.positive; um = out.negative
-    kg = SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)
@@ -143,13 +150,6 @@ function decompose_field!(out::NamedTuple, ::Types.HelicalDecomposition,
     return out
 end
 
-"""
-    decompose_field(::ToroidalPoloidalDecomposition, velocity_hat, ks) -> (toroidal=u_tor, poloidal=u_pol)
-
-Split a 3D solenoidal velocity into toroidal (horizontal/vortical) and poloidal (vertical/wave)
-components in the Craya–Herring frame (see [`ToroidalPoloidalDecomposition`](@ref)). Both returned
-arrays are divergence-free and sum to the solenoidal part of `velocity_hat`.
-"""
 # Toroidal/poloidal frame at one mode. `e1 = normalise(k̂ × ẑ) = (k̂y,−k̂x,0)/|k̂⊥|`, falling back to x̂
 # when k ∥ ẑ; `e2 = k̂ × e1` (with `e1z = 0`). `nz` is 0 at the DC mode, which carries neither part.
 @inline function _tor_pol_frame(kx::FT, ky::FT, kz::FT) where {FT}
@@ -161,8 +161,8 @@ arrays are divergence-free and sum to the solenoidal part of `velocity_hat`.
     invkp = selp ? inv(k̂perp) : zero(FT)
     e1x = selp ? k̂y * invkp : one(FT)
     e1y = selp ? -k̂x * invkp : zero(FT)          # e1z ≡ 0 in both branches
-    # e2's sign is irrelevant — the projection c·e2 is sign-invariant — so the k ∥ ẑ fallback
-    # (0,±1,0) matches the reference (0,1,0).
+    # The poloidal part (u·e2)e2 is invariant under e2 ↦ −e2, so the sign of the k ∥ ẑ fallback
+    # e2 = (0, ±1, 0) does not matter.
     return (e1x, e1y, -k̂z * e1y, k̂z * e1x, k̂x * e1y - k̂y * e1x, kk > 0 ? one(FT) : zero(FT))
 end
 
@@ -195,7 +195,7 @@ function decompose_field!(out::NamedTuple, ::Types.ToroidalPoloidalDecomposition
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     tor = out.toroidal; pol = out.poloidal
-    kg = SpectralLayout.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)

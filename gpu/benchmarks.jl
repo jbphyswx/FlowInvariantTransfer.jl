@@ -51,27 +51,27 @@ for N in SIZES
     ρ̂, ρ̂d   = density2d(N), to_device(density2d(N))
 
     report("spectral_flux", N,
-        (BenchmarkTools.@belapsed FIT.SpectralFlux.calculate_spectral_flux($û, $ks; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
-        (BenchmarkTools.@belapsed FIT.SpectralFlux.calculate_spectral_flux($ûd, $ksd; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
+        (BenchmarkTools.@belapsed FIT.SpectralFlux.calculate_spectral_flux($û, $ks; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
+        (BenchmarkTools.@belapsed FIT.SpectralFlux.calculate_spectral_flux($ûd, $ksd; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
 
     report("shell_to_shell", N,
-        (BenchmarkTools.@belapsed FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer($û, $ks; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend(), verify_antisymmetry = false) seconds = SECONDS),
-        (BenchmarkTools.@belapsed FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer($ûd, $ksd; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE, verify_antisymmetry = false) seconds = SECONDS))
+        (BenchmarkTools.@belapsed FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer($û, $ks; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
+        (BenchmarkTools.@belapsed FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer($ûd, $ksd; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
 
     report("band_to_band", N,
-        (BenchmarkTools.@belapsed FIT.BandTransfer.calculate_band_to_band_transfer($û, $ks; bands = $BANDS, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
-        (BenchmarkTools.@belapsed FIT.BandTransfer.calculate_band_to_band_transfer($ûd, $ksd; bands = $BANDS, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
+        (BenchmarkTools.@belapsed FIT.BandTransfer.calculate_band_to_band_transfer($û, $ks; bands = $BANDS, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
+        (BenchmarkTools.@belapsed FIT.BandTransfer.calculate_band_to_band_transfer($ûd, $ksd; bands = $BANDS, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
 
     report("compressible", N,
-        (BenchmarkTools.@belapsed FIT.Compressible.calculate_compressible_flux($û, $ρ̂, $ks; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
-        (BenchmarkTools.@belapsed FIT.Compressible.calculate_compressible_flux($ûd, $ρ̂d, $ksd; binning = $B, spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
+        (BenchmarkTools.@belapsed FIT.Compressible.calculate_compressible_flux($û, $ρ̂, $ks; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
+        (BenchmarkTools.@belapsed FIT.Compressible.calculate_compressible_flux($ûd, $ρ̂d, $ksd; binning = $B, transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
 end
 
-# mode-to-mode S(k|p) is O(N^{2D}); smallest grid only, force past the size guard.
+# mode-to-mode S(k|p) is O(N^{2D}); smallest grid only.
 let N = min(32, first(SIZES))
     û, ks   = field2d(N)
     ûd, ksd = to_device(û), to_ks(ks)
     report("mode_to_mode", N,
-        (BenchmarkTools.@belapsed FIT.calculate_mode_to_mode_transfer($û, $ks; spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend(), force = true) seconds = SECONDS),
-        (BenchmarkTools.@belapsed FIT.calculate_mode_to_mode_transfer($ûd, $ksd; spectral = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE, force = true) seconds = SECONDS))
+        (BenchmarkTools.@belapsed FIT.calculate_mode_to_mode_transfer($û, $ks; transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = FIT.ComputationalBackends.SerialBackend()) seconds = SECONDS),
+        (BenchmarkTools.@belapsed FIT.calculate_mode_to_mode_transfer($ûd, $ksd; transform = FIT.SpectralBackends.FFTSpectralBackend(), execution = $DEVICE) seconds = SECONDS))
 end

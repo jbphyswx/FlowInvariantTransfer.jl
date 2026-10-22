@@ -20,8 +20,8 @@ function run_helical_flux_example(; N=32)
     û, ks, L = evolve_taylor_green(; N=N)
 
     b = FIT.Types.LinearBinning(2π / L)
-    total = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
-    hel   = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend(),
+    total = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend())
+    hel   = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend(),
         decomposition=FIT.Types.HelicalDecomposition())
 
     summed = hel.positive.flux .+ hel.negative.flux
@@ -31,11 +31,12 @@ function run_helical_flux_example(; N=32)
     fig = CairoMakie.Figure(size=(820, 480), fontsize=14)
     ax = CairoMakie.Axis(fig[1, 1], title="Helicity-Resolved Energy Flux — 3D Taylor–Green Vortex",
         xlabel="wavenumber K", ylabel="Π(K)")
-    CairoMakie.lines!(ax, total.k_shells,        total.flux,        label="Π (total)",  linewidth=3,   color=:black)
-    CairoMakie.lines!(ax, hel.negative.k_shells, hel.negative.flux, label="Π⁻",         linewidth=2.5, color=:steelblue)
-    CairoMakie.scatterlines!(ax, hel.positive.k_shells, hel.positive.flux, label="Π⁺ (≈Π⁻: non-helical flow)",
+    K = total.shell_edges[2:end]           # Π[n] is the flux through the upper edge of shell n
+    CairoMakie.lines!(ax, K, total.flux,        label="Π (total)",  linewidth=3,   color=:black)
+    CairoMakie.lines!(ax, K, hel.negative.flux, label="Π⁻",         linewidth=2.5, color=:steelblue)
+    CairoMakie.scatterlines!(ax, K, hel.positive.flux, label="Π⁺ (≈Π⁻: non-helical flow)",
         linewidth=0, color=:crimson, marker=:circle, markersize=7)
-    CairoMakie.lines!(ax, total.k_shells,        summed,            label="Π⁺+Π⁻ = Π",  linewidth=2,   color=:gold, linestyle=:dash)
+    CairoMakie.lines!(ax, K, summed,            label="Π⁺+Π⁻ = Π",  linewidth=2,   color=:gold, linestyle=:dash)
     CairoMakie.hlines!(ax, [0]; color=:black, linewidth=0.8, linestyle=:dot)
     CairoMakie.axislegend(ax; position=:rt)
 

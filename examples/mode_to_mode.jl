@@ -21,23 +21,24 @@ function run_mode_to_mode_example(; N=24)
     b = FIT.Types.LinearBinning(2π / L)
 
     # Fully-resolved S(k|p): O(N^{2D}); FFTSpectralBackend keeps each per-giver term O(N^D log N).
-    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.Types.OrszagTwoThirds(), spectral=FIT.SpectralBackends.FFTSpectralBackend())
+    m2m = FIT.calculate_mode_to_mode_transfer(û, ks; dealiasing = FIT.Types.OrszagTwoThirds(), transform=FIT.SpectralBackends.FFTSpectralBackend())
     S = m2m.transfer
 
-    # Reduce S(k|p) over shells → T(K,Q).
+    # Reduce w(k)·S(k|p) over shells → T(K,Q); w(k) counts the modes each stored slot stands for.
     kmag = FIT.Utils.wavenumber_magnitude_grid(ks)
     edges = FIT.ShellBinning.shell_edges(b, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
     K = FIT.ShellBinning.shell_centers(b, maximum(kmag)); Nsh = length(K)
     TKQ = zeros(Nsh, Nsh)
-    for kI in CartesianIndices((N, N)), pI in CartesianIndices((N, N))
+    slots = CartesianIndices(size(m2m.net_transfer))
+    for kI in slots, pI in slots
         n = sidx[kI]; m = sidx[pI]
         (n == 0 || m == 0) && continue
-        TKQ[n, m] += S[kI, pI]
+        TKQ[n, m] += m2m.weights[kI] * S[kI, pI]
     end
 
     # Direct shell-to-shell T(n,m) for comparison.
     s2s = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(û, ks; binning=b, dealiasing = FIT.Types.OrszagTwoThirds(),
-        verify_antisymmetry=false, spectral=FIT.SpectralBackends.FFTSpectralBackend())
+        transform=FIT.SpectralBackends.FFTSpectralBackend())
     Tdir = s2s.transfer_matrix
     println("max|reduce(S) − T_shell| / ‖T‖ = ",
             round(maximum(abs, TKQ .- Tdir) / sqrt(sum(abs2, Tdir)); sigdigits=3))
@@ -47,16 +48,18 @@ function run_mode_to_mode_example(; N=24)
     kmax = findlast(n -> any(>(0.01Tlim), abs.(TKQ[n, :])) || any(>(0.01Tlim), abs.(TKQ[:, n])), 1:Nsh)
     kmax = something(kmax, Nsh); sh = 1:kmax
 
-    fig = CairoMakie.Figure(size=(1050, 470), fontsize=14)
-    CairoMakie.Label(fig[0, 1:2], "Mode-to-Mode S(k|p) reduces to Shell-to-Shell T(K,Q) — 2D turbulence",
+    fig = CairoMakie.Figure(size=(1100, 470), fontsize=14)
+    CairoMakie.Label(fig[0, 1:3], "Mode-to-Mode S(k|p) reduces to Shell-to-Shell T(K,Q) — 2D turbulence",
         fontsize=16, font=:bold, tellwidth=false)
+    hm = nothing
     for (col, (data, ttl)) in enumerate(((TKQ, "Σ over shells of resolved S(k|p)"),
                                          (Tdir, "direct shell-to-shell T(n,m)")))
-        ax = CairoMakie.Axis(fig[1, col], title=ttl, xlabel="source shell m", ylabel="receiver shell n",
+        ax = CairoMakie.Axis(fig[1, col], title=ttl, xlabel="shell m", ylabel="shell n",
             aspect=CairoMakie.DataAspect())
-        CairoMakie.heatmap!(ax, collect(sh), collect(sh), data[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
+        hm = CairoMakie.heatmap!(ax, collect(sh), collect(sh), data[sh, sh], colormap=:RdBu_9, colorrange=(-Tlim, Tlim))
         CairoMakie.lines!(ax, [0.5, kmax+0.5], [0.5, kmax+0.5]; color=:black, linewidth=1.2, linestyle=:dash)
     end
+    CairoMakie.Colorbar(fig[1, 3], hm, label="T(n,m)  (blue: n gives to m)", width=12)
 
     outpath = joinpath(@__DIR__, "mode_to_mode.png")
     CairoMakie.save(outpath, fig)

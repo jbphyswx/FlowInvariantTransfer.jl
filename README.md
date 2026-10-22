@@ -33,13 +33,13 @@ provides an allocating convenience API **and** zero-allocation `!`-variants for 
 | **Coarse-graining flux** | `calculate_coarse_graining_flux` | `Π_ℓ(x)` — pointwise flux at scale ℓ (via CGEF) |
 | **Triadic Orthogonal Decomposition** | `triadic_orthogonal_decomposition` | mode bispectrum + coherent triad modes |
 
-The reduction hierarchy is exact and consistent: `S(k|p)` sums over givers to `T(k)`, sums over
-shells to `T(n,m)`, and cumulates to `Π(K)` — all verified to machine precision.
+The reduction hierarchy is exact: `S(k|p)` sums over `p` to `T(k)`, sums over shells to `T(n,m)`,
+and cumulates to `Π(K)`.
 
 ## Invariants
 
-Switch the conserved quantity with `invariant=`; only the per-mode transfer density changes, not
-the algorithm:
+Switch the conserved quantity with `invariant=`; the per-mode transfer density is the only part that
+changes:
 
 - `KineticEnergy()` (default), `Helicity()` (3D), `Enstrophy()` (2D conserved / 3D with stretching)
 - `PassiveScalar()` — scalar variance `½⟨θ²⟩`, advected by the velocity. Convenience wrappers
@@ -83,78 +83,94 @@ The core is pure Julia (a dependency-free `DirectSumSpectralBackend` reference).
 
 ## Quickstart — spectral flux
 
+The diagnostics take Fourier coefficients `û = fft(u)/Nᴰ` and their wavenumber axes `ks`; a real
+field is stored as its non-redundant half (`rfft`). Physical fields on a grid go through
+`to_spectral((u, v), (x, y))` (`using FlowFieldSpectra`). The snippets below run in order.
+
 ```julia
 using FlowInvariantTransfer, FFTW
+using FlowInvariantTransfer.Types: LinearBinning, PerpendicularShells, PaddedThreeHalves
+using FlowInvariantTransfer.SpectralBackends: FFTSpectralBackend
+using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
 
-N = 64; L = 2π
-ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
-û  = randn(ComplexF64, N, N, 2)            # spectral velocity (ns..., D)
+# A real divergence-free 2-D velocity on the 2π-periodic box, as its half spectrum
+N = 32; L = 2π
+ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L); real = true)
+kx = [k for k in ks[1], _ in ks[2]]; ky = [k for _ in ks[1], k in ks[2]]
+ψ̂  = FFTW.rfft(randn(N, N)) ./ N^2
+û  = cat(im .* ky .* ψ̂, -im .* kx .* ψ̂; dims = 3)   # (u, v) = (∂ψ/∂y, −∂ψ/∂x)
 
-result = calculate_spectral_flux(û, ks;
-    binning  = LinearBinning(2π / L),
-    spectral = FFTSpectralBackend())               # transform backend (DirectSumSpectralBackend default)
-
-result.k_shells           # shell-centre wavenumbers
-result.transfer_spectrum  # T(k)
-result.flux               # Π(K) — >0 forward cascade, <0 inverse
+result = calculate_spectral_flux(û, ks; binning = LinearBinning(2π / L))
+result.shell_edges        # shell n spans [shell_edges[n], shell_edges[n+1])
+result.transfer_spectrum  # T(k_n) = −dE_n/dt from the nonlinear term
+result.flux               # Π[n] = Σ_{m≤n} T(k_m), the flux through shell_edges[n+1]; > 0 forward
 ```
 
-`spectral`/`execution` are the two orthogonal backend axes — e.g.
+`transform`/`execution` are the two orthogonal backend axes — e.g.
 `execution = ThreadedBackend()` (load `OhMyThreads`) parallelizes the shell/mode loop while
-`spectral = FFTSpectralBackend()` chooses the transform.
+`transform = FFTSpectralBackend()` chooses the transform (the default `AutoSpectralBackend()` takes
+it when FFTW is loaded).
 
 ## Shell-to-shell
 
 ```julia
-r = calculate_shell_to_shell_transfer(û, ks; binning=LinearBinning(2π/L), spectral=FFTSpectralBackend())
-r.transfer_matrix          # T(n,m)
-r.max_antisymmetry_error   # ≈ 0 for incompressible fields
+r = calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(2π / L))
+T = r.transfer_matrix      # T(n,m): the rate at which shell n gives energy to shell m
+maximum(abs, T .+ T')      # round-off: T(n,m) = −T(m,n) for a divergence-free field
 ```
 
 ## Mode-to-mode (resolved triads)
 
 ```julia
-m = calculate_mode_to_mode_transfer(û, ks; spectral=FFTSpectralBackend())  # small grids: O(N^{2D})
-m.net_transfer  # T(k) = Σ_p S(k|p)   (== the spectral transfer)
-m.transfer      # S(k|p) — antisymmetric; shell-sums to T(n,m)
+m = calculate_mode_to_mode_transfer(û, ks)     # (number of stored modes)² values
+m.net_transfer  # T(k) = Σ_p S(k|p), the spectral transfer of each stored mode
+m.weights       # w(k): 2 inside the halved axis, where a stored mode stands for its mirror too
+m.transfer      # S(k|p); w(k)S(k|p) = −w(p)S(p|k), and shell sums of w(k)S(k|p) give T(n,m)
 ```
 
 ## Passive scalar
 
 ```julia
-θ̂ = randn(ComplexF64, N, N)                # a scalar field (ns...) or (ns...,1)
-sf = calculate_scalar_flux(û, θ̂, ks; binning=LinearBinning(2π/L), spectral=FFTSpectralBackend())
-sf.flux        # Π_θ(K) — forward variance cascade; conserves (Σ T_θ ≈ 0)
+θ̂  = FFTW.rfft(randn(N, N)) ./ N^2            # a real scalar's half spectrum, (ms...) or (ms..., 1)
+sf = calculate_scalar_flux(û, θ̂, ks; binning = LinearBinning(2π / L))
+sf.flux        # Π_θ; Σ T_θ = 0 to round-off for a divergence-free velocity
 ```
 
-## Anisotropic directional flux
+## Anisotropic directional flux (3D)
 
 ```julia
-Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTSpectralBackend(),
-                                geometry=PerpendicularShells())   # Π(k⊥)
+M  = 16
+k3 = FlowInvariantTransfer.Utils.wavenumber_grid((M, M, M), (L, L, L); real = true)
+q1 = [k for k in k3[1], _ in k3[2], _ in k3[3]]
+q2 = [k for _ in k3[1], k in k3[2], _ in k3[3]]
+q3 = [k for _ in k3[1], _ in k3[2], k in k3[3]]
+Â  = [FFTW.rfft(randn(M, M, M)) ./ M^3 for _ in 1:3]
+û3 = cat(im .* (q2 .* Â[3] .- q3 .* Â[2]), im .* (q3 .* Â[1] .- q1 .* Â[3]),
+         im .* (q1 .* Â[2] .- q2 .* Â[1]); dims = 4)   # u = ∇ × A
+b  = LinearBinning(2π / L)
+Πperp = calculate_spectral_flux(û3, k3; binning = b, geometry = PerpendicularShells())   # Π(k⊥)
 ```
 
 ## Helical partial fluxes (3D)
 
 ```julia
-hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTSpectralBackend())
-hp.channels[(1,  1,  1)]   # homochiral (+++): inverse-cascade tendency
-hp.channels[(1, -1,  1)]   # a heterochiral channel: forward
-hp.total                   # Σ of the 8 channels == the full KE flux
+hp = calculate_helical_partial_fluxes(û3, k3; binning = b)
+hp.channels[(:positive, :positive, :positive)]   # homochiral: every field of the triad positive
+hp.channels[(:positive, :negative, :positive)]   # (s₁, s₂, s₃): receiving part, velocity, vorticity
+hp.total                   # Σ of the 8 channels: the flux of the solenoidal part of u
 ```
 
 ## Exact 3/2 dealiasing
 
 ```julia
-calculate_spectral_flux(û, ks; binning=b, spectral=FFTSpectralBackend(),
-                        dealiasing=PaddedThreeHalves())   # exact to Nyquist
+calculate_spectral_flux(û, ks; binning = b, dealiasing = PaddedThreeHalves())   # exact to Nyquist
 ```
 
 ## Zero-allocation hot loop
 
 ```julia
-ws = ShellToShellWorkspace(û, ks, LinearBinning(2π/L))
-calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral=FFTSpectralBackend())  # 0 allocs
+ws = ShellToShellWorkspace(û, ks, LinearBinning(2π / L))
+calculate_shell_to_shell_transfer!(r, ws, û, ks; transform = FFTSpectralBackend())  # 0 allocs
 ```
 
 ---
@@ -172,16 +188,18 @@ public API).
 ### Gallery
 
 Every figure below is produced by a script in [`examples/`](examples/) run on a **canonical evolved
-flow** (not random noise) — so the physics is verifiable by eye. Run any of them with
+flow**, so the physics is verifiable by eye. Run any of them with
 `julia --project=examples examples/<name>.jl`.
 
-**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
-`k`; the cumulative flux `Π(K) > 0` across the inertial range is the textbook 3D forward cascade.
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k) = −dE(k)/dt` is
+positive at low `k`, where the large scales give energy; the cumulative flux `Π(K) > 0` across the
+inertial range is the textbook 3D forward cascade.
 
 ![Spectral energy transfer](docs/src/assets/spectral_flux.png)
 
-**Shell-to-shell `T(n,m)` (3D TGV).** The antisymmetric near-diagonal band (blue gain / red loss)
-and the low-shell-gain / high-shell-loss net transfer are the cascade resolved scale-by-scale.
+**Shell-to-shell `T(n,m)` (3D TGV).** `T(n,m)` is the energy shell `n` gives to shell `m` per unit
+time. The antisymmetric near-diagonal band and the net transfer `Σₘ T(n,m) = −dEₙ/dt`, positive at
+low shells and negative at high shells, are the cascade resolved scale-by-scale.
 
 ![Shell-to-shell transfer](docs/src/assets/shell_to_shell.png)
 
@@ -233,28 +251,30 @@ from t=0 to t=10 — the forward cascade building in time.
 
 Two orthogonal axes that compose:
 
-- **Spectral (transform):** `DirectSumSpectralBackend` (no deps) · `FFTSpectralBackend` (FFTW) · `NUFFTSpectralBackend`
-  (FINUFFT) · `FSHTSpectralBackend`/`NUFSHTSpectralBackend` (spherical).
-- **Execution (parallelism):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
+- **Transform (`transform`):** `DirectSumSpectralBackend` (no deps) · `FFTSpectralBackend` (FFTW) ·
+  `FlowTransformBindings.NonuniformFFTsBackend`/`FINUFFTBackend` (scattered Cartesian) ·
+  `FSHTSpectralBackend`/`NUFSHTSpectralBackend` (spherical).
+- **Execution (`execution`):** `SerialBackend` · `ThreadedBackend` (OhMyThreads) ·
   `DistributedBackend` · `GPUBackend{B}` (KernelAbstractions).
 
-Every diagnostic supports both spectral transforms (Direct + FFT). Threaded and GPU (KernelAbstractions)
-run every Fourier diagnostic; Distributed (`Distributed` + `SharedArrays`, many-process single-node) is
-wired for spectral flux, shell-to-shell and TOD. For a grid too large for one node, use the MPI **pencil**
-axis (every invariant + geometry, 0-alloc workspace); MPI **batch** distributes independent snapshots.
+Every diagnostic supports both spectral transforms (Direct + FFT), and Threaded, Distributed
+(Julia worker processes) and GPU (KernelAbstractions) run every Fourier diagnostic. For a grid too
+large for one node, use the MPI **pencil** axis (every invariant + geometry, 0-alloc workspace); MPI
+**batch** distributes independent snapshots.
 
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
 | Spectral flux | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode | ✓ | ✓ | ✓ | — | ✓ |
-| Band-to-band | ✓ | ✓ | ✓ | — | ✓ |
-| Partial fluxes | ✓ | ✓ | ✓ | — | ✓ |
-| Compressible | ✓ | ✓ | ✓ | — | ✓ |
-| TOD | ✓ | ✓ | ✓ | ✓ | — |
+| Mode-to-mode | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Band-to-band | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Partial fluxes | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Compressible | ✓ | ✓ | ✓ | ✓ | ✓ |
+| TOD | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 GPU is verified on `GPUBackend(KA.CPU())` + JLArrays device-generic building blocks (cuFFT rides
-`AbstractFFTs` on a `CuArray` by construction). `PaddedThreeHalves` dealiasing is FFT-only. See the
+`AbstractFFTs` on a `CuArray` by construction). `PaddedThreeHalves` dealiasing runs on both
+transforms. See the
 [docs](docs/src/backends.md) for the authoritative matrix with `Serial`, per-cell notes, and the
 coarse-graining / spherical layers.
 
@@ -263,13 +283,16 @@ coarse-graining / spherical layers.
 | Extension trigger | Provides |
 |---|---|
 | `FFTW` | `O(N log N)` FFT transforms; exact 3/2 padding |
-| `OhMyThreads` | threaded shell/mode/TOD loops |
-| `Distributed` + `SharedArrays` | multi-process shell-to-shell |
+| `OhMyThreads` | threaded shell/mode/band/pair/TOD loops and batches |
+| `Distributed` | multi-process diagnostics and batches |
 | `KernelAbstractions` | GPU kernels |
+| `GPUArraysCore` | device-array paths of the compressible transfer and TOD |
+| `MPI` / `MPI` + `PencilFFTs` + `PencilArrays` | batch axis (`mpi_batch_map`) / pencil axis (`pencil_spectral_flux`) |
 | `HelmholtzDecomposition` | rotational/divergent decomposition |
 | `CoarseGrainingEnergyFluxes` | pointwise coarse-graining flux `Π_ℓ(x)` |
-| `FINUFFT` / `NUFSHT` / `FastSphericalHarmonics` | scattered-Cartesian / scattered-spherical / regular-spherical front-ends |
-| `FlowFieldSpectra` | spectra integration |
+| `NonuniformFFTs` or `FINUFFT` / `NUFSHT` / `FastSphericalHarmonics` + `FFTW` | scattered-Cartesian (through FlowTransformBindings) / scattered-spherical / regular-spherical front-ends |
+| `FlowFieldSpectra` | `to_spectral` / `from_spectral` on uniform grids and `FlowGeometries` grids |
+| `FlowGeometries` | spherical transfer and scattered NUFFT entries on `FlowGeometries` grids |
 | `CairoMakie` | plotting |
 
 ---

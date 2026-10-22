@@ -92,19 +92,19 @@ nufft_coarse_graining_flux_batch
 
 ## Scattered-Cartesian NUFFT
 
-Two peer providers back the scattered NUFFT transform — `FlowInvariantTransfer.Types.FINUFFTBackend`
-(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`),
-selected via the required `spectral` keyword. They drive the scattered coarse-graining flux and the
-scattered→uniform `to_spectral` reconstruction; the workspace forms preset the plan + buffers for
-allocation-light reuse.
+The scattered NUFFTs run through FlowTransformBindings' plans, on the library the required `transform`
+keyword names: `FlowTransformBindings.NonuniformFFTsBackend()` (`using NonuniformFFTs`) or
+`FlowTransformBindings.FINUFFTBackend()` (`using FINUFFT`, and `using CUDA` for cuFINUFFT on device
+points). They drive the scattered coarse-graining flux and the scattered→uniform `to_spectral`
+reconstruction; the workspace forms hold the plans and buffers for reuse, and `close!` releases the
+plans.
 
 ```@docs
 NUFFTCoarseGrainingWorkspace
 nufft_coarse_graining_flux!
 NUFFTToSpectralWorkspace
 to_spectral!
-FlowInvariantTransfer.Types.FINUFFTBackend
-FlowInvariantTransfer.Types.NonuniformFFTsBackend
+FlowInvariantTransfer.close!
 ```
 
 ## Spherical Spectral Transfer
@@ -114,6 +114,14 @@ calculate_spherical_transfer
 calculate_spherical_transfer!
 calculate_divergent_spherical_transfer
 calculate_divergent_spherical_transfer!
+```
+
+The spherical transfer on a masked `FlowGeometries` grid takes one of these as `inactive`.
+
+```@docs
+FlowInvariantTransfer.Types.AbstractInactiveCells
+FlowInvariantTransfer.Types.ZeroFill
+FlowInvariantTransfer.Types.Exclude
 ```
 
 ## Distributed (MPI)
@@ -138,6 +146,9 @@ FlowInvariantTransfer.TriadicOrthogonalDecomposition.tukey_window
 ```@docs
 FlowInvariantTransfer.NonlinearTerm.compute_nonlinear_term
 FlowInvariantTransfer.NonlinearTerm.compute_nonlinear_term!
+FlowInvariantTransfer.NonlinearTerm.synthesize_advecting!
+FlowInvariantTransfer.NonlinearTerm.compute_advection!
+FlowInvariantTransfer.NonlinearTerm.compute_rotational_term!
 ```
 
 ## Invariant Transfer Density
@@ -235,6 +246,7 @@ FlowInvariantTransfer.Types.DivergentSphericalTransferResult
 
 ```@docs
 FlowInvariantTransfer.Workspaces.NonlinearTermWorkspace
+FlowInvariantTransfer.Workspaces.PaddedGrid
 FlowInvariantTransfer.Workspaces.SpectralFluxWorkspace
 FlowInvariantTransfer.Workspaces.ShellToShellWorkspace
 FlowInvariantTransfer.Compressible.CompressibleWorkspace
@@ -246,11 +258,14 @@ FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
 
 ## Wavenumber Utilities
 
+The wavenumber axes, their fold weights and the dealiasing cutoffs are the packed layout of
+[`FlowTransformBindings`](https://github.com/jbphyswx/FlowTransformBindings.jl) (documented there):
+`FlowTransformBindings.RFFTAxis`, `FlowTransformBindings.FFTAxis`, `FlowTransformBindings.mode_fold`,
+`FlowTransformBindings.dealias_cutoff`.
+
 ```@docs
 FlowInvariantTransfer.Utils.wavenumber_grid
 FlowInvariantTransfer.Utils.wavenumber_magnitude_grid
-FlowInvariantTransfer.Utils.dealiasing_mask
-FlowInvariantTransfer.Utils.dealiasing_mask!
 ```
 
 ## Shell Binning & Geometry
@@ -291,9 +306,14 @@ The transform-algorithm tags are provided by the shared
 selects the transform by the tag's geometry; the concrete types are `SpectralBackends.DirectSumSpectralBackend`,
 `SpectralBackends.FFTSpectralBackend`, `SpectralBackends.FSHTSpectralBackend`, and
 `SpectralBackends.NUFSHTSpectralBackend`, all `<: SpectralBackends.AbstractSpectralBackend`. The
-scattered-Cartesian NUFFT transform has two peer providers, defined by FIT as symmetric subtypes of
-`SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend`: `FlowInvariantTransfer.Types.FINUFFTBackend`
-(`using FINUFFT`) and `FlowInvariantTransfer.Types.NonuniformFFTsBackend` (`using NonuniformFFTs`).
+scattered-Cartesian NUFFT libraries' tags come from
+[`FlowTransformBindings`](https://github.com/jbphyswx/FlowTransformBindings.jl), as subtypes of
+`SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend`:
+`FlowTransformBindings.FINUFFTBackend` (`using FINUFFT`) and
+`FlowTransformBindings.NonuniformFFTsBackend` (`using NonuniformFFTs`). The `transform` keyword's
+default, `SpectralBackends.AutoSpectralBackend`, resolves through FIT's own
+`FlowInvariantTransfer.Types.resolve_transform` (the FFT when the FFTW extension is loaded, else the
+direct sum).
 
 ## Execution (Parallelism) Backends
 

@@ -25,7 +25,7 @@ allocating API and zero-allocation `!`-variants.
 | **Coarse-graining** | [`calculate_coarse_graining_flux`](@ref) | `Π_ℓ(x)` |
 | **TOD** | [`triadic_orthogonal_decomposition`](@ref) | mode bispectrum + modes |
 
-The hierarchy is exact: `S(k|p)` → (sum over givers) → `T(k)` → (cumsum) → `Π(K)`; and
+The hierarchy is exact: `S(k|p)` → (sum over `p`) → `T(k)` → (cumsum) → `Π(K)`; and
 `S(k|p)` → (sum over shells) → `T(n,m)`.
 
 **Invariants** (`invariant=`): [`KineticEnergy`](@ref), [`Helicity`](@ref), [`Enstrophy`](@ref),
@@ -50,19 +50,19 @@ The core is dependency-free ([`DirectSumSpectralBackend`](@ref SpectralBackends.
 
 ## Backends
 
-Two orthogonal axes: **spectral** (transform: [`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend), [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend), …)
-× **execution** (parallelism: [`SerialBackend`](@ref ComputationalBackends.SerialBackend), [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend),
+Two orthogonal axes: **`transform`** ([`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend), [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend), …)
+× **`execution`** (parallelism: [`SerialBackend`](@ref ComputationalBackends.SerialBackend), [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend),
 [`DistributedBackend`](@ref ComputationalBackends.DistributedBackend), [`GPUBackend`](@ref ComputationalBackends.GPUBackend)).
 
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
 | Spectral flux | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shell-to-shell | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mode-to-mode | ✓ | ✓ | ✓ | — | ✓ |
-| Band-to-band | ✓ | ✓ | ✓ | — | ✓ |
-| Partial fluxes | ✓ | ✓ | ✓ | — | ✓ |
-| Compressible | ✓ | ✓ | ✓ | — | ✓ |
-| TOD | ✓ | ✓ | ✓ | ✓ | — |
+| Mode-to-mode | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Band-to-band | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Partial fluxes | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Compressible | ✓ | ✓ | ✓ | ✓ | ✓ |
+| TOD | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 See [Backends, Dealiasing & Extensions](@ref) for the authoritative matrix (with `Serial`, per-cell
 notes, and the coarse-graining / spherical / MPI-batch+pencil layers).
@@ -71,64 +71,81 @@ notes, and the coarse-graining / spherical / MPI-batch+pencil layers).
 
 ## Quickstart: spectral flux Π(K)
 
+The diagnostics take Fourier coefficients `û = fft(u)/Nᴰ` and their wavenumber axes `ks`; a real
+field is stored as its non-redundant half (`rfft`). Physical fields on a grid go through
+[`to_spectral`](@ref) (`using FlowFieldSpectra`). The snippets below run in order.
+
 ```julia
 using FlowInvariantTransfer, FFTW
+using FlowInvariantTransfer.Types: LinearBinning, PerpendicularShells, PaddedThreeHalves,
+                                   TriadicOrthogonalDecompositionMethod
+using FlowInvariantTransfer.SpectralBackends: FFTSpectralBackend
+using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
 
-N = 64; L = 2π
-ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L))
-û  = randn(ComplexF64, N, N, 2)
+# A real divergence-free 2-D velocity on the 2π-periodic box, as its half spectrum
+N = 32; L = 2π
+ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L); real = true)
+kx = [k for k in ks[1], _ in ks[2]]; ky = [k for _ in ks[1], k in ks[2]]
+ψ̂  = FFTW.rfft(randn(N, N)) ./ N^2
+û  = cat(im .* ky .* ψ̂, -im .* kx .* ψ̂; dims = 3)   # (u, v) = (∂ψ/∂y, −∂ψ/∂x)
 
-result = calculate_spectral_flux(û, ks;
-    binning  = LinearBinning(2π / L),
-    spectral = FFTSpectralBackend())
-
-result.k_shells           # shell-centre wavenumbers
-result.transfer_spectrum  # T(k)
-result.flux               # Π(K) — >0 forward, <0 inverse
+result = calculate_spectral_flux(û, ks; binning = LinearBinning(2π / L))
+result.shell_edges        # shell n spans [shell_edges[n], shell_edges[n+1])
+result.transfer_spectrum  # T(k_n) = −dE_n/dt from the nonlinear term
+result.flux               # Π[n] = Σ_{m≤n} T(k_m), the flux through shell_edges[n+1]; > 0 forward
 ```
 
 ## Quickstart: shell-to-shell T(n,m)
 
 ```julia
-r = calculate_shell_to_shell_transfer(û, ks;
-    binning = LinearBinning(2π / L), spectral = FFTSpectralBackend())
-r.transfer_matrix          # T(n,m)
-r.max_antisymmetry_error   # ≈ 0 for incompressible fields
+r = calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(2π / L))
+T = r.transfer_matrix      # T(n,m): the rate at which shell n gives energy to shell m
+maximum(abs, T .+ T')      # round-off: T(n,m) = −T(m,n) for a divergence-free field
 ```
 
-## Quickstart: scale-to-scale (resolved triads)
+## Quickstart: mode-to-mode (resolved triads)
 
 ```julia
-m = calculate_mode_to_mode_transfer(û, ks; spectral = FFTSpectralBackend())  # O(N^{2D}); small grids
+m = calculate_mode_to_mode_transfer(û, ks)     # (number of stored modes)² values
 m.net_transfer  # T(k) = Σ_p S(k|p)
-m.transfer      # resolved S(k|p)
+m.weights       # w(k): 2 inside the halved axis, where a stored mode stands for its mirror too
+m.transfer      # S(k|p), with w(k)S(k|p) = −w(p)S(p|k)
 ```
 
 ## Quickstart: passive scalar
 
 ```julia
-θ̂ = randn(ComplexF64, N, N)
-sf = calculate_scalar_flux(û, θ̂, ks; binning = LinearBinning(2π/L), spectral = FFTSpectralBackend())
-sf.flux        # Π_θ(K) — forward variance cascade
+θ̂  = FFTW.rfft(randn(N, N)) ./ N^2
+sf = calculate_scalar_flux(û, θ̂, ks; binning = LinearBinning(2π / L))
+sf.flux        # Π_θ; Σ T_θ = 0 to round-off for a divergence-free velocity
 ```
 
 ## Quickstart: anisotropic + helical (3D)
 
 ```julia
+M  = 16
+k3 = FlowInvariantTransfer.Utils.wavenumber_grid((M, M, M), (L, L, L); real = true)
+q1 = [k for k in k3[1], _ in k3[2], _ in k3[3]]
+q2 = [k for _ in k3[1], k in k3[2], _ in k3[3]]
+q3 = [k for _ in k3[1], _ in k3[2], k in k3[3]]
+Â  = [FFTW.rfft(randn(M, M, M)) ./ M^3 for _ in 1:3]
+û3 = cat(im .* (q2 .* Â[3] .- q3 .* Â[2]), im .* (q3 .* Â[1] .- q1 .* Â[3]),
+         im .* (q1 .* Â[2] .- q2 .* Â[1]); dims = 4)   # u = ∇ × A
+b  = LinearBinning(2π / L)
+
 # directional flux Π(k⊥)
-Πperp = calculate_spectral_flux(û3, ks; binning=b, spectral=FFTSpectralBackend(),
-                                geometry=PerpendicularShells())
+Πperp = calculate_spectral_flux(û3, k3; binning = b, geometry = PerpendicularShells())
 
 # helical 8-channel partial fluxes
-hp = calculate_helical_partial_fluxes(û3, ks; binning=b, spectral=FFTSpectralBackend())
-hp.channels[(1,1,1)]  # homochiral (+++)
-hp.total              # == full KE flux
+hp = calculate_helical_partial_fluxes(û3, k3; binning = b)
+hp.channels[(:positive, :positive, :positive)]  # homochiral: every field of the triad positive
+hp.total              # Σ of the 8 channels: the flux of the solenoidal part of u
 ```
 
 ## Quickstart: exact 3/2 dealiasing
 
 ```julia
-calculate_spectral_flux(û, ks; binning=b, spectral=FFTSpectralBackend(), dealiasing=PaddedThreeHalves())
+calculate_spectral_flux(û, ks; binning = b, dealiasing = PaddedThreeHalves())
 ```
 
 ## Quickstart: Triadic Orthogonal Decomposition
@@ -137,7 +154,7 @@ calculate_spectral_flux(û, ks; binning=b, spectral=FFTSpectralBackend(), dealia
 using FlowInvariantTransfer, FFTW
 X = randn(256, 1, 32)                      # (nt, nvar, nx)
 method = TriadicOrthogonalDecompositionMethod(nfft=64, noverlap=32, nmode=2)
-result = calculate_energy_transfer(method, X; dt=0.01, spectral=FFTSpectralBackend())
+result = calculate_energy_transfer(method, X; dt=0.01, transform=FFTSpectralBackend())
 result.frequencies; result.mode_bispectrum; result.modes; result.modal_energy_budget
 ```
 
@@ -145,23 +162,25 @@ result.frequencies; result.mode_bispectrum; result.modes; result.modal_energy_bu
 
 ```julia
 ws = ShellToShellWorkspace(û, ks, LinearBinning(2π / L))
-calculate_shell_to_shell_transfer!(result, ws, û, ks; spectral = FFTSpectralBackend())  # 0 allocs
+calculate_shell_to_shell_transfer!(r, ws, û, ks; transform = FFTSpectralBackend())  # 0 allocs
 ```
 
 ---
 
 ## Gallery
 
-Every figure is produced by a script in `examples/` run on a **canonical evolved flow** (not random
-noise), so the physics is verifiable by eye. Run any with `julia --project=examples examples/<name>.jl`.
+Every figure is produced by a script in `examples/` run on a **canonical evolved flow**, so the
+physics is verifiable by eye. Run any with `julia --project=examples examples/<name>.jl`.
 
-**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k)` injects at low
-`k`; the cumulative flux `Π(K) > 0` across the inertial range is the 3D forward cascade.
+**Spectral flux `Π(K)` — forward energy cascade (3D Taylor–Green vortex).** `T(k) = −dE(k)/dt` is
+positive at low `k`, where the large scales give energy; the cumulative flux `Π(K) > 0` across the
+inertial range is the 3D forward cascade.
 
 ![Spectral energy transfer](assets/spectral_flux.png)
 
-**Shell-to-shell `T(n,m)` (3D TGV).** Antisymmetric near-diagonal band (blue gain / red loss) and the
-low-shell-gain / high-shell-loss net transfer — the cascade resolved scale-by-scale.
+**Shell-to-shell `T(n,m)` (3D TGV).** `T(n,m)` is the energy shell `n` gives to shell `m` per unit
+time: an antisymmetric near-diagonal band, and a net transfer `Σₘ T(n,m) = −dEₙ/dt` positive at low
+shells and negative at high shells — the cascade resolved scale-by-scale.
 
 ![Shell-to-shell transfer](assets/shell_to_shell.png)
 
@@ -209,4 +228,3 @@ t=10 — the forward cascade building in time.
 - [Architecture](@ref) — internal design and dispatch
 - [Backends, Dealiasing & Extensions](@ref) — backends and the extension table
 - [API Reference](@ref) — full docstring index
-```

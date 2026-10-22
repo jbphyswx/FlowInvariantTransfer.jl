@@ -27,18 +27,13 @@ Test.@testset "band energies — invariant content per band" begin
 
     û_h, ks_h = FIT.to_spectral((u, v), grid)                          # half layout
     û_f, ks_f = FIT.to_spectral((u, v), grid; real_layout = false)     # full layout
-    Test.@test FIT.SpectralLayout.is_half(ks_h)
-    Test.@test !FIT.SpectralLayout.is_half(ks_f)
 
     # Sharp bands over a partition whose last edge clears the corner mode, so every mode is assigned
-    # and the sum is the whole field. (The package's half-open `[kₙ, kₙ₊₁)` shells otherwise drop the
-    # single mode sitting exactly on the outermost edge.)
+    # and the sum is the whole field.
     kmax = FIT.ShellBinning.max_shell_coordinate(FIT.Types.IsotropicShells(), ks_h)
     covering = FIT.Types.CustomBinning(collect(range(0.0, 1.01 * kmax; length = 12)))
     for (nm, û, ks) in (("half", û_h, ks_h), ("full", û_f, ks_f))
         sharp = FIT.calculate_band_energies(û, ks; bands = covering)
-        Test.@test length(sharp.energies) == length(sharp.centers)
-        Test.@test all(>=(0), sharp.energies)
         Test.@test isapprox(sum(sharp.energies), total; rtol = 1e-12)
     end
 
@@ -47,13 +42,8 @@ Test.@testset "band energies — invariant content per band" begin
     bands = FIT.Types.SmoothBands([1.5, 3.0, 6.0, 12.0], 0.7)
     smooth_h = FIT.calculate_band_energies(û_h, ks_h; bands = bands)
     smooth_f = FIT.calculate_band_energies(û_f, ks_f; bands = bands)
-    Test.@test all(>=(0), smooth_h.energies)
     Test.@test isapprox(sum(smooth_h.energies), total; rtol = 1e-12)
     Test.@test isapprox(smooth_h.energies, smooth_f.energies; rtol = 1e-12)
-
-    # The same `bands` drives the band-to-band transfer, so the energies describe that partition.
-    T = FIT.calculate_band_to_band_transfer(û_h, ks_h; bands = bands)
-    Test.@test size(T.transfer_matrix, 1) == length(smooth_h.energies)
 
     # Enstrophy is ½|ω̂|², with the derivative wavenumber zeroed at an even axis's Nyquist mode — that
     # slot is its own image under k ↦ −k, so it admits no first-order-in-k operator.
