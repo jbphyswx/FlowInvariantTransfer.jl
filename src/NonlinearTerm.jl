@@ -335,9 +335,10 @@ _rotational_term_padded_fft!(args...) = throw(ArgumentError(
     compute_rotational_term!(ws, velocity_hat, vortex_hat, ks; dealiasing=OrszagTwoThirds(),
                              transform=AutoSpectralBackend()) -> ws.N̂
 
-`𝒩̂ = FFT[ω × u]` in 3-D, written into `ws.N̂`: `u` is synthesised from `velocity_hat` and
-`ω = ∇ × v` from `vortex_hat`, both three-component `(ms..., 3)` coefficient arrays, with the
-normalization, input truncation and output zeroing of [`compute_nonlinear_term!`](@ref).
+`𝒩̂ = FFT[ω × u]`, written into `ws.N̂`: `u` is synthesised from `velocity_hat` and `ω = ∇ × v` from
+`vortex_hat`, both `(ms..., D)` coefficient arrays in `D = 2` or `3` dimensions (in 2-D `ω` is the scalar
+`∂₁v₂ − ∂₂v₁` and the product `ω ẑ × u`), with the normalization, input truncation and output zeroing of
+[`compute_nonlinear_term!`](@ref).
 
 `(u·∇)u = ω × u + ∇(½|u|²)`, and the gradient has no projection on a divergence-free `û`, so
 `Re{û*·𝒩̂}` is the kinetic-energy transfer density of `(u·∇)u` when `v = u` is solenoidal.
@@ -350,9 +351,10 @@ function compute_rotational_term!(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
 )
-    length(ks) == 3 || throw(ArgumentError("the rotational form ω × u is three-dimensional; got nd=$(length(ks))."))
-    (size(velocity_hat, 4) == 3 && size(vortex_hat, 4) == 3 && size(ws.N̂, 4) == 3) || throw(DimensionMismatch(
-        "the rotational form takes three-component fields and a three-component workspace."))
+    nd = length(ks)
+    nd in (2, 3) || throw(ArgumentError("the rotational form ω × u is two- or three-dimensional; got nd=$nd."))
+    (size(velocity_hat, nd + 1) == nd && size(vortex_hat, nd + 1) == nd && size(ws.N̂, nd + 1) == nd) ||
+        throw(DimensionMismatch("the rotational form takes $nd-component fields and a $nd-component workspace."))
     _compute_rotational_term!(ws, velocity_hat, vortex_hat, ks, _checked_transform(transform, velocity_hat), dealiasing)
     return ws.N̂
 end
@@ -384,6 +386,32 @@ function _curl_hat_direct!(out, v, ks)
     return out
 end
 
+# The 2-D vorticity `ω̂ = i(k₁ v̂₂ − k₂ v̂₁)` into component 1 of `out` by a host loop over the modes.
+function _curl2_hat_direct!(out, v, ks)
+    ms = FTB.spectral_size(ks)
+    @inbounds for I in CartesianIndices(ms)
+        k1 = FTB.derivative_wavenumber(ks[1], I[1])
+        k2 = FTB.derivative_wavenumber(ks[2], I[2])
+        out[I, 1] = im * (k1 * v[I, 2] - k2 * v[I, 1])
+    end
+    return out
+end
+
+"""
+    _cross2_in_place!(W, U) -> W
+
+`W ← ω ẑ × U = (−ω U₂, ω U₁)` with `ω` held in component 1 of `W`. Elementwise broadcasts, so it runs on
+device arrays.
+"""
+function _cross2_in_place!(W, U)
+    d = ndims(W)
+    ω = selectdim(W, d, 1); w2 = selectdim(W, d, 2)
+    u1 = selectdim(U, d, 1); u2 = selectdim(U, d, 2)
+    @. w2 = ω * u1
+    @. ω = -ω * u2
+    return W
+end
+
 """
     _cross_in_place!(W, U, g) -> W
 
@@ -405,7 +433,7 @@ end
 
 # ω̂ into `ws.N̂`, then ω into `ws.N_phys` and u into `ws.u_phys`; `ws.N̂` is overwritten by the forward
 # transform of `ω × u` at the end.
-function _rotational_term_direct!(ws, velocity_hat, vortex_hat, ks, truncate::Bool)
+function _rotational_term_direct!(ws, velocity_hat, vortex_hat, ks::NTuple{3,Any}, truncate::Bool)
     _curl_hat_direct!(ws.N̂, vortex_hat, ks)
     _direct_synth_into!(ws.N_phys, ws.N̂, ks, 3, truncate)
     _direct_synth_into!(ws.u_phys, velocity_hat, ks, 3, truncate)
@@ -413,15 +441,32 @@ function _rotational_term_direct!(ws, velocity_hat, vortex_hat, ks, truncate::Bo
     return nlt_forward!(ws, ks, SpectralBackends.DirectSumSpectralBackend(); truncate = truncate)
 end
 
+function _rotational_term_direct!(ws, velocity_hat, vortex_hat, ks::NTuple{2,Any}, truncate::Bool)
+    _curl2_hat_direct!(ws.N̂, vortex_hat, ks)
+    _direct_synth_into!(ws.N_phys, ws.N̂, ks, 1, truncate)
+    _direct_synth_into!(ws.u_phys, velocity_hat, ks, 2, truncate)
+    _cross2_in_place!(ws.N_phys, ws.u_phys)
+    return nlt_forward!(ws, ks, SpectralBackends.DirectSumSpectralBackend(); truncate = truncate)
+end
+
 # The same on the padded grid: ω̂ on the caller's grid, both fields embedded and synthesised on the
 # padded grid, the product formed there and returned to the caller's grid.
-function _rotational_term_padded_direct!(ws, velocity_hat, vortex_hat, ks)
+function _rotational_term_padded_direct!(ws, velocity_hat, vortex_hat, ks::NTuple{3,Any})
     pg = _require_pad(ws.pad)
     _curl_hat_direct!(ws.N̂, vortex_hat, ks)
     _padded_direct_synth!(pg, pg.n_phys, ws.N̂, 3)
     _padded_direct_synth!(pg, pg.u_phys, velocity_hat, 3)
     _cross_in_place!(pg.n_phys, pg.u_phys, pg.g_phys)
     return _padded_direct_forward!(pg, ws.N̂, 3)
+end
+
+function _rotational_term_padded_direct!(ws, velocity_hat, vortex_hat, ks::NTuple{2,Any})
+    pg = _require_pad(ws.pad)
+    _curl2_hat_direct!(ws.N̂, vortex_hat, ks)
+    _padded_direct_synth!(pg, pg.n_phys, ws.N̂, 1)
+    _padded_direct_synth!(pg, pg.u_phys, velocity_hat, 2)
+    _cross2_in_place!(pg.n_phys, pg.u_phys)
+    return _padded_direct_forward!(pg, ws.N̂, 2)
 end
 
 # ---------------------------------------------------------------------------

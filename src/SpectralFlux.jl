@@ -53,6 +53,9 @@ flux Π(K) from Fourier-space velocity data.
       are copied to `dev` once per call.
 - `advecting_hat=velocity_hat`: the advecting velocity of `(u·∇)f`.
 - `geometry::AbstractShellGeometry=IsotropicShells()`: the wavenumber coordinate the shells partition.
+- `form::AbstractNonlinearForm=Advective()`: [`Rotational()`](@ref Types.Rotational) evaluates `ω × u`
+  with fewer transforms, the same fluxes for a divergence-free velocity advecting itself under the 2/3
+  rule; it takes kinetic energy, enstrophy or helicity and no `advecting_hat`.
 
 # Returns
 `SpectralFluxResult` with fields:
@@ -83,8 +86,10 @@ function calculate_spectral_flux(
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
+    form::Types.AbstractNonlinearForm = Types.Advective(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
+    _check_form(form, velocity_hat, ks, invariant, advecting_hat)
     exec = Types.resolve_execution(execution)
     velocity_hat, advecting_hat = Types._fields_to_execution(exec, velocity_hat, advecting_hat)
     # The direct sum scalar-indexes, so a device array is rejected before the workspace build.
@@ -94,9 +99,33 @@ function calculate_spectral_flux(
             "run on device arrays; use transform = SpectralBackends.FFTSpectralBackend() (cuFFT via AbstractFFTs) for the device path."))
     decomposed = Decomposition.decompose_field(decomposition, velocity_hat, ks)
     return _calculate_spectral_flux_decomposed(
-        decomposed, velocity_hat, ks, binning, dealiasing, invariant, transform, exec, advecting_hat, geometry
+        decomposed, velocity_hat, ks, binning, dealiasing, invariant, transform, exec, advecting_hat, geometry,
+        form
     )
 end
+
+# `Rotational()` stands for `(u·∇)u` only in the transfer of a velocity advecting itself, of an invariant
+# whose transfer projects out a gradient.
+_check_form(::Types.Advective, velocity_hat, ks, invariant, advecting_hat) = nothing
+function _check_form(::Types.Rotational, velocity_hat, ks, invariant, advecting_hat)
+    nd = length(ks)
+    (nd in (2, 3) && size(velocity_hat, nd + 1) == nd) || throw(ArgumentError(
+        "form = Rotational() takes a 2-D or 3-D velocity with one component per dimension; got " *
+        "$nd dimensions and $(size(velocity_hat, nd + 1)) components."))
+    invariant isa Union{Types.KineticEnergy, Types.Enstrophy, Types.Helicity} || throw(ArgumentError(
+        "form = Rotational() takes KineticEnergy(), Enstrophy() or Helicity(); got $(nameof(typeof(invariant)))()."))
+    advecting_hat === velocity_hat || throw(ArgumentError(
+        "form = Rotational() evaluates a velocity advecting itself; pass no `advecting_hat`."))
+    return nothing
+end
+
+# The nonlinear term the flux reads, in `form`.
+_flux_term!(ws, velocity_hat, ks, ::Types.Advective; dealiasing, transform, advecting_hat) =
+    NonlinearTerm.compute_nonlinear_term!(ws, velocity_hat, ks; dealiasing = dealiasing, transform = transform,
+                                          advecting_hat = advecting_hat)
+_flux_term!(ws, velocity_hat, ks, ::Types.Rotational; dealiasing, transform, advecting_hat) =
+    NonlinearTerm.compute_rotational_term!(ws, velocity_hat, velocity_hat, ks; dealiasing = dealiasing,
+                                           transform = transform)
 
 function _calculate_spectral_flux_decomposed(
     û_decomp::AbstractArray{<:Complex},
@@ -109,6 +138,7 @@ function _calculate_spectral_flux_decomposed(
     execution::ComputationalBackends.AbstractExecutionBackend,
     advecting_hat,
     geometry::Types.AbstractShellGeometry,
+    form::Types.AbstractNonlinearForm,
 )
     # Single-field method with no threaded outer loop, so `ThreadedBackend` threads the FFTs.
     ws        = Workspaces.SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing,
@@ -124,10 +154,10 @@ function _calculate_spectral_flux_decomposed(
     if û_decomp === velocity_hat
         calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
                                   dealiasing=dealiasing, invariant=invariant, transform=spectral,
-                                  execution=execution, advecting_hat=advecting_hat)
+                                  execution=execution, advecting_hat=advecting_hat, form=form)
     else
-        NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing,
-                                transform=spectral, advecting_hat=advecting_hat)
+        _flux_term!(ws.nonlinear, velocity_hat, ks, form; dealiasing=dealiasing, transform=spectral,
+                    advecting_hat=advecting_hat)
         _calculate_spectral_flux_with_N̂!(result, ws, û_decomp, ws.nonlinear.N̂, ks, shell_idx, execution; invariant=invariant)
     end
     return result
@@ -144,10 +174,11 @@ function _calculate_spectral_flux_decomposed(
     execution::ComputationalBackends.AbstractExecutionBackend,
     advecting_hat,
     geometry::Types.AbstractShellGeometry,
+    form::Types.AbstractNonlinearForm,
 )
     ws = Workspaces.SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
-    NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks; dealiasing=dealiasing,
-                            transform=spectral, advecting_hat=advecting_hat)
+    _flux_term!(ws.nonlinear, velocity_hat, ks, form; dealiasing=dealiasing, transform=spectral,
+                advecting_hat=advecting_hat)
     N̂ = ws.nonlinear.N̂
 
     k_mag     = ShellBinning.shell_coordinate(geometry, ks)
@@ -166,12 +197,12 @@ end
 
 """
     calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
-        dealiasing, invariant, transform, execution, advecting_hat)
+        dealiasing, invariant, transform, execution, advecting_hat, form)
 
 In-place version of `calculate_spectral_flux`. Writes into `result` using
 preallocated buffers from `ws` and a precomputed `shell_idx` array (from `assign_shells`).
 Zero heap allocations in the serial hot path. `execution` selects the mode→shell reduction
-backend (see [`calculate_spectral_flux`](@ref)).
+backend and `form` the nonlinear term (see [`calculate_spectral_flux`](@ref)).
 """
 function calculate_spectral_flux!(
     result::Types.SpectralFluxResult,
@@ -184,16 +215,18 @@ function calculate_spectral_flux!(
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
     advecting_hat = velocity_hat,
+    form::Types.AbstractNonlinearForm = Types.Advective(),
 )
-    NonlinearTerm.compute_nonlinear_term!(ws.nonlinear, velocity_hat, ks;
-                            dealiasing=dealiasing, transform=transform, advecting_hat=advecting_hat)
+    _check_form(form, velocity_hat, ks, invariant, advecting_hat)
+    _flux_term!(ws.nonlinear, velocity_hat, ks, form; dealiasing=dealiasing, transform=transform,
+                advecting_hat=advecting_hat)
     _calculate_spectral_flux_with_N̂!(result, ws, velocity_hat, ws.nonlinear.N̂, ks, shell_idx, Types.resolve_execution(execution); invariant=invariant)
     return result
 end
 
 """
-    calculate_spectral_flux_batch(velocity_hats, ks; binning, dealiasing, invariant, transform, geometry, execution)
-        -> Vector{SpectralFluxResult}
+    calculate_spectral_flux_batch(velocity_hats, ks; binning, dealiasing, invariant, transform, geometry, execution,
+        form) -> Vector{SpectralFluxResult}
 
 Spectral flux for a batch of snapshots that share one grid (`velocity_hats` an iterable of `(ms..., D)`
 coefficient arrays). The shell structure is built once, and each worker reuses one
@@ -211,6 +244,7 @@ function calculate_spectral_flux_batch(
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    form::Types.AbstractNonlinearForm = Types.Advective(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n = length(velocity_hats)
@@ -224,17 +258,18 @@ function calculate_spectral_flux_batch(
                                           similar(centers, RT, length(centers)))
                  for _ in 1:n]
     _spectral_flux_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, shell_idx;
-                          binning=binning, dealiasing=dealiasing, invariant=invariant, transform=transform, geometry=geometry)
+                          binning=binning, dealiasing=dealiasing, invariant=invariant, transform=transform, geometry=geometry,
+                          form=form)
     return results
 end
 
 # Serial reference: one workspace reused across the whole batch.
 function _spectral_flux_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, shell_idx;
-                               binning, dealiasing, invariant, transform, geometry)
+                               binning, dealiasing, invariant, transform, geometry, form)
     ws = Workspaces.SpectralFluxWorkspace(first(velocity_hats), ks, binning; geometry=geometry, dealiasing=dealiasing)
     for i in eachindex(velocity_hats)
         calculate_spectral_flux!(results[i], ws, velocity_hats[i], ks, shell_idx;
-                                 dealiasing=dealiasing, invariant=invariant, transform=transform,
+                                 dealiasing=dealiasing, invariant=invariant, transform=transform, form=form,
                                  execution=ComputationalBackends.SerialBackend())
     end
     return results
@@ -251,14 +286,15 @@ _spectral_flux_batch!(::ComputationalBackends.AbstractThreadedBackend, results, 
 # GPU over the batch: one workspace and one copy of the shell index in the device's memory, reused for
 # every snapshot; host snapshots are copied into the staging buffer.
 function _spectral_flux_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, shell_idx;
-                               binning, dealiasing, invariant, transform, geometry)
+                               binning, dealiasing, invariant, transform, geometry, form)
     buf = Types._staging_buffer(gpu, first(velocity_hats))
     proto = buf === nothing ? first(velocity_hats) : buf
     ws = Workspaces.SpectralFluxWorkspace(proto, ks, binning; geometry=geometry, dealiasing=dealiasing)
     sidx = copyto!(similar(proto, Int, size(shell_idx)), shell_idx)
     for i in eachindex(velocity_hats)
         calculate_spectral_flux!(results[i], ws, Types._staged!(buf, velocity_hats[i]), ks, sidx;
-                                 dealiasing=dealiasing, invariant=invariant, transform=transform, execution=gpu)
+                                 dealiasing=dealiasing, invariant=invariant, transform=transform, form=form,
+                                 execution=gpu)
     end
     return results
 end

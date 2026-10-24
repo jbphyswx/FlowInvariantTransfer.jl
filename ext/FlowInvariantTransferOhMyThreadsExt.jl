@@ -135,7 +135,7 @@ end
 # across its snapshots with single-threaded transforms, bit-identical to the serial batch.
 function FIT.SpectralFlux._spectral_flux_batch_threaded!(
     results, velocity_hats, ks, shell_idx;
-    binning, dealiasing, invariant, transform, geometry,
+    binning, dealiasing, invariant, transform, geometry, form,
 )
     n  = length(velocity_hats)
     û1 = first(velocity_hats)
@@ -147,7 +147,7 @@ function FIT.SpectralFlux._spectral_flux_batch_threaded!(
         ws = pool[ci]
         for i in rngs[ci]
             FIT.SpectralFlux.calculate_spectral_flux!(results[i], ws, velocity_hats[i], ks, shell_idx;
-                dealiasing = dealiasing, invariant = invariant, transform = transform,
+                dealiasing = dealiasing, invariant = invariant, transform = transform, form = form,
                 execution = FIT.ComputationalBackends.SerialBackend())
         end
     end
@@ -442,7 +442,7 @@ end
 # Thread-parallel smooth band-to-band transfer T(n,m)
 # ---------------------------------------------------------------------------
 # Overrides the core `_band_to_band_threaded!` stub. Threads the outer band loop: each band `m` writes
-# the column `T[·, m]`. The band-weight masks `W` are shared read-only.
+# the column `T[·, m]`. The band weights `W` are shared read-only.
 function FIT.BandTransfer._band_to_band_threaded!(
     T, bws, velocity_hat, ks;
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
@@ -459,23 +459,16 @@ function FIT.BandTransfer._band_to_band_threaded!(
     nchunks = max(1, min(Threads.nthreads(), nb))
     rngs = collect(OhMyThreads.index_chunks(1:nb; n = nchunks))
     pool = [(ws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
-             fm = similar(velocity_hat), d = similar(velocity_hat, FT, ns...)) for _ in 1:length(rngs)]
+             fm = similar(velocity_hat), d = similar(velocity_hat, FT, ns...), Dq = similar(bws.Dq))
+            for _ in 1:length(rngs)]
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         p = pool[ci]
         FIT.NonlinearTerm.synthesize_advecting!(p.ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
         for m in rngs[ci]
-            for c in 1:D, I in CartesianIndices(ns)
-                p.fm[I, c] = W[m][I] * velocity_hat[I, c]
-            end
+            FIT.BandTransfer._band_field!(p.fm, W, m, velocity_hat, ns, D)
             FIT.NonlinearTerm.compute_advection!(p.ws, p.fm, ks; dealiasing = dealiasing, transform = transform)
             FIT.Invariants.transfer_density!(p.d, invariant, velocity_hat, p.ws.N̂, ks)
-            for n in 1:nb
-                s = zero(FT)
-                for I in CartesianIndices(ns)
-                    s += FTB.mode_fold(ks, I) * W[n][I] * p.d[I]
-                end
-                T[n, m] = s
-            end
+            FIT.BandTransfer._band_column!(T, m, W, p.d, ks, p.Dq)
         end
     end
     return T
