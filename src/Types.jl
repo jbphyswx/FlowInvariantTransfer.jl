@@ -12,6 +12,7 @@ export AbstractShellBinning, LinearBinning, LogarithmicBinning, DyadicBinning, C
 export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShells, ParallelShells
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
+export AbstractNonlinearForm, Advective, Rotational
 export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult
 
 # ---------------------------------------------------------------------------
@@ -658,6 +659,33 @@ mode up to Nyquist (nothing discarded), at ~`(3/2)^D` the transform cost of the 
 FFT and the direct-sum transforms alike.
 """
 struct PaddedThreeHalves <: AbstractDealiasing end
+
+"""
+    AbstractNonlinearForm
+
+How a velocity's self-advection is evaluated for its spectral flux, passed as the `form` keyword:
+[`Advective`](@ref) (the default) or [`Rotational`](@ref).
+"""
+abstract type AbstractNonlinearForm end
+
+"""
+    Advective <: AbstractNonlinearForm
+
+`(u·∇)u` itself: `D` velocity components and their `D²` gradients synthesised and the product
+transformed back, `D + D² + D` transforms (15 in 3-D, 8 in 2-D). Valid for any field. The default `form`.
+"""
+struct Advective <: AbstractNonlinearForm end
+
+"""
+    Rotational <: AbstractNonlinearForm
+
+`ω × u` in place of `(u·∇)u`: the velocity and its vorticity synthesised and their cross product
+transformed back, 9 transforms in 3-D and 5 in 2-D (`ω ẑ × u`). `(u·∇)u = ω × u + ∇(½|u|²)`, and under
+the 2/3 rule the two differ on the kept modes by `i k (½|u|²)^`, whose kinetic-energy, enstrophy and
+helicity transfers vanish where `k·û = 0`; for a divergence-free velocity this form gives the same
+fluxes. For a field with divergence it gives the transfer of `ω × u`, a different quantity.
+"""
+struct Rotational <: AbstractNonlinearForm end
 
 # ---------------------------------------------------------------------------
 # Shell geometry

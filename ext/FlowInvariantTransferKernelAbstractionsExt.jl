@@ -1,6 +1,6 @@
 module FlowInvariantTransferKernelAbstractionsExt
 
-using KernelAbstractions: KernelAbstractions as KA, @kernel, @index
+using KernelAbstractions: KernelAbstractions as KA, @kernel, @index, @Const
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
@@ -275,9 +275,10 @@ end
 # Smooth band-to-band transfer T(n,m) on a KA backend
 # ---------------------------------------------------------------------------
 # Overrides the core `_band_to_band_gpu!` stub. Bands are independent columns: for each band m the band
-# field Wₘ⊙û is built by a device broadcast, its nonlinear term rides the (GPU-)FFT spectral backend, the
-# per-mode transfer density is written by the device kernel, and T(n,m)=Σ_I Wₙ[I]·d[I] is a device
-# reduction. The band-weight masks are host-built (shell_coordinate), so copied onto the device once.
+# field wₘ⊙û is built on the device from the weight table and each mode's shell index, its nonlinear term
+# rides the (GPU-)FFT spectral backend, the per-mode transfer density is written by the device kernel and
+# summed per shell coordinate with its Hermitian weight, and the table applied to those sums on the
+# host gives T(·,m).
 function FIT.BandTransfer._band_to_band_gpu!(
     T, bws, velocity_hat, ks, gpu_backend::ComputationalBackends.GPUBackend;
     dealiasing = FIT.Types.OrszagTwoThirds(),
@@ -289,23 +290,40 @@ function FIT.BandTransfer._band_to_band_gpu!(
     nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat)); nb = length(bws.centers)
     ks_dev = _derivative_ks_dev(dev, FT, ks)
-    W_dev = [_on_device(dev, bws.W[n]) for n in 1:nb]
-    # The summing weights carry the Hermitian weight, so Σ_I Wₙ[I]·d[I] over the stored modes is the
-    # full-spectrum sum on either layout.
-    hw = FTB.fold_weights(FT, ks)
-    Ww_dev = [_to_device(dev, bws.W[n] .* hw) for n in 1:nb]
-    fill!(T, zero(FT))
+    W = bws.W
+    idx_dev = _on_device(dev, W.idx)
+    table_dev = _on_device(dev, W.table)
+    w1_dev = _to_device(dev, vec(FTB.fold_weights(FT, ks)))
+    Dq_dev = KA.zeros(dev, FT, size(W.table, 2))
+    N = prod(ns)
     FIT.NonlinearTerm.synthesize_advecting!(bws.nlt, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
     for m in 1:nb
-        bws.f_m .= reshape(W_dev[m], ns..., 1) .* velocity_hat
+        _band_field_kernel!(dev)(bws.f_m, table_dev, idx_dev, velocity_hat, m, N, D; ndrange = N)
         FIT.NonlinearTerm.compute_advection!(bws.nlt, bws.f_m, ks; dealiasing = dealiasing, transform = transform)
         _launch_transfer_density!(dev, bws.d, velocity_hat, bws.nlt.N̂, ks, invariant, D, ns, ks_dev)
-        KA.synchronize(dev)
-        for n in 1:nb
-            T[n, m] = mapreduce(*, +, Ww_dev[n], bws.d)   # one device pass, no full-grid product buffer
-        end
+        fill!(Dq_dev, zero(FT))
+        _shell_bin_kernel!(dev)(Dq_dev, idx_dev, w1_dev, bws.d, CartesianIndices(ns); ndrange = N)
+        T[:, m] .= W.table * Array(Dq_dev)
     end
     return T
+end
+
+# `f[·, c] = table[m, idx] ⊙ v[·, c]` over the `D` components.
+@kernel function _band_field_kernel!(f, @Const(table), @Const(idx), @Const(v), m::Int, N::Int, D::Int)
+    t = @index(Global)
+    @inbounds w = table[m, idx[t]]
+    @inbounds for c in 1:D
+        f[t + (c - 1) * N] = w * v[t + (c - 1) * N]
+    end
+end
+
+# `Dq[idx[I]] += fold(I) d[I]`, the fold weight read along axis 1.
+@kernel function _shell_bin_kernel!(Dq, @Const(idx), @Const(w1), @Const(d), cart)
+    t = @index(Global)
+    @inbounds begin
+        I = cart[t]
+        KA.@atomic Dq[idx[t]] += w1[ifelse(length(w1) == 1, 1, I[1])] * d[t]
+    end
 end
 
 # ---------------------------------------------------------------------------

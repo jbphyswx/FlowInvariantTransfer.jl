@@ -280,21 +280,13 @@ function _band_to_band_worker_T(ms, W, velocity_hat, ks, ns, D, FT, nb, invarian
     local_T = zeros(FT, nb, nb)
     fill_bands!(mrng) = begin
         lws = FIT.Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
-        fm = similar(velocity_hat); d = similar(velocity_hat, FT, ns...)
+        fm = similar(velocity_hat); d = similar(velocity_hat, FT, ns...); Dq = zeros(FT, size(W.table, 2))
         FIT.NonlinearTerm.synthesize_advecting!(lws, advecting_hat, ks; dealiasing = dealiasing, transform = spectral)
-        @inbounds for m in mrng
-            for c in 1:D, I in CartesianIndices(ns)
-                fm[I, c] = W[m][I] * velocity_hat[I, c]
-            end
+        for m in mrng
+            FIT.BandTransfer._band_field!(fm, W, m, velocity_hat, ns, D)
             FIT.NonlinearTerm.compute_advection!(lws, fm, ks; dealiasing = dealiasing, transform = spectral)
             FIT.Invariants.transfer_density!(d, invariant, velocity_hat, lws.N̂, ks)
-            for n in 1:nb
-                s = zero(FT)
-                for I in CartesianIndices(ns)
-                    s += FTB.mode_fold(ks, I) * W[n][I] * d[I]
-                end
-                local_T[n, m] = s                                # disjoint per m → thread-safe
-            end
+            FIT.BandTransfer._band_column!(local_T, m, W, d, ks, Dq)   # disjoint per m → thread-safe
         end
     end
     if inner isa ComputationalBackends.ThreadedBackend

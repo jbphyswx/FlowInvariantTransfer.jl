@@ -113,6 +113,44 @@ Test.@testset "decomposition-channel fluxes" begin
         end
     end
 
+    # Under the 2/3 rule `(u·∇)u` and `ω × u` differ on the kept modes by `ik(½|u|²)^`, which no flux of a
+    # divergence-free velocity sees: in 3-D the kinetic-energy, enstrophy and helicity fluxes, in 2-D
+    # (`u = ∇⊥ψ`, `ω ẑ × u`) the kinetic-energy and enstrophy fluxes, of either form agree. The 2-D
+    # rotational term is the same on the direct sum and the FFT.
+    Test.@testset "Rotational() fluxes equal Advective() for a divergence-free velocity" begin
+        N = 12
+        m = _pf_freq(N)
+        û3, _ = _pf_solenoidal(N, 3; seed = 6)
+        ks3 = FIT.Utils.wavenumber_grid((N, N, N), (2π, 2π, 2π))
+        kx = [m[i] for i in 1:N, j in 1:N]; ky = [m[j] for i in 1:N, j in 1:N]
+        function stream(seed)
+            keep = [abs(m[i]) <= 3 && abs(m[j]) <= 3 for i in 1:N, j in 1:N]
+            ψ̂ = FFTW.fft(real.(FFTW.ifft(keep .* FFTW.fft(randn(Random.MersenneTwister(seed), N, N))))) ./ N^2
+            return cat(-im .* ky .* ψ̂, im .* kx .* ψ̂; dims = 3)
+        end
+        û2 = stream(8)
+        ks2 = FIT.Utils.wavenumber_grid((N, N), (2π, 2π))
+        KE, Z, H = FIT.Types.KineticEnergy(), FIT.Types.Enstrophy(), FIT.Types.Helicity()
+        for (û, ks, invs) in ((û2, ks2, (KE, Z)), (û3, ks3, (KE, Z, H))), inv in invs
+            a = FIT.calculate_spectral_flux(û, ks; binning = b, transform = FFTB, invariant = inv)
+            r = FIT.calculate_spectral_flux(û, ks; binning = b, transform = FFTB, invariant = inv,
+                                            form = FIT.Types.Rotational())
+            s = maximum(abs, a.transfer_spectrum)
+            Test.@test s > 1e-6
+            Test.@test maximum(abs, r.transfer_spectrum .- a.transfer_spectrum) < 1e-12 * s
+        end
+        v̂2 = stream(9)
+        for da in (FIT.Types.OrszagTwoThirds(), FIT.Types.NoDealiasing(), FIT.Types.PaddedThreeHalves())
+            wd = FIT.Workspaces.NonlinearTermWorkspace(û2, ks2; dealiasing = da)
+            wf = FIT.Workspaces.NonlinearTermWorkspace(û2, ks2; dealiasing = da)
+            FIT.NonlinearTerm.compute_rotational_term!(wd, û2, v̂2, ks2; dealiasing = da,
+                                                       transform = SpectralBackends.DirectSumSpectralBackend())
+            FIT.NonlinearTerm.compute_rotational_term!(wf, û2, v̂2, ks2; dealiasing = da, transform = FFTB)
+            Test.@test maximum(abs, wf.N̂) > 1e-6
+            Test.@test maximum(abs, wd.N̂ .- wf.N̂) < 1e-12 * maximum(abs, wf.N̂)
+        end
+    end
+
     # Under PaddedThreeHalves the products are exact to the band edge. A field below the Nyquist mode
     # and above the 2/3 band makes the padded and 2/3 results differ.
     Test.@testset "PaddedThreeHalves channels sum to the padded flux" begin
@@ -148,9 +186,11 @@ Test.@testset "decomposition-channel fluxes" begin
         bt = FIT.calculate_band_to_band_transfer(û2, ks2; bands = bands, transform = FFTB, dealiasing = pad)
         N̂ = FIT.NonlinearTerm.compute_nonlinear_term(û2, ks2; dealiasing = pad, transform = FFTB)
         t = FIT.Invariants.transfer_density(FIT.Types.KineticEnergy(), û2, N̂, ks2)
-        W = FIT.BandTransfer._band_weights(bands.centers, bands.logwidth,
-                                           FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2))
-        ref = [sum(W[n] .* t) for n in eachindex(W)]
+        # w_n(κ) ∝ exp(−log²(κ/c_n)/2σ²), normalized over the bands, zero at κ = 0.
+        κ = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2)
+        G = [map(k -> k > 0 ? exp(-log(k / c)^2 / (2 * bands.logwidth^2)) : 0.0, κ) for c in bands.centers]
+        gs = sum(G)
+        ref = [sum(map((gn, s) -> s > 0 ? gn / s : 0.0, Gn, gs) .* t) for Gn in G]
         Test.@test maximum(abs, ref) > 1e-6
         Test.@test maximum(abs, bt.net_transfer .- ref) < 1e-11 * maximum(abs, ref)
     end

@@ -23,30 +23,72 @@ export calculate_band_to_band_transfer, calculate_band_to_band_transfer!, calcul
 # Σ_n w_n = 1, conserves (Σ_{n,m} T = 0) and reduces to the band-summed transfer spectrum
 # (Σ_m T(n,m) = the w_n-weighted transfer density). One nonlinear evaluation per band.
 
-# Renormalized log-Gaussian band weights w_n(κ) at each mode (partition of unity over bands).
+"""
+    BandWeights{FT}
+
+Renormalized log-Gaussian band weights `w_n(κ)` (a partition of unity over the bands) of a mode set,
+held over the distinct shell coordinates `κ` the modes take: `idx[I]` is the position of mode `I`'s
+coordinate among them and `table[n, q]` the weight of band `n` there. A band's weight at a mode is
+`table[n, idx[I]]`.
+"""
+struct BandWeights{FT, IA<:AbstractArray{Int32}, M<:AbstractMatrix{FT}}
+    idx::IA
+    table::M
+end
+
+Base.show(io::IO, w::BandWeights) = print(io, "BandWeights(", size(w.table, 1), " bands, ",
+                                          size(w.table, 2), " shell coordinates)")
+
 function _band_weights(centers, logwidth, k_coord)
     nb = length(centers)
     FT = eltype(k_coord)
-    ns = size(k_coord)
     σ  = FT(logwidth)
-    W  = [fill!(similar(k_coord), zero(FT)) for _ in 1:nb]
-    @inbounds for I in CartesianIndices(ns)
-        κ = k_coord[I]
+    κs = sort!(unique(vec(k_coord)))
+    idx = Int32.(searchsortedfirst.(Ref(κs), k_coord))
+    table = zeros(FT, nb, length(κs))
+    @inbounds for (q, κ) in enumerate(κs)
         κ <= 0 && continue                       # DC / zero-coordinate modes carry no band weight
         s = zero(FT)
         for n in 1:nb
             r = log(κ / FT(centers[n]))
             wn = exp(-(r*r) / (2*σ*σ))
-            W[n][I] = wn
+            table[n, q] = wn
             s += wn
         end
         if s > 0
             for n in 1:nb
-                W[n][I] /= s
+                table[n, q] /= s
             end
         end
     end
-    return W
+    return BandWeights(idx, table)
+end
+
+# `f_m = w_m ⊙ û` over the `D` components.
+function _band_field!(f_m, bw::BandWeights, m::Int, velocity_hat, ns, D::Int)
+    idx = bw.idx; table = bw.table
+    @inbounds for c in 1:D, I in CartesianIndices(ns)
+        f_m[I, c] = table[m, idx[I]] * velocity_hat[I, c]
+    end
+    return f_m
+end
+
+# `T[n, m] = Σ_I fold(I) w_n(I) d(I)` for every band `n`: `d` summed into `Dq` by shell coordinate, then
+# the table applied to `Dq`.
+function _band_column!(T, m::Int, bw::BandWeights, d, ks, Dq)
+    idx = bw.idx; table = bw.table
+    fill!(Dq, zero(eltype(Dq)))
+    @inbounds for I in CartesianIndices(size(idx))
+        Dq[idx[I]] += FTB.mode_fold(ks, I) * d[I]
+    end
+    @inbounds for n in axes(table, 1)
+        s = zero(eltype(Dq))
+        for q in eachindex(Dq)
+            s += table[n, q] * Dq[q]
+        end
+        T[n, m] = s
+    end
+    return T
 end
 
 """
@@ -54,15 +96,17 @@ end
                           dealiasing=OrszagTwoThirds())
 
 Reusable workspace for [`calculate_band_to_band_transfer!`](@ref): the nonlinear-term workspace,
-band-field/transfer-density scratch, and the precomputed smooth band-weight masks. `dealiasing` is the
-one the transfer will be called with; `PaddedThreeHalves()` adds the padded-grid scratch.
+band-field/transfer-density scratch, the smooth band weights ([`BandWeights`](@ref)) and the per-shell
+sums `Dq`. `dealiasing` is the one the transfer will be called with; `PaddedThreeHalves()` adds the
+padded-grid scratch.
 """
-struct BandTransferWorkspace{WS, FA, DA, WV, CV}
+struct BandTransferWorkspace{WS, FA, DA, WV, CV, QV}
     nlt::WS
     f_m::FA
     d::DA
     W::WV
     centers::CV
+    Dq::QV
 end
 
 function BandTransferWorkspace(velocity_hat, ks, bands::Types.SmoothBands;
@@ -75,7 +119,7 @@ function BandTransferWorkspace(velocity_hat, ks, bands::Types.SmoothBands;
     W = _band_weights(bands.centers, bands.logwidth, k_coord)
     return BandTransferWorkspace(Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
                                  similar(velocity_hat), similar(velocity_hat, FT, ns...),
-                                 W, collect(bands.centers))
+                                 W, collect(bands.centers), zeros(FT, size(W.table, 2)))
 end
 
 """
@@ -112,22 +156,14 @@ end
 function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::BandTransferWorkspace, velocity_hat, ks;
                              dealiasing, invariant, transform, advecting_hat)
     nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
-    FT = real(eltype(velocity_hat)); nb = length(bws.centers)
-    ws = bws.nlt; f_m = bws.f_m; d = bws.d; W = bws.W
+    nb = length(bws.centers)
+    ws = bws.nlt
     NonlinearTerm.synthesize_advecting!(ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
-    @inbounds for m in 1:nb
-        for c in 1:D, I in CartesianIndices(ns)
-            f_m[I, c] = W[m][I] * velocity_hat[I, c]
-        end
-        NonlinearTerm.compute_advection!(ws, f_m, ks; dealiasing = dealiasing, transform = transform)
-        Invariants.transfer_density!(d, invariant, velocity_hat, ws.N̂, ks)
-        for n in 1:nb
-            s = zero(FT)
-            for I in CartesianIndices(ns)
-                s += FTB.mode_fold(ks, I) * W[n][I] * d[I]
-            end
-            T[n, m] = s
-        end
+    for m in 1:nb
+        _band_field!(bws.f_m, bws.W, m, velocity_hat, ns, D)
+        NonlinearTerm.compute_advection!(ws, bws.f_m, ks; dealiasing = dealiasing, transform = transform)
+        Invariants.transfer_density!(bws.d, invariant, velocity_hat, ws.N̂, ks)
+        _band_column!(T, m, bws.W, bws.d, ks, bws.Dq)
     end
     return T
 end
@@ -311,14 +347,12 @@ function _band_energies(velocity_hat, ks, bands::Types.SmoothBands, invariant, g
     M  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     W = _band_weights(bands.centers, bands.logwidth, ShellBinning.shell_coordinate(geometry, ks))
-    E = zeros(FT, length(bands.centers))
+    Eq = zeros(FT, size(W.table, 2))
     @inbounds for I in CartesianIndices(ms)
-        e = FTB.mode_fold(ks, I) *
-            Invariants._density_at(invariant, velocity_hat, velocity_hat, ks, I, M)
-        for n in eachindex(E)
-            E[n] += W[n][I] * e
-        end
+        Eq[W.idx[I]] += FTB.mode_fold(ks, I) *
+                        Invariants._density_at(invariant, velocity_hat, velocity_hat, ks, I, M)
     end
+    E = W.table * Eq
     E .*= _density_scale(invariant, FT)
     return (; centers = collect(bands.centers), energies = E)
 end

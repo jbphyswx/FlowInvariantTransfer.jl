@@ -333,7 +333,7 @@ end
 
 # ω̂ is formed in `ws.N̂`, synthesised into `ws.N_phys` beside u in `ws.u_phys`, crossed in place, and
 # `ws.N̂` then takes the forward transform of `ω × u`.
-function FIT.NonlinearTerm._rotational_term_fft!(ws, velocity_hat, vortex_hat, ks, truncate::Bool)
+function FIT.NonlinearTerm._rotational_term_fft!(ws, velocity_hat, vortex_hat, ks::NTuple{3,Any}, truncate::Bool)
     pb = _require_plans(ws)
     _curl_hat!(ws.N̂, vortex_hat, pb.kg)
     _synth_components!(pb, ws.N_phys, ws.N̂, ks, 3, truncate)
@@ -342,15 +342,44 @@ function FIT.NonlinearTerm._rotational_term_fft!(ws, velocity_hat, vortex_hat, k
     return _forward_nhat!(pb, ws, ks, truncate)
 end
 
+# 2-D: `ω̂` into component 1 of `ws.N̂`, `ω` and `u` synthesised, `ω ẑ × u` formed in `ws.N_phys`.
+function FIT.NonlinearTerm._rotational_term_fft!(ws, velocity_hat, vortex_hat, ks::NTuple{2,Any}, truncate::Bool)
+    pb = _require_plans(ws)
+    _curl2_hat!(ws.N̂, vortex_hat, pb.kg)
+    _synth_components!(pb, ws.N_phys, ws.N̂, ks, 1, truncate)
+    _synth_components!(pb, ws.u_phys, velocity_hat, ks, 2, truncate)
+    FIT.NonlinearTerm._cross2_in_place!(ws.N_phys, ws.u_phys)
+    return _forward_nhat!(pb, ws, ks, truncate)
+end
+
+# `ω̂ = i(k₁ v̂₂ − k₂ v̂₁)` into component 1 of `out`, with the derivative wavenumbers `kg`.
+function _curl2_hat!(out, v, kg)
+    d = ndims(out)
+    v1 = selectdim(v, d, 1); v2 = selectdim(v, d, 2); o1 = selectdim(out, d, 1)
+    k1 = kg[1]; k2 = kg[2]
+    @. o1 = im * (k1 * v2 - k2 * v1)
+    return out
+end
+
 # The same on the padded grid: ω̂ on the caller's grid with its derivative wavenumbers, both fields
 # embedded and synthesised on the padded grid, the product formed there and truncated back.
-function FIT.NonlinearTerm._rotational_term_padded_fft!(ws, velocity_hat, vortex_hat, ks)
+function FIT.NonlinearTerm._rotational_term_padded_fft!(ws, velocity_hat, vortex_hat, ks::NTuple{3,Any})
     pb = _require_plans(ws)
     pad = _require_pad(pb)
     _curl_hat!(ws.N̂, vortex_hat, pb.kg)
     _padded_synth!(pad, pad.n_phys, ws.N̂, 3)
     _padded_synth!(pad, pad.u_phys, velocity_hat, 3)
     FIT.NonlinearTerm._cross_in_place!(pad.n_phys, pad.u_phys, pad.g_phys)
+    return _padded_forward!(pad, ws.N̂)
+end
+
+function FIT.NonlinearTerm._rotational_term_padded_fft!(ws, velocity_hat, vortex_hat, ks::NTuple{2,Any})
+    pb = _require_plans(ws)
+    pad = _require_pad(pb)
+    _curl2_hat!(ws.N̂, vortex_hat, pb.kg)
+    _padded_synth!(pad, pad.n_phys, ws.N̂, 1)
+    _padded_synth!(pad, pad.u_phys, velocity_hat, 2)
+    FIT.NonlinearTerm._cross2_in_place!(pad.n_phys, pad.u_phys)
     return _padded_forward!(pad, ws.N̂)
 end
 
