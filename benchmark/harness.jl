@@ -2,7 +2,7 @@
 #
 # Two numbers matter for this package and BenchmarkTools reports neither directly:
 #
-#   * `workspace_bytes` — the RESIDENT scratch a workspace owns. `BenchmarkTools`'s `memory` field is
+#   * `workspace_bytes` — the scratch a workspace keeps resident. `BenchmarkTools`'s `memory` field is
 #     total bytes allocated during a call, which is ~0 for a correctly reused workspace and therefore
 #     says nothing about the working set. The working set is what decides whether a 256³ run fits in
 #     memory, so it is measured directly by walking the workspace's fields.
@@ -18,7 +18,7 @@ using Printf: Printf
 # Sum the bytes of every array reachable from `x` through struct fields and array elements.
 # `AbstractFFTs.Plan`s are skipped: an FFTW/cuFFT plan's memory lives in the C library, is not part of
 # the Julia working set this package controls, and its fields are not meaningfully walkable. Plans
-# that ARE plain Julia objects (NonuniformFFTs' `PlanNUFFT`, whose oversampled grids are genuine
+# that are plain Julia objects (NonuniformFFTs' `PlanNUFFT`, whose oversampled grids are genuine
 # resident scratch) are walked like any other struct. `seen` makes shared buffers count once, so a
 # workspace that aliases one array into two fields is not double-charged.
 function workspace_bytes(x, seen::Base.IdSet{Any} = Base.IdSet{Any}())
@@ -45,8 +45,8 @@ end
 bytes_per_point(x, ns) = workspace_bytes(x) / prod(ns)
 
 # Two benchmark groups per axis:
-#   HOT  — a prebuilt workspace and the `!` call; the cost a production loop pays per snapshot.
-#   CONV — the allocating wrapper, which rebuilds the workspace and re-plans every transform. Work
+#   `HOT`  — a prebuilt workspace and the `!` call; the cost a production loop pays per snapshot.
+#   `CONV` — the allocating wrapper, which rebuilds the workspace and re-plans every transform. Work
 #          moved out of the hot path and into workspace construction stays visible in this group.
 const HOT = "hot"
 const CONV = "convenience"
@@ -111,4 +111,22 @@ function report_times(results)
                     lpad((Printf.@sprintf "%.1f" m.memory / 1024), 11), " KiB  (", m.allocs, " allocs)")
         end
     end
+end
+
+# Every row whose key ends in a `unit` row's size tag (`unit` key `"rfft/3D/N64"`, tag `"3D/N64"`), as a
+# multiple of that unit's median time.
+function report_units(results)
+    haskey(results, "unit") || return nothing
+    units = results["unit"]
+    println("\n== median time in units of work ==")
+    for axis in sort(collect(keys(results)))
+        axis == "unit" && continue
+        for key in sort(collect(keys(results[axis]))), ukey in sort(collect(keys(units)))
+            name, tag = split(ukey, '/'; limit = 2)
+            endswith(key, "/" * tag) || continue
+            r = BenchmarkTools.median(results[axis][key]).time / BenchmarkTools.median(units[ukey]).time
+            println("  ", rpad("$axis/$key", 50), lpad((Printf.@sprintf "%.1f" r), 9), " × ", name)
+        end
+    end
+    return nothing
 end

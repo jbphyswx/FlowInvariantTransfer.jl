@@ -101,12 +101,8 @@ Base.show(io::IO, b::AnyFFTPlans) =
 Base.show(io::IO, ::MIME"text/plain", b::AnyFFTPlans) = show(io, b)
 
 # More specific than the core `_make_fft_plans`, so the extension adds a method without overwriting
-# one. The padded plans are built only when the workspace has a padded grid.
-#
-# `AbstractFFTs.plan_fft` dispatches on the array type (FFTW for an `Array`, cuFFT for a `CuArray`). An
-# array type with no FFT provider (a JLArray) makes the planner throw a `MethodError`; the workspace
-# then holds `nothing`, and an FFT compute on it throws an `ArgumentError` naming the array type
-# (`_require_plans`).
+# one. The padded plans are built only when the workspace has a padded grid. `AbstractFFTs.plan_fft`
+# dispatches on the array type: FFTW for an `Array`, cuFFT for a `CuArray`.
 function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, pad, fft_nthreads::Int)
     ns = FTB.full_size(ks)        # physical grid
     ms = FTB.spectral_size(ks)    # coefficient grid
@@ -119,43 +115,28 @@ function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, 
     keep = FTB.dealias_factors(velocity_hat, FT, ks, true)
 
     if FTB.is_halved(ks)
-        rp = _plans_or_nothing(() -> _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads))
-        rp === nothing && return nothing
-        p_rfft, p_brfft = rp
+        p_rfft, p_brfft = _plan_r2c_c2r(velocity_hat, FT, ns, ms; nthreads = fft_nthreads)
         return RealFFTPlans(p_rfft, p_brfft, similar(velocity_hat, ms...), kg, keep,
                             _padded_scratch(velocity_hat, ks, pad, fft_nthreads))
     end
 
     ct  = similar(velocity_hat, ms...)   # complex (ms...) — device-generic
     ct2 = similar(velocity_hat, ms...)
-    plans = _plans_or_nothing(() -> _plan_fft_bfft(ct; nthreads = fft_nthreads))
-    plans === nothing && return nothing
-    p_fft, p_bfft = plans
+    p_fft, p_bfft = _plan_fft_bfft(ct; nthreads = fft_nthreads)
     return ComplexFFTPlans(p_fft, p_bfft, ct, ct2, kg, keep,
                            _padded_scratch(velocity_hat, ks, pad, fft_nthreads))
-end
-
-# `f()`, or `nothing` when the planner has no method for the array type.
-function _plans_or_nothing(f)
-    try
-        return f()
-    catch err
-        err isa MethodError || rethrow()
-        return nothing
-    end
 end
 
 _padded_scratch(velocity_hat, ks, pad::FIT.Workspaces.PaddedGrid, fft_nthreads) =
     _make_padded_scratch(velocity_hat, ks, pad, fft_nthreads)
 _padded_scratch(velocity_hat, ks, ::Nothing, fft_nthreads) = nothing
 
-# The workspace's plan set; a workspace whose array type has no FFT provider holds `nothing`.
+# The workspace's plan set; a workspace built before this extension was loaded holds `nothing`.
 _require_plans(ws) = _require_plans(ws.plans, ws)
 _require_plans(p::AnyFFTPlans, ws) = p
 _require_plans(::Nothing, ws) = throw(ArgumentError(
-    "no FFT plans for $(nameof(typeof(ws.N̂))) arrays: AbstractFFTs has no plan for this array type. " *
-    "Pass an array type with an FFT provider (an Array with FFTW, a CuArray with CUDA), or " *
-    "transform = SpectralBackends.DirectSumSpectralBackend() for host arrays."))
+    "this workspace holds no FFT plans: it was built before FFTW was loaded. Build it again, or pass " *
+    "transform = SpectralBackends.DirectSumSpectralBackend()."))
 
 _require_pad(p::AnyFFTPlans) = _require_pad(p.pad)
 _require_pad(pad::AnyPaddedScratch) = pad
@@ -170,11 +151,11 @@ function _plan_r2c_c2r(proto, ::Type{FT}, ns::NTuple{nd,Int}, ms::NTuple{nd,Int}
     # either a complex coefficient array or a real physical one.
     rbuf = similar(proto, FT, ns...)
     cbuf = similar(proto, complex(FT), ms...)
-    # `UNALIGNED`: the physical side of these transforms is a component slice of an `(ns…, C)` buffer,
-    # whose base pointer moves by `prod(ns)*sizeof(FT)` per component. A plan built on a freshly
-    # allocated array records that array's SIMD alignment and rejects arguments that do not match it,
-    # as those slices do not.
-    flags = FFTW.ESTIMATE | FFTW.UNALIGNED
+    # The physical side of these transforms is a component slice of an `(ns…, C)` buffer, whose base
+    # pointer moves by `prod(ns)*sizeof(FT)` per component. A plan records its array's SIMD alignment
+    # (`FFTW.alignment_of`) and rejects an argument with another, so it is `UNALIGNED` where that step
+    # is not a multiple of FFTW's alignment unit.
+    flags = (prod(ns) * sizeof(FT)) % 16 == 0 ? FFTW.ESTIMATE : FFTW.ESTIMATE | FFTW.UNALIGNED
     return FFTW.set_num_threads(nthreads) do
         (FFTW.plan_rfft(rbuf; flags = flags), FFTW.plan_brfft(cbuf, ns[1]; flags = flags))
     end

@@ -3,13 +3,21 @@
 #   julia --project=benchmark benchmark/benchmarks.jl
 #   julia --threads=4 --project=benchmark benchmark/benchmarks.jl     # adds the threaded rows
 #   FIT_BENCH_2D=64,128 FIT_BENCH_3D=16,32 julia --project=benchmark benchmark/benchmarks.jl
-#   FIT_BENCH_BASELINE=benchmark/baseline_pre_rewrite.json julia --project=benchmark benchmark/benchmarks.jl
 #
 # Every axis appears twice: a `hot` row that reuses a prebuilt workspace (what a production loop
 # costs per snapshot) and a `convenience` row that calls the allocating wrapper (which rebuilds the
 # workspace and re-plans every transform). Alongside the timings, a resident-scratch table reports
 # the bytes each workspace owns and the bytes per grid point — the size-independent figure the buffer
 # inventory is written against, which `BenchmarkTools`'s per-call `memory` cannot show.
+#
+# A second table gives each timing as a multiple of the operation the method is built from, timed
+# alone in the `unit` group: one real FFT of the grid (on one thread, as the serial rows run) for the
+# Cartesian axes, and one iteration of the vorticity fit (a spin-0 synthesis and adjoint at `lmax` over
+# the points) for the scattered sphere. The spectral flux in the advective form needs 15 real FFTs in
+# 3-D and 8 in 2-D.
+#
+# FIT_BENCH_NPTS (scattered points), FIT_BENCH_LMAX (scattered sphere degree), FIT_BENCH_SECONDS (time
+# per benchmark) and FIT_BENCH_SAVE (a JSON file to write the medians to) set the rest.
 #
 # GPU and MPI benchmarks live in gpu/ and test/mpi/ and need hardware.
 
@@ -21,12 +29,14 @@ using Random: Random
 using JSON3: JSON3
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
-# Extension triggers: coarse-graining (CGEF) and both scattered-NUFFT libraries are benchmarked axes.
+# Extension triggers: coarse-graining (CGEF), both scattered-NUFFT libraries and the scattered sphere
+# (NUFSHT) are benchmarked axes.
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using FlowFieldSpectra: FlowFieldSpectra          # the physical → spectral transform `to_spectral` runs
 using FlowTransformBindings: FlowTransformBindings as FTB
 using NonuniformFFTs: NonuniformFFTs
 using FINUFFT: FINUFFT
+using NUFSHT: NUFSHT
 
 include("harness.jl")
 
@@ -37,6 +47,7 @@ const SIZES_3D = let s = get(ENV, "FIT_BENCH_3D", "")
     isempty(s) ? (32, 64) : Tuple(parse(Int, strip(x)) for x in split(s, ','))
 end
 const NPTS = parse(Int, get(ENV, "FIT_BENCH_NPTS", "200000"))   # scattered-point count
+const LMAX = parse(Int, get(ENV, "FIT_BENCH_LMAX", "64"))       # scattered-sphere degree
 const THREADED = Threads.nthreads() > 1
 const FFT = FIT.SpectralBackends.FFTSpectralBackend()
 const SER = FIT.ComputationalBackends.SerialBackend()
@@ -44,6 +55,7 @@ const THR = FIT.ComputationalBackends.ThreadedBackend()
 
 const SUITE = BenchmarkTools.BenchmarkGroup()
 const MEMROWS = Tuple{String, Any, Tuple}[]
+const NOTES = String[]
 
 function group(axis)
     haskey(SUITE, axis) || (SUITE[axis] = BenchmarkTools.BenchmarkGroup())
@@ -69,6 +81,12 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
     b = FIT.Types.LinearBinning(1.0)
     sh = shells(ks, b)
     RT = Float64
+
+    # --- the unit: one real FFT of the grid, on one thread ---
+    x = randn(ns...)
+    pr = FFTW.plan_rfft(x; flags = FFTW.MEASURE, num_threads = 1)
+    y = pr * x
+    group("unit")["rfft/" * tag] = BenchmarkTools.@benchmarkable LinearAlgebra.mul!($y, $pr, $x) evals = 1
 
     # --- nonlinear term (the engine every Cartesian diagnostic sits on) ---
     nlw = FIT.Workspaces.NonlinearTermWorkspace(û, ks)
@@ -207,12 +225,39 @@ function add_cgef!(n::Int)
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Scattered sphere (NUFSHT): the transfer from vorticity at random points, four per coefficient of the
+# degree-`lmax` fit, and the unit, one iteration of that fit
+# ---------------------------------------------------------------------------
+
+function add_sphere!(lmax::Int)
+    M = 4 * (lmax + 1)^2
+    rng = Random.MersenneTwister(9)
+    θ = acos.(1 .- 2 .* rand(rng, M)); φ = 2π .* rand(rng, M); ζ = randn(rng, M)
+    tag = "lmax$lmax/M$M"
+    ws = FIT.Spherical.ScatteredSphericalTransferWorkspace((θ, φ), lmax; execution = SER)
+    group("sphere_scattered")[HOT * "/" * tag] =
+        BenchmarkTools.@benchmarkable FIT.Spherical.calculate_spherical_transfer!($ws, $ζ) evals = 1
+    group("sphere_scattered")[CONV * "/" * tag] =
+        BenchmarkTools.@benchmarkable FIT.calculate_energy_transfer(
+            FIT.Types.SphericalTransferMethod(), $ζ, ($θ, $φ); lmax = $lmax) evals = 1
+    push!(MEMROWS, ("ScatteredSphericalTransferWorkspace $tag", ws, (M,)))
+    push!(NOTES, "sphere_scattered $tag: the fit takes $(FIT.Spherical.calculate_spherical_transfer!(ws, ζ).iterations) iterations")
+    p = NUFSHT.make_spin_plan(Float64, θ, φ, lmax, 0; execution = SER)
+    C = NUFSHT.allocate_coefficients(p)
+    f = zeros(M)
+    group("unit")["fit_iteration/" * tag] =
+        BenchmarkTools.@benchmarkable (NUFSHT.nusht_type2_spin!($f, $C, $p); NUFSHT.nusht_type1_spin!($C, $f, $p)) evals = 1
+    return nothing
+end
+
 for n in SIZES_2D; add_uniform!((n, n)); end
 for n in SIZES_3D; add_uniform!((n, n, n)); end
 add_mode_to_mode!()
 add_scattered!(2, (256, 256))
 add_scattered!(3, (64, 64, 64))
 add_cgef!(last(SIZES_2D))
+add_sphere!(LMAX)
 
 # ---------------------------------------------------------------------------
 
@@ -221,11 +266,14 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println("Julia threads : ", Threads.nthreads())
     println("FFTW threads  : ", FFTW.get_num_threads())
     println("BLAS threads  : ", LinearAlgebra.BLAS.get_num_threads())
-    println("2D sizes      : ", SIZES_2D, "   3D sizes: ", SIZES_3D, "   scattered points: ", NPTS)
+    println("2D sizes      : ", SIZES_2D, "   3D sizes: ", SIZES_3D, "   scattered points: ", NPTS,
+            "   scattered sphere lmax: ", LMAX)
 
     seconds = parse(Float64, get(ENV, "FIT_BENCH_SECONDS", "3"))
     results = BenchmarkTools.run(SUITE; verbose = true, seconds = seconds)
     report_times(results)
+    report_units(results)
+    foreach(n -> println("  ", n), NOTES)
     report_memory(MEMROWS)
 
     out = get(ENV, "FIT_BENCH_SAVE", "")

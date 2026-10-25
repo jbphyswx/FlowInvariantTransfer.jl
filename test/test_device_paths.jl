@@ -19,6 +19,15 @@ using ComputationalBackends: ComputationalBackends
 
 KA.synchronize(::JLArrays.JLBackend) = nothing
 
+# An FFT for JLArrays, which has none: a plan holds FFTW's plan of a host copy, and an execution moves
+# its arrays across in bulk.
+struct _HostBounceFFT{P}
+    inner::P
+end
+FFTW.AbstractFFTs.plan_fft(x::JLArrays.JLArray, region; kwargs...) = _HostBounceFFT(FFTW.plan_fft(Array(x), region))
+FFTW.AbstractFFTs.plan_bfft(x::JLArrays.JLArray, region; kwargs...) = _HostBounceFFT(FFTW.plan_bfft(Array(x), region))
+Base.:*(p::_HostBounceFFT, x::JLArrays.JLArray) = JLArrays.JLArray(p.inner * Array(x))
+
 const _DEV_JL = ComputationalBackends.GPUBackend(JLArrays.JLBackend())
 const _DEV_CPU = ComputationalBackends.GPUBackend(KA.CPU())
 const _SER_D = ComputationalBackends.SerialBackend()

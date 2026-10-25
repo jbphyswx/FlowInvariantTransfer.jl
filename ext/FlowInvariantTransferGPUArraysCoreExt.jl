@@ -68,8 +68,8 @@ end
 # ---------------------------------------------------------------------------
 # Device methods (`GPUArraysCore.AbstractGPUArray`) of the Triadic Orthogonal Decomposition steps: the
 # host math in broadcasts and array-dispatched LinearAlgebra, so the `O(nDFT²·nx)` / `O(nStateNx·nBlks)`
-# products (`*`, `mul!`, `qr!`) run on the device libraries. The `r×r` Hermitian eig runs on the host
-# (JLArrays has no device eig).
+# products (`*`, `mul!`, `qr!`) run on the device libraries. The `r×r` Hermitian eig, `r` at most the
+# block count, runs on the host.
 # ---------------------------------------------------------------------------
 
 # Whole-block temporal DFT of a device segment on the direct-sum path: one matmul with the DFT matrix,
