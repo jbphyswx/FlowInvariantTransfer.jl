@@ -41,36 +41,43 @@ function _sphere_points(grid, ::Type{FT}) where {FT}
 end
 
 """
-    _sphere_quadrature(grid, lwork, FT) -> Vector or nothing
+    _sphere_quadrature(grid, lmax, FT) -> Vector or nothing
 
 Per-node quadrature weights of `grid`, `Σw = 4π`, in the node order [`_sphere_points`](@ref) produces:
 the grid's measure, which on a tensor-product sampling is its quadrature, scaled to the unit sphere.
 
-Analysis at degree `lwork` integrates an integrand of degree `2·lwork` (`f·conj(Y_lm)`, both of degree
-`lwork`), so the weights are returned only for a tensor-product sampling exact there in both
-directions: a latitude rule with `SphericalSampling.admits_exact_bandlimited_quadrature` and `lwork`
-inside the sampling's `bandlimit` (Gauss–Legendre, Driscoll–Healy; Clenshaw–Curtis integrates products
-only to `lmax ≈ (nlat−1)/2` and qualifies below that), and `nlon ≥ 2·lwork + 1` equispaced longitudes,
-which integrate `e^{imλ}` exactly for `|m| ≤ 2·lwork`.
+Analysis at degree `lmax` integrates an integrand of degree `2·lmax` (`f·conj(Y_lm)`, both of degree
+`lmax`), so the weights are returned only for a tensor-product sampling exact there in both
+directions: a latitude rule with `SphericalSampling.admits_exact_bandlimited_quadrature` and `lmax`
+inside the sampling's `bandlimit` (Gauss–Legendre, Driscoll–Healy; Clenshaw–Curtis integrates the
+products only for `2·lmax ≤ nlat − 1`), and `nlon ≥ 2·lmax + 1` equispaced longitudes, which integrate
+`e^{imλ}` exactly for `|m| ≤ 2·lmax`.
 
-`nothing` for every other node layout, whose coefficients come from the least-squares fit.
+`nothing` for every other node layout, whose coefficients come from the least-squares fit weighted by
+[`_sphere_measure`](@ref).
 """
-function _sphere_quadrature(grid, lwork::Integer, ::Type{FT}) where {FT}
+function _sphere_quadrature(grid, lmax::Integer, ::Type{FT}) where {FT}
     s = FG.Grids.sampling(grid)
     s isa FG.SphericalSampling.AbstractTensorProductSphericalSampling || return nothing
     nlon, nlat = size(grid)
-    nlon >= 2 * lwork + 1 || return nothing
-    _quadrature_exact(s, nlat, lwork) || return nothing
-    m = FG.Grids.measure(grid)
-    return FT.(vec(m) .* (4π / sum(m)))
+    nlon >= 2 * lmax + 1 || return nothing
+    _quadrature_exact(s, nlat, lmax) || return nothing
+    return _sphere_measure(grid, FT)
 end
 
-# Clenshaw–Curtis's own `bandlimit` is what its grid represents; its weights integrate the degree-2·l
-# products analysis forms only for `2·lwork ≤ nlat − 1`.
-function _quadrature_exact(s, nlat::Integer, lwork::Integer)
+# The grid's measure per node, `Σ = 4π`, in the node order `_sphere_points` produces.
+_sphere_measure(grid, ::Type{FT}) where {FT} = (m = FG.Grids.measure(grid); FT.(vec(m) .* (4π / sum(m))))
+
+# The fit's point weights where no quadrature analyses the field: the cells' areas.
+_fit_weights(grid, ::Nothing, ::Type{FT}) where {FT} = _sphere_measure(grid, FT)
+_fit_weights(_, ::AbstractVector, ::Type) = nothing
+
+# Clenshaw–Curtis's own `bandlimit` is what its grid represents; its weights integrate the degree-2·lmax
+# products analysis forms only for `2·lmax ≤ nlat − 1`.
+function _quadrature_exact(s, nlat::Integer, lmax::Integer)
     FG.SphericalSampling.admits_exact_bandlimited_quadrature(s) &&
-        return lwork <= FG.SphericalSampling.bandlimit(s, nlat)
-    s isa FG.SphericalSampling.AbstractClenshawCurtisSampling && return 2 * lwork <= nlat - 1
+        return lmax <= FG.SphericalSampling.bandlimit(s, nlat)
+    s isa FG.SphericalSampling.AbstractClenshawCurtisSampling && return 2 * lmax <= nlat - 1
     return false
 end
 
@@ -136,11 +143,11 @@ The grid's sampling picks the analysis it admits, in three cases:
 
   * a Clenshaw–Curtis sphere at `nlon = 2·nlat − 1` carries the nodes of the exact spherical-harmonic
     transform and takes it;
-  * a tensor-product sampling whose rule integrates the degree-`2·lwork` integrand — a latitude rule
-    exact there (Gauss–Legendre, Driscoll–Healy, and Clenshaw–Curtis below `2·lwork ≤ nlat − 1`) and
-    `nlon ≥ 2·lwork + 1` longitudes — has its coefficients by projection against the grid's own
-    quadrature, one transform per analysis;
-  * every other node layout has them from the least-squares fit.
+  * a tensor-product sampling whose rule integrates the degree-`2·lmax` integrand — a latitude rule
+    exact there (Gauss–Legendre, Driscoll–Healy, and Clenshaw–Curtis below `2·lmax ≤ nlat − 1`) and
+    `nlon ≥ 2·lmax + 1` longitudes — has its coefficients by projection against the grid's own
+    quadrature, one transform;
+  * every other node layout has them from the least-squares fit, each node weighted by its cell's area.
 
 The last two need `lmax`: the nodes alone fix no bandwidth.
 
@@ -167,9 +174,9 @@ function FIT.calculate_energy_transfer(
         FIT.calculate_energy_transfer(method, _to_fsh_layout(ζ, grid); route...)
     else
         FT = float(real(eltype(ζ)))
-        lwork = get(route, :dealias, true) ? 2 * lmax : lmax
+        qw = _sphere_quadrature(grid, lmax, FT)
         FIT.calculate_energy_transfer(method, vec(ζ), _sphere_points(grid, FT); lmax = lmax,
-                                      quadrature_weights = _sphere_quadrature(grid, lwork, FT), route...)
+                                      quadrature_weights = qw, weights = _fit_weights(grid, qw, FT), route...)
     end
     return FIT.Spherical.with_merged_fit(res, fit)
 end
@@ -198,9 +205,9 @@ function FIT.calculate_energy_transfer(
         FIT.calculate_energy_transfer(method, (_to_fsh_layout(uθ, grid), _to_fsh_layout(uφ, grid)); route...)
     else
         FT = float(real(eltype(uθ)))
-        lwork = get(route, :dealias, true) ? 2 * lmax : lmax
+        qw = _sphere_quadrature(grid, lmax, FT)
         FIT.calculate_energy_transfer(method, (vec(uθ), vec(uφ)), _sphere_points(grid, FT); lmax = lmax,
-                                      quadrature_weights = _sphere_quadrature(grid, lwork, FT), route...)
+                                      quadrature_weights = qw, weights = _fit_weights(grid, qw, FT), route...)
     end
     return FIT.Spherical.with_merged_fit(res, fit)
 end

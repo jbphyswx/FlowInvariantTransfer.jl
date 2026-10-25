@@ -206,7 +206,7 @@ Test.@testset "Allocations" begin
             Test.@test _reuse_cgef(ws_ser, u, v) == 0
         end
 
-        # FINUFFT allocates nothing per execution, and the workspace holds every fit's LSMR workspace.
+        # FINUFFT allocates nothing per execution, and the workspace holds its fit's LSMR workspace.
         Test.@testset "spherical (NUFSHT, scattered)" begin
             lmax = 8; M = (2lmax + 1)^2 + 20
             ga = π * (3 - sqrt(5.0))
@@ -219,7 +219,7 @@ Test.@testset "Allocations" begin
             Test.@test _reuse_spherical!(ws, ζ) == 0
         end
 
-        # The workspace holds its five plans and four fits' LSMR workspaces.
+        # The workspace holds its plans and its fit's LSMR workspace.
         Test.@testset "divergent spherical (NUFSHT, scattered)" begin
             lmax = 8; M = (2lmax + 1)^2 + 20
             ga = π * (3 - sqrt(5.0))

@@ -1644,7 +1644,7 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
     ζgrid = FSH.sph_evaluate(C)
     resF = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), ζgrid)
 
-    # Spherical-Fibonacci scattered points (equidistributed), M ≥ (2lmax+1)² for the dealiased solve.
+    # Spherical-Fibonacci scattered points (equidistributed), M ≥ (lmax+1)² for the fit.
     Msolve = 8 * (2lmax + 1)^2
     ga = π * (3 - sqrt(5))
     zf = [1 - 2 * (k + 0.5) / Msolve for k in 0:Msolve-1]
@@ -1677,7 +1677,7 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
     Test.@test maximum(abs.(res.energy_transfer    .- resF.energy_transfer))    < 1e-8 * scaleE
     Test.@test maximum(abs.(res.enstrophy_transfer .- resF.enstrophy_transfer)) < 1e-8 * scaleZ
 
-    # Too few points for the dealiased solve.
+    # Too few points for the fit.
     Test.@test_throws ArgumentError FIT.calculate_energy_transfer(
         FIT.Types.SphericalTransferMethod(), ζscat[1:10], (θs[1:10], φs[1:10]); lmax = lmax)
     # Scattered points take the NUFSHT transform.
@@ -1713,7 +1713,7 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
     rng = Random.MersenneTwister(11)
     _nabla(freal) = (ð = FSH.spinsph_eth(FSH.spinsph_transform(Matrix{Float64}(freal), 0), 0);
         G = FSH.spinsph_evaluate(ð, 1); -[complex(G[i, j][1], G[i, j][2]) for i in axes(G, 1), j in axes(G, 2)])
-    _randc() = (C = zeros(Float64, N, 2N - 1); for l in 1:4, m in -l:l
+    _randc() = (C = zeros(Float64, N, 2N - 1); for l in 1:lmax, m in -l:l
             C[FSH.spinsph_mode(0, l, m)] = randn(rng) / (l + 1); end; C)
     _lapf(f) = FSH.spinsph_evaluate((C = FSH.spinsph_transform(Matrix{Float64}(f), 0); D = copy(C);
         for l in 0:lmax, m in -l:l; i = FSH.spinsph_mode(0, l, m); D[i] = -l * (l + 1) * C[i]; end; D), 0)
@@ -1746,15 +1746,13 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
             k = i + (j - 1) * N; θv[k] = Θ[i]; φv[k] = Φ[j]
         end
         rn = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
-                                            (θv, φv); lmax = lmax, dealias = false)
-        Test.@test rn.converged
-        Test.@test abs(sum(rn.energy_transfer)) / maximum(abs, rn.energy_transfer) < 1e-6
-        rf = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ); dealias = false)
-        Test.@test maximum(abs, rf.energy_transfer .- rn.energy_transfer) / maximum(abs, rf.energy_transfer) < 1e-6
+                                            (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+        Test.@test abs(sum(rn.energy_transfer)) / maximum(abs, rn.energy_transfer) < 1e-8
+        rf = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ))
+        Test.@test maximum(abs, rf.energy_transfer .- rn.energy_transfer) / maximum(abs, rf.energy_transfer) < 1e-8
         rg = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
-                                           (θv, φv); lmax = lmax, dealias = false,
+                                           (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13,
                                            execution = ComputationalBackends.GPUBackend(KA.CPU()))
-        Test.@test rg.converged
         Test.@test maximum(abs, rg.energy_transfer .- rn.energy_transfer) / maximum(abs, rn.energy_transfer) < 1e-8
     end
 end

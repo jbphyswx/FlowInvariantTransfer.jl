@@ -65,8 +65,8 @@ Test.@testset "spherical transfer on a FlowGeometries grid" begin
     end
 
     Test.@testset "a non-quadrature sampling routes to the scattered path" begin
-        # A lat–lon sphere has no exact transform, so its nodes go to the least-squares fit. Enough
-        # points for the dealiased degree-2·lmax solve: M ≥ (2·lmax+1)².
+        # A lat–lon sphere has no exact transform, so its nodes go to the least-squares fit, which needs
+        # M ≥ (lmax+1)².
         lmax = 4
         nlat = 2 * (2 * lmax + 1); nlon = 2 * nlat
         axll = _SS.spherical_axes(_SS.LatLonSampling(), nlat; nlon = nlon)
@@ -89,9 +89,11 @@ Test.@testset "spherical transfer on a FlowGeometries grid" begin
         NUFSHT.nusht_type2_spin!(fbuf, Cs, plan)
         ζv = real.(fbuf)
 
-        # Passing the grid must agree with handing the same nodes to the scattered entry directly.
+        # Passing the grid must agree with handing the same nodes, weighted by their cells' areas, to the
+        # scattered entry directly.
+        area = vec(FG.Grids.measure(gll))
         ref = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(1.0), ζv, (θ, φ);
-                                            lmax = lmax)
+                                            lmax = lmax, weights = area .* (4π / sum(area)))
         got = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(1.0),
                                             reshape(ζv, size(gll)), gll; lmax = lmax)
         Test.@test maximum(abs, ref.energy_transfer) > 1e-12
@@ -102,14 +104,14 @@ Test.@testset "spherical transfer on a FlowGeometries grid" begin
             FIT.Types.SphericalTransferMethod(1.0), reshape(ζv, size(gll)), gll)
     end
 
-    # A sampling whose latitude rule integrates the degree-2·lwork integrand determines the
+    # A sampling whose latitude rule integrates the degree-2·lmax integrand determines the
     # coefficients by projection, so analysis is one weighted adjoint transform. The result must be
     # the transfer the least-squares fit on the same nodes computes.
     Test.@testset "a quadrature sampling analyses by projection" begin
         lmaxq = 6
         nlatq = 16
         sq = _SS.GaussLegendreSampling()
-        Test.@test 2 * lmaxq <= _SS.bandlimit(sq, nlatq)          # the rule is exact at the work degree
+        Test.@test lmaxq <= _SS.bandlimit(sq, nlatq)              # the rule is exact at the analysis degree
         axq = _SS.spherical_axes(sq, nlatq)
         gq = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(1.0), axq.λ, axq.φ; sampling = sq)
         nlonq, nlq = size(gq)

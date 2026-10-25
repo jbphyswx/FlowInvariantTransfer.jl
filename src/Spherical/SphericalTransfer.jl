@@ -106,43 +106,38 @@ end
     ScatteredSphericalTransferWorkspace(coords, lmax; ...)
 
 Reusable buffers for the scattered-point [`calculate_spherical_transfer!`](@ref) (NUFSHT extension).
-Holds the three NUFSHT spin plans (spin-0 at `lmax`, spin-1 at `lmax`, spin-0 at the dealiased
-`lwork = 2·lmax`) with the scattered points preset, plus every coefficient/gradient/reduction buffer
-and the result vectors. The plans (NUFFT planning and the least-squares setup) are the dominant cost,
-so build one per point set and reuse it across snapshots. They hold NUFFT resources that
+Holds a spin-0 NUFSHT plan at `lmax` over the scattered points, which fits the vorticity, and two
+over a Gauss–Legendre grid, on which the Jacobian of the fitted fields is formed and projected onto
+degree `lmax`, plus every coefficient, field and reduction buffer and the result vectors. Build one per
+point set and reuse it across snapshots. The plans hold NUFFT resources that
 [`close!`](@ref FlowInvariantTransfer.close!) releases; the allocating entries close theirs. Requires
 `using NUFSHT`.
 """
-struct ScatteredSphericalTransferWorkspace{P0, P1, P0W, L0, L0W, CM, CV, RF, DC, PB, TC, QW, RES, R}
-    plan0::P0        # spin-0 analysis plan at lmax
-    plan1::P1        # spin-1 synthesis plan at lmax
-    plan0w::P0W      # spin-0 analysis plan at lwork (dealiased)
-    # LSMR workspaces of the two fits (vorticity on `plan0`, advection on `plan0w`); `nothing` when
-    # `qw` makes analysis a projection.
-    lsmr0::L0
-    lsmr0w::L0W
+struct ScatteredSphericalTransferWorkspace{P0, F0, G1, G0, L0, CM, CB, CG, RF, RG, DC, PB, TC, QW, RES, R}
+    plan0::P0        # real spin-0 plan at lmax over the scattered points (the vorticity fit)
+    fit0::F0         # the operator the vorticity is fitted on: `plan0`, or it under the fit's point weights
+    grid1::G1        # spin-1 synthesis at lmax over the grid, two columns (ðψ, ðζ)
+    grid0::G0        # real spin-0 plan at lmax over the grid (the Jacobian's projection)
+    lsmr0::L0        # LSMR workspace of the fit; `nothing` when `qw` makes analysis a projection
     ζ_lm::CM         # (lmax+1, 2lmax+1) vorticity coefficients
     ψ_lm::CM         # streamfunction coefficients
-    ðψ::CM           # spin-1 gradient coefficients of ψ
-    ðζ::CM           # spin-1 gradient coefficients of ζ
-    A_lw::CM         # (lwork+1, 2lwork+1) advection coefficients
-    Gψ::CV           # (M,) ðψ at the scattered points
-    Gζ::CV           # (M,) ðζ at the scattered points
-    ζdata::CV        # (M,) vorticity as complex (solve input)
-    Jc::CV           # (M,) Jacobian A = J(ψ,ζ) as complex (solve input)
+    A_lm::CM         # advection coefficients
+    ðc::CB           # (lmax+1, 2lmax+1, 2) spin-1 gradient coefficients of ψ and ζ
+    Gg::CG           # (Mg, 2) ðψ and ðζ on the grid
     fr::RF           # (M,) the caller's vorticity, copied into the plans' memory
+    Jg::RG           # (Mg,) Jacobian A = J(ψ,ζ) on the grid
+    gw::RG           # (Mg,) the grid's quadrature weights, `Σ = 4π`
     ladl::DC         # (lmax+1, 1) eth ladder √(ℓ(ℓ+1)) per degree row
     invll1::DC       # (lmax+1, 1) 1/(ℓ(ℓ+1)), 0 at ℓ = 0
     Pr::PB           # (lmax+1, 2lmax+1) real product scratch for the per-degree row-sum reduce
     Tcol::TC         # (lmax+1, 1) real per-degree column-sum scratch
-    # (M,) quadrature weights, `Σw = 4π`, when the nodes carry a rule exact at degree `2·lwork`.
+    # (M,) quadrature weights, `Σw = 4π`, when the points carry a rule exact at degree `2·lmax`.
     # Analysis is then the weighted adjoint `Σⱼ wⱼ fⱼ conj(sYlm(xⱼ))`. `nothing` at points carrying no
     # such rule, where analysis is the least-squares fit.
     qw::QW
     result::RES      # reused Types.SphericalTransferResult
     radius::R
     lmax::Int
-    lwork::Int
     rtol::R
     maxiter::Int
 end
@@ -216,7 +211,8 @@ with_merged_fit(r, fit::NamedTuple) = with_fit(r, merge_fits(
 
 The spin-`s`, degree-`lmax` least-squares fit to `values` at the nodes `active` (linear indices into the
 colatitudes `θ` and longitudes `φ`), evaluated at every node. `values` is read at `active` alone; `field`
-is complex, `u_θ + i u_φ` for `s = 1`, and `fit = (; converged, iterations, residual)` is the fit's
+is real for real `values` at `s = 0` and complex otherwise, `u_θ + i u_φ` for `s = 1`, and
+`fit = (; converged, iterations, residual)` is the fit's
 outcome. The keywords are those of the scattered transfer's fits. The NUFSHT extension provides it.
 """
 active_fit(args...; kwargs...) = throw(ArgumentError(
@@ -273,8 +269,9 @@ Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = 
 # the advection, is the spin-1 vector-harmonic projection, split into the two channels:
 #     T_rot(l) = Σ_m Re{ sym*_lm Â_lm},   T_div(l) = Σ_m Re{ anti*_lm Â_lm},   T = T_rot + T_div,
 # and Π(L) = Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for divergent flow; in the
-# non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy transfer. Products are quadratic, so the advection is analysed at the dealiased degree lwork = 2·lmax
-# and truncated back to l ≤ lmax. (Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013.)
+# non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy transfer.
+# Products are quadratic, of degree up to 2·lmax, so the advection is formed where they are resolved and
+# projected onto l ≤ lmax. (Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013.)
 #
 # The transform machinery lives in the extensions (FastSphericalHarmonics regular grid; NUFSHT
 # scattered points); both share the finalisation below.
@@ -335,39 +332,37 @@ end
     ScatteredDivergentSphericalTransferWorkspace(coords, lmax; ...)
 
 Reusable buffers for the scattered-point [`calculate_divergent_spherical_transfer!`](@ref) (NUFSHT
-extension; loading it provides the constructor). Holds the five NUFSHT spin plans (spin ±1 and spin 0
-at `lmax`, spin 0 and spin +1 at the dealiased `lwork = 2·lmax`) with the points preset, plus every
-coefficient/field/reduction buffer and the result. The plans are the dominant reusable cost, and hold
-NUFFT resources that [`close!`](@ref FlowInvariantTransfer.close!) releases. Requires `using NUFSHT`.
+extension; loading it provides the constructor). Holds a spin+1 NUFSHT plan at `lmax` over the
+scattered points, which fits the velocity, and spin+1 and spin-0 plans over a Gauss–Legendre grid, on
+which the advection of the fitted velocity is formed and projected onto degree `lmax`, plus every
+coefficient, field and reduction buffer and the result. The plans hold NUFFT resources that
+[`close!`](@ref FlowInvariantTransfer.close!) releases. Requires `using NUFSHT`.
 """
-struct ScatteredDivergentSphericalTransferWorkspace{PP, PM, P0, P0W, PPW, LP, LM, L0W, LPW, CM, CMW, CV, RF, RV, RVW, PB, TC, QW, RES, R}
-    planp::PP        # spin+1 analysis plan at lmax
-    planm::PM        # spin−1 analysis plan at lmax
-    plan0::P0        # spin-0 synthesis plan at lmax (vorticity/divergence)
-    plan0w::P0W      # spin-0 analysis plan at lwork (K)
-    planpw::PPW      # spin+1 plan at lwork (∇K synthesis, advection analysis)
-    # LSMR workspaces of the four fits, on `planp`, `planm`, `plan0w`, `planpw`; `nothing` when `qw`
-    # makes analysis a projection.
-    lsmrp::LP; lsmrm::LM; lsmr0w::L0W; lsmrpw::LPW
-    ap::CM; am::CM; sym::CM; anti::CM      # (lmax+1, 2lmax+1) spin-1 coefficient work arrays
-    ζc::CM; δc::CM                          # vorticity/divergence spin-0 coefficients
-    Khat::CMW                               # (lwork+1, 2lwork+1) K spin-0 coefficients
-    Adv_lm::CMW                             # advection spin-1 coefficients at lwork
-    Up::CV; Um::CV                          # (M,) U₊, U₋ at the points
-    ζv::CV; δv::CV; Kv::CV                   # (M,) vorticity, divergence, ½|u|²
-    gradK::CV; Advv::CV                      # (M,) ∇K, advection
-    uθ::RF; uφ::RF                           # (M,) the caller's velocity, copied into the plans' memory
-    ladl::RV                                # (lmax+1,1) ladder √(l(l+1))
-    ladw::RVW                                # (lwork+1,1) ladder at lwork
-    Pr::PB                                   # (lmax+1, 2lmax+1) real product scratch (row-sum reduce)
-    Tcol::TC                                 # (lmax+1,1) real per-degree column-sum scratch
-    # (M,) quadrature weights, `Σw = 4π`, when the nodes carry a rule exact at degree `2·lwork`;
+struct ScatteredDivergentSphericalTransferWorkspace{PP, FP, GP, G0, LP, CM, CV, RF, CG, RG, DC, MS, PB, TC, QW, RES, R}
+    planp::PP        # spin+1 plan at lmax over the scattered points (the fit of U₊)
+    fitp::FP         # the operator U₊ is fitted on: `planp`, or it under the fit's point weights
+    gridp::GP        # spin+1 plan at lmax over the grid (U₊, the projection of (iζ + ½δ)U₊)
+    grid0::G0        # spin-0 plan at lmax over the grid (iζ + ½δ, the projection of ½|u|²)
+    lsmrp::LP        # LSMR workspace of the fit; `nothing` when `qw` makes analysis a projection
+    ap::CM; am::CM; sym::CM; anti::CM       # (lmax+1, 2lmax+1) spin±1 coefficients and their split
+    wc::CM                                  # spin-0 coefficients of iζ + ½δ
+    Khat::CM                                # spin-0 coefficients of ½|u|²
+    Ahat::CM                                # spin+1 advection coefficients
+    Up::CV                                  # (M,) U₊ at the points
+    uθ::RF; uφ::RF                          # (M,) the caller's velocity, copied into the plans' memory
+    Ug::CG; wg::CG; Bg::CG                  # (Mg,) U₊, iζ + ½δ and (iζ + ½δ)U₊ on the grid
+    Kg::RG                                  # (Mg,) ½|u|² on the grid
+    gw::RG                                  # (Mg,) the grid's quadrature weights, `Σ = 4π`
+    ladl::DC                                # (lmax+1, 1) ladder √(l(l+1))
+    msign::MS                               # (1, 2lmax+1) (−1)^(m+1) per order column
+    Pr::PB                                  # (lmax+1, 2lmax+1) real product scratch (row-sum reduce)
+    Tcol::TC                                # (lmax+1, 1) real per-degree column-sum scratch
+    # (M,) quadrature weights, `Σw = 4π`, when the points carry a rule exact at degree `2·lmax`;
     # `nothing` at points carrying no such rule. See the barotropic workspace.
     qw::QW
     result::RES
     radius::R
     lmax::Int
-    lwork::Int
     rtol::R
     maxiter::Int
 end

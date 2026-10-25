@@ -18,22 +18,17 @@ Return an array (shape `ns`) giving the wavenumber coordinate each mode is binne
 `geometry`. For [`ShellMagnitude`](@ref) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
 all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
 """
-function shell_coordinate(g::Types.ShellMagnitude, ks)
+function shell_coordinate(g::Types.ShellMagnitude, ks::Tuple)
     nd   = length(ks)
-    ns   = ntuple(d -> length(ks[d]), nd)
     dims = _shell_dims(g, nd)
     FT  = float(eltype(ks[1]))
-    out = Array{FT}(undef, ns...)
-    @inbounds for I in CartesianIndices(ns)
-        s = zero(FT)
-        for d in dims
-            kd = FT(ks[d][I[d]])
-            s += kd * kd
-        end
-        out[I] = sqrt(s)
-    end
-    return out
+    # One axis's squared wavenumbers, zero along an axis the shells do not read, laid along that axis.
+    sq = ntuple(d -> _axis_squares(FT, ks[d], d in dims, d, Val(nd)), Val(nd))
+    return sqrt.(.+(sq...))
 end
+
+_axis_squares(::Type{FT}, k, on::Bool, d::Int, ::Val{N}) where {FT,N} =
+    reshape(FT[on ? FT(x) * FT(x) : zero(FT) for x in k], ntuple(e -> e == d ? length(k) : 1, Val(N)))
 
 function _shell_dims(g::Types.ShellMagnitude, nd::Int)
     dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
