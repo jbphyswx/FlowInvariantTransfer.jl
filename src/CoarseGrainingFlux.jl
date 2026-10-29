@@ -136,7 +136,7 @@ result = calculate_coarse_graining_flux((u, v), (x, y), ℓ, FlowInvariantTransf
 
 Coordinate vectors, a longitude among them, build a `FlowGeometries` grid with no periodic direction
 (`CoarseGrainingEnergyFluxes` takes the exterior of a bounded grid as zero velocity); pass a grid that
-declares its periodic directions (`topology`, or a `PeriodicAxis` longitude) for a periodic domain.
+declares its periodic directions (`topology`, or a `PeriodicUniformAxis` longitude) for a periodic domain.
 
 # Returns
 `CoarseGrainingFluxResult`; with a decomposition a NamedTuple of them, one per component, alongside the
@@ -290,8 +290,8 @@ _cg_flux_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocity_fie
 
 Scale-band kinetic energies: the energy in each band between successive entries of `scales`, from the
 filtered field at each scale. `geometry` is the coordinate vectors or a `FlowGeometries` grid, as for
-[`calculate_coarse_graining_flux`](@ref). Pass `maps = true` for the per-point band fields alongside
-the integrals. Under `execution = GPUBackend(dev)` host fields are copied to `dev` and the maps are on
+[`calculate_coarse_graining_flux`](@ref). Pass `maps = CoarseGrainingEnergyFluxes.Diagnostics.BandMaps()`
+for the per-point band fields alongside the integrals. Under `execution = GPUBackend(dev)` host fields are copied to `dev` and the maps are on
 `dev`. `vector_filter` is CGEF's filter of the velocity on a sphere, as for
 [`calculate_coarse_graining_flux`](@ref). Requires `CoarseGrainingEnergyFluxes` to be loaded.
 """

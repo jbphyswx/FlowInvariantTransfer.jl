@@ -15,27 +15,29 @@ export shell_edges, shell_centers, n_shells, assign_shells, shell_coordinate, ma
     shell_coordinate(geometry, ks) -> Array
 
 Return an array (shape `ns`) giving the wavenumber coordinate each mode is binned by under
-`geometry`. For [`ShellMagnitude`](@ref) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
+`geometry`. For [`ShellMagnitude`](@ref FlowInvariantTransfer.Types.ShellMagnitude) this is `√(Σ_{d∈dims} k_d²)` — `|k|` when `dims` covers
 all dimensions (isotropic), `k_⊥`/`k_∥` for an anisotropic projection.
 """
-function shell_coordinate(g::Types.ShellMagnitude, ks::Tuple)
-    nd   = length(ks)
-    dims = _shell_dims(g, nd)
+function shell_coordinate(g::Types.ShellMagnitude, ks::NTuple{N,Any}) where {N}
+    dims = _shell_dims(g, Val(N))
     FT  = float(eltype(ks[1]))
     # One axis's squared wavenumbers, zero along an axis the shells do not read, laid along that axis.
-    sq = ntuple(d -> _axis_squares(FT, ks[d], d in dims, d, Val(nd)), Val(nd))
+    sq = map((k, d) -> _axis_squares(FT, k, d in dims, d, Val(N)), ks, ntuple(identity, Val(N)))
     return sqrt.(.+(sq...))
 end
 
 _axis_squares(::Type{FT}, k, on::Bool, d::Int, ::Val{N}) where {FT,N} =
     reshape(FT[on ? FT(x) * FT(x) : zero(FT) for x in k], ntuple(e -> e == d ? length(k) : 1, Val(N)))
 
-function _shell_dims(g::Types.ShellMagnitude, nd::Int)
-    dims = g.dims === nothing ? ntuple(identity, nd) : g.dims
-    all(d -> 1 <= d <= nd, dims) || throw(ArgumentError(
-        "ShellMagnitude dims=$(g.dims) out of range for nd=$nd spatial dimensions."))
+function _shell_dims(g::Types.ShellMagnitude, ::Val{N}) where {N}
+    dims = _dims_or_all(g.dims, Val(N))
+    all(d -> 1 <= d <= N, dims) || throw(ArgumentError(
+        "ShellMagnitude dims=$(g.dims) out of range for nd=$N spatial dimensions."))
     return dims
 end
+
+_dims_or_all(::Nothing, ::Val{N}) where {N} = ntuple(identity, Val(N))
+_dims_or_all(dims, ::Val) = dims
 
 """
     max_shell_coordinate(geometry, ks) -> Real
@@ -44,11 +46,10 @@ end
 is `√(Σ_d max_d k_d²)`. Equal on the full and half layouts, so shell edges built from it do not
 depend on how the field is stored.
 """
-function max_shell_coordinate(g::Types.ShellMagnitude, ks)
-    nd = length(ks)
+function max_shell_coordinate(g::Types.ShellMagnitude, ks::NTuple{N,Any}) where {N}
     FT = float(eltype(ks[1]))
     s = zero(FT)
-    for d in _shell_dims(g, nd)
+    for d in _shell_dims(g, Val(N))
         kd = FT(FTB.max_abs(ks[d]))
         s += kd * kd
     end
@@ -178,7 +179,7 @@ end
 # Shell reduction `T_spec[shell_idx[I]] += density[I]` over all modes (shell index 0 = dropped),
 # zeroing `T_spec` first. The KernelAbstractions extension adds the `GPUBackend` method, an atomic
 # device scatter-add.
-function shell_scatter_add!(T_spec, density, shell_idx, ::ComputationalBackends.AbstractExecutionBackend)
+function shell_scatter_add!(T_spec, density, shell_idx, ::ComputationalBackends.AbstractExecutionBackend, scratch)
     fill!(T_spec, zero(eltype(T_spec)))
     @inbounds for I in CartesianIndices(density)
         s = shell_idx[I]

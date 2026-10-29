@@ -1,0 +1,86 @@
+```@meta
+CurrentModule = FlowInvariantTransfer
+```
+
+# Types and Workspaces
+
+## Method Types
+
+```@docs
+FlowInvariantTransfer.Types.AbstractEnergyTransferMethod
+FlowInvariantTransfer.Types.SpectralFluxMethod
+FlowInvariantTransfer.Types.ShellToShellTransferMethod
+FlowInvariantTransfer.Types.ModeToModeTransferMethod
+FlowInvariantTransfer.Types.CoarseGrainingFluxMethod
+FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionMethod
+FlowInvariantTransfer.Types.SphericalTransferMethod
+FlowInvariantTransfer.Types.DivergentSphericalTransferMethod
+```
+
+## Invariant Types
+
+```@docs
+FlowInvariantTransfer.Types.AbstractInvariant
+FlowInvariantTransfer.Types.KineticEnergy
+FlowInvariantTransfer.Types.Helicity
+FlowInvariantTransfer.Types.Enstrophy
+FlowInvariantTransfer.Types.PassiveScalar
+```
+
+## Decomposition Types
+
+```@docs
+FlowInvariantTransfer.Types.AbstractFieldDecomposition
+FlowInvariantTransfer.Types.NoDecomposition
+FlowInvariantTransfer.Types.HelmholtzDecomposition
+FlowInvariantTransfer.Types.RotationalDecomposition
+FlowInvariantTransfer.Types.DivergentDecomposition
+FlowInvariantTransfer.Types.HelicalDecomposition
+FlowInvariantTransfer.Types.ToroidalPoloidalDecomposition
+```
+
+## Dealiasing Strategies
+
+```@docs
+FlowInvariantTransfer.Types.AbstractDealiasing
+FlowInvariantTransfer.Types.NoDealiasing
+FlowInvariantTransfer.Types.OrszagTwoThirds
+FlowInvariantTransfer.Types.PaddedThreeHalves
+```
+
+## Nonlinear Forms
+
+```@docs
+FlowInvariantTransfer.Types.AbstractNonlinearForm
+FlowInvariantTransfer.Types.Advective
+FlowInvariantTransfer.Types.Rotational
+```
+
+## Result Types
+
+```@docs
+FlowInvariantTransfer.Types.SpectralFluxResult
+FlowInvariantTransfer.Types.CompressibleFluxResult
+FlowInvariantTransfer.Types.ShellToShellResult
+FlowInvariantTransfer.Types.ModeToModeTriadResult
+FlowInvariantTransfer.Types.CoarseGrainingFluxResult
+FlowInvariantTransfer.Types.CoarseGrainingFluxResultWithDiagnostics
+FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionResult
+FlowInvariantTransfer.Types.SphericalTransferResult
+FlowInvariantTransfer.Types.DivergentSphericalTransferResult
+```
+
+## Workspace Types
+
+```@docs
+FlowInvariantTransfer.Workspaces.NonlinearTermWorkspace
+FlowInvariantTransfer.Workspaces.PaddedGrid
+FlowInvariantTransfer.Workspaces.SpectralFluxWorkspace
+FlowInvariantTransfer.Workspaces.ShellToShellWorkspace
+FlowInvariantTransfer.BandTransfer.BandTransferWorkspace
+FlowInvariantTransfer.Compressible.CompressibleWorkspace
+FlowInvariantTransfer.Spherical.SphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.ScatteredSphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.DivergentSphericalTransferWorkspace
+FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
+```

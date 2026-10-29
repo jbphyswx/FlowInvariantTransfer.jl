@@ -5,6 +5,17 @@ using ..ShellBinning: ShellBinning
 using FlowTransformBindings: FlowTransformBindings as FTB
 export NonlinearTermWorkspace, SpectralFluxWorkspace, ShellToShellWorkspace, PaddedGrid
 
+struct SpectralOperators{KD, FW}
+    kd::KD
+    fold::FW
+end
+
+function SpectralOperators(proto, ::Type{T}, ks) where {T}
+    weights = T[FTB.fold_weight(first(ks), i) for i in eachindex(first(ks))]
+    fold = copyto!(similar(proto, T, length(weights)), weights)
+    return SpectralOperators(FTB.wavenumber_arrays(proto, T, ks; derivative = true), fold)
+end
+
 # ---------------------------------------------------------------------------
 # The grid padded for exact quadratic products
 # ---------------------------------------------------------------------------
@@ -59,17 +70,17 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _make_fft_plans(advected_hat, ks, pad, fft_nthreads)
+    _make_fft_plans(advected_hat, ks, pad, fft_nthreads, operators)
 
 Hook returning the FFT plan/scratch bundle stored in `NonlinearTermWorkspace.plans`: `nothing` in the
 core (the direct sum needs no plans), pre-planned transforms and scratch buffers from the FFTW
 extension, which plans the padded transforms on `pad`, the workspace's [`PaddedGrid`](@ref) or
 `nothing`. `fft_nthreads` is FFTW's per-transform thread count.
 """
-_make_fft_plans(advected_hat, ks, pad, fft_nthreads) = nothing
+_make_fft_plans(advected_hat, ks, pad, fft_nthreads, operators) = nothing
 
 """
-    NonlinearTermWorkspace{CA, RA, GA, PH, PD, P}
+    NonlinearTermWorkspace(advected_hat, ks; dealiasing, fft_nthreads)
 
 Preallocated buffers for the generalized pseudospectral nonlinear term
 `𝒩(k) = FFT[(u·∇)f]`, where the advecting velocity `u` has `nd` advecting (spatial)
@@ -93,9 +104,11 @@ Physical-space buffers are sized `ns`, the grid the field lives on; the spectral
   evaluates that mode's gradient in closed form.
 - `pad::PD`:     the [`PaddedGrid`](@ref) under `PaddedThreeHalves`, else `nothing`.
 - `plans::P`:    FFT plan/scratch bundle (set by the FFTW extension) or `nothing`.
+- `operators`: cached derivative wavenumbers and Hermitian fold weights.
+- `execution_state`: reusable state supplied by an execution extension.
 """
 struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:AbstractArray,
-                              PH<:AbstractVector, PD, P}
+                              PH<:AbstractVector, PD, P, OP, EX}
     u_phys::RA
     g_phys::GA
     N_phys::RA
@@ -103,7 +116,11 @@ struct NonlinearTermWorkspace{CA<:AbstractArray, RA<:AbstractArray, GA<:Abstract
     phase::PH
     pad::PD
     plans::P
+    operators::OP
+    execution_state::EX
 end
+
+_with_execution_state(ws) = ws
 
 """
     NonlinearTermWorkspace(advected_hat, ks; dealiasing=OrszagTwoThirds(), fft_nthreads=1)
@@ -117,13 +134,18 @@ workspace will be used with: only `PaddedThreeHalves` gets the padded grid.
 """
 function NonlinearTermWorkspace(advected_hat, ks; dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
                                 fft_nthreads::Int = 1)
+    return _with_execution_state(_serial_workspace(advected_hat, ks; dealiasing, fft_nthreads))
+end
+
+function _serial_workspace(advected_hat, ks; dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
+                           fft_nthreads::Int = 1)
     FT  = real(eltype(advected_hat))
     nd  = length(ks)
     ns  = FTB.full_size(ks)            # physical grid
     ms  = FTB.spectral_size(ks)        # coefficient grid
     M   = size(advected_hat, nd + 1)              # advected-field component count
-    size(advected_hat)[1:nd] == ms || throw(DimensionMismatch(
-        "field spatial size $(size(advected_hat)[1:nd]) does not match the wavenumber grid $ms."))
+    Base.front(size(advected_hat)) == ms || throw(DimensionMismatch(
+        "field spatial size $(Base.front(size(advected_hat))) does not match the wavenumber grid $ms."))
     u_phys = similar(advected_hat, FT, ns..., nd)      # advecting velocity, spatial dirs only
     g_phys = similar(advected_hat, FT, ns...)          # one streamed gradient ∂f_i/∂x_j
     N_phys = similar(advected_hat, FT, ns..., M)
@@ -135,28 +157,39 @@ function NonlinearTermWorkspace(advected_hat, ks; dealiasing::Types.AbstractDeal
     # `fft_nthreads` is FFTW's per-transform thread count, fixed at planning: 1 where an outer loop
     # carries the parallelism, `Threads.nthreads()` for a single-field method whose only parallel axis
     # is the transform.
-    plans  = _make_fft_plans(advected_hat, ks, pad, fft_nthreads)
-    return NonlinearTermWorkspace(u_phys, g_phys, N_phys, N̂, phase, pad, plans)
+    operators = SpectralOperators(advected_hat, FT, ks)
+    plans = _make_fft_plans(advected_hat, ks, pad, fft_nthreads, operators)
+    return NonlinearTermWorkspace(u_phys, g_phys, N_phys, N̂, phase, pad, plans, operators, nothing)
 end
+
+density_buffer(ws::NonlinearTermWorkspace, ks) =
+    view(ws.g_phys, map(Base.OneTo, FTB.spectral_size(ks))...)
 
 # ---------------------------------------------------------------------------
 # SpectralFluxWorkspace
 # ---------------------------------------------------------------------------
 
 """
-    SpectralFluxWorkspace{NW, V}
+    SpectralFluxWorkspace(velocity_hat, ks, binning; geometry, dealiasing, fft_nthreads)
 
-Preallocated buffers for `calculate_spectral_flux!`.
+Preallocated buffers and shell tables for `calculate_spectral_flux!` and `calculate_partial_fluxes!`.
 
 # Fields
 - `nonlinear::NW`:        `NonlinearTermWorkspace` for computing N̂(k).
 - `T_spec::V`:            Shell transfer spectrum buffer (length N_sh), in the field's array type.
 - `flux::V`:              Cumulative flux buffer (length N_sh).
+- `shell_idx`: cached mode-to-shell table in the field's memory.
+- `partials`, `processes`: retained thread and worker state, filled on first use.
 """
-struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector}
+struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector, SI, PV, RP, CE, ED}
     nonlinear::NW
     T_spec::V
     flux::V
+    shell_idx::SI
+    partials::PV
+    processes::RP
+    centers::CE
+    edges::ED
 end
 
 """
@@ -168,23 +201,36 @@ Construct a `SpectralFluxWorkspace` for the given input and binning.
 function SpectralFluxWorkspace(velocity_hat, ks, binning::Types.AbstractShellBinning;
                                geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-                               fft_nthreads::Int = 1)
-    edges  = ShellBinning.shell_edges(binning, ShellBinning.max_shell_coordinate(geometry, ks))
+                               fft_nthreads::Int = 1, shell_idx = nothing)
+    kmax = ShellBinning.max_shell_coordinate(geometry, ks)
+    edges  = ShellBinning.shell_edges(binning, kmax)
     N_sh   = length(edges) - 1
     FT     = real(eltype(velocity_hat))
+    T_spec = similar(velocity_hat, FT, N_sh)
+    indices = shell_idx === nothing ?
+        ShellBinning.assign_shells(ShellBinning.shell_coordinate(geometry, ks), edges) : shell_idx
+    stored = Types._is_device(velocity_hat) ? copyto!(similar(velocity_hat, Int, size(indices)), indices) : indices
     return SpectralFluxWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing, fft_nthreads=fft_nthreads),
-        similar(velocity_hat, FT, N_sh),     # T_spec
+        T_spec,
         similar(velocity_hat, FT, N_sh),     # flux
+        stored,
+        typeof(T_spec)[],
+        _process_slots(velocity_hat),
+        collect(ShellBinning.shell_centers(binning, kmax)),
+        edges,
     )
 end
+
+_process_slots(proto) = nothing
+release!(ws) = nothing
 
 # ---------------------------------------------------------------------------
 # ShellToShellWorkspace
 # ---------------------------------------------------------------------------
 
 """
-    ShellToShellWorkspace{NW, CA, M, V, IA}
+    ShellToShellWorkspace(velocity_hat, ks, binning; geometry, dealiasing)
 
 Preallocated buffers for `calculate_shell_to_shell_transfer!`.
 
@@ -199,12 +245,13 @@ struct ShellToShellWorkspace{NW<:NonlinearTermWorkspace,
                               CA<:AbstractArray,
                               M<:AbstractMatrix,
                               V<:AbstractVector,
-                              IA<:AbstractArray{Int}}
+                              IA<:AbstractArray{Int}, PV}
     nonlinear::NW
     û_m::CA
     T_mat::M
     net_transfer::V
     shell_idx::IA
+    partials::PV
 end
 
 """
@@ -225,12 +272,14 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
     # kernels.
     shell_idx = similar(velocity_hat, Int, ns...)
     copyto!(shell_idx, ShellBinning.assign_shells(k_mag, edges))
+    net = similar(velocity_hat, FT, N_sh)
     return ShellToShellWorkspace(
         NonlinearTermWorkspace(velocity_hat, ks; dealiasing=dealiasing),
         similar(velocity_hat),                   # û_m
         similar(velocity_hat, FT, N_sh, N_sh),   # T_mat
-        similar(velocity_hat, FT, N_sh),         # net_transfer
+        net,
         shell_idx,
+        typeof(net)[],
     )
 end
 

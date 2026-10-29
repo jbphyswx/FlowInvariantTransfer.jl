@@ -21,12 +21,13 @@ Test.@testset "band energies — invariant content per band" begin
     Random.seed!(17)
     u = randn(N, N); v = randn(N, N)
     u .-= Statistics.mean(u); v .-= Statistics.mean(v)      # zero mean: the DC mode carries nothing
-    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x; topology = (true, true))
+    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x;
+                                   topology = (FG.Grids.Periodic(), FG.Grids.Periodic()))
     total = 0.5 * (Statistics.mean(u .^ 2) + Statistics.mean(v .^ 2))
     Test.@test total > 1e-3                                  # the field carries energy
 
     û_h, ks_h = FIT.to_spectral((u, v), grid)                          # half layout
-    û_f, ks_f = FIT.to_spectral((u, v), grid; real_layout = false)     # full layout
+    û_f, ks_f = FIT.to_spectral((complex.(u), complex.(v)), grid)
 
     # Sharp bands over a partition whose last edge clears the corner mode, so every mode is assigned
     # and the sum is the whole field.

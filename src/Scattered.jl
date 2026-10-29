@@ -36,10 +36,9 @@ function _scattered_npoints(scatter_coords::Tuple, ms::Tuple, Ls::Tuple)
 end
 
 function _plan_keywords(scatter_coords::Tuple, Ls::Tuple, ::Type{FT}, tol, execution) where {FT}
-    nd = length(scatter_coords)
     return (; tol = tol === nothing ? FlowTransformBindings.default_tolerance(FT) : FT(tol),
-              period = ntuple(d -> FT(Ls[d]), nd),
-              origin = ntuple(d -> FT(minimum(scatter_coords[d])), nd),
+              period = map(FT, Ls),
+              origin = map(x -> FT(minimum(x)), scatter_coords),
               nthreads = _library_threads(execution))
 end
 
@@ -53,91 +52,31 @@ function _quadrature(w::AbstractVector, N::Int, Ls::Tuple, ::Type{FT}) where {FT
 end
 
 # `dest = w ⊙ field`, or `field` with no weights.
-_weighted!(dest, ::Nothing, field) = (dest .= field; dest)
-_weighted!(dest, w::AbstractVector, field) = (dest .= w .* field; dest)
-
-# The sample mean of `Π`, the quadrature mean with weights.
-_sample_mean(Π, ::Nothing) = sum(Π) / length(Π)
-function _sample_mean(Π, w::AbstractVector)
-    s = zero(eltype(Π)); sw = zero(eltype(w))
-    @inbounds for i in eachindex(Π, w)
-        s += w[i] * Π[i]
-        sw += w[i]
-    end
-    return s / sw
-end
+_weighted!(dest, ::Nothing, field) = copyto!(dest, field)
+_weighted!(dest, w::AbstractVector, field) = (copyto!(dest, field); dest .*= w; dest)
 
 # The type-1 plan of a real field: its real values where the library transforms them natively, the full
 # complex spectrum otherwise.
-_analysis_plan(lib, ::Type{FT}, nodes, ms, kw) where {FT} =
-    FlowTransformBindings.plan_nufft(lib, FlowTransformBindings.has_real_transform(lib) ? FT : Complex{FT},
-                                     nodes, ms; order = FlowTransformBindings.FFTModes(), kw...)
+_value_type(lib, ::Type{T}) where {T} = T
+_value_type(::FlowTransformBindings.FINUFFTBackend, ::Type{T}) where {T<:Real} = Complex{T}
+_analysis_plan(lib, ::Type{T}, nodes, ms, kw) where {T} =
+    FlowTransformBindings.plan_nufft(lib, _value_type(lib, T), nodes, ms;
+                                     order = FlowTransformBindings.FFTModes(), kw...)
 
-# One mode of the Hermitian expansion of a real-data NUFFT type-1 half spectrum onto the full fftfreq
-# grid. `fk_half` holds axis-1 modes `0…ms₁÷2` (rfftfreq) with fftfreq on the rest; `us` is the plan's
-# oversampled half spectrum (sizes `novs`) and `gk[d]` its kernel Fourier coefficients.
-#
-#   k₁ ≥ 0                → straight from `fk_half`.
-#   k₁ < 0                → Hermitian mirror `conj(fk_half[-k])`.
-#   k₁ < 0 and some even
-#   axis d ≥ 2 at −N_d/2  → the mirror is `C[-k₁, +N_d/2]`. At scattered points `+N_d/2 ≠ −N_d/2`, and
-#                           the half holds only `−N_d/2`; `us` holds `+N_d/2`, deconvolved here by
-#                           `normfactor / ∏ ĝ`.
-#
-# Exact for even and odd sizes. Written per-mode so the host loop and the device kernel share it.
-@inline function _r2c_value(I, fk_half, us, gk, ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
-    # fftfreq integer at each output index, then the mode's own index in the mirrored grid.
-    kk = ntuple(d -> (Int(I[d]) - 1 <= (ms[d] - 1) ÷ 2) ? (Int(I[d]) - 1) : (Int(I[d]) - 1 - ms[d]), D)
-    k1 = kk[1]
-    if k1 >= 0
-        return fk_half[CartesianIndex(ntuple(d -> d == 1 ? k1 + 1 : Int(I[d]), D))] * invN
-    end
-    even_nyquist = false
-    for d in 2:D
-        (iseven(ms[d]) && kk[d] == -(ms[d] ÷ 2)) && (even_nyquist = true)
-    end
-    if !even_nyquist
-        # output index of −freq(I[d])
-        return conj(fk_half[CartesianIndex(ntuple(d -> d == 1 ? -k1 + 1 :
-                                                  (Int(I[d]) == 1 ? 1 : ms[d] - Int(I[d]) + 2), D))]) * invN
-    end
-    negk = ntuple(d -> -kk[d], D)
-    ovsI = CartesianIndex(ntuple(d -> negk[d] >= 0 ? negk[d] + 1 : novs[d] + negk[d] + 1, D))
-    β = normfactor / gk[1][negk[1] + 1]
-    for d in 2:D
-        β /= gk[d][negk[d] >= 0 ? negk[d] + 1 : ms[d] + negk[d] + 1] # ĝ is even ⇒ +N/2 lands in the −N/2 slot
-    end
-    return conj(β * us[ovsI]) * invN
-end
+_coefficient_box(::Type{<:Real}, ms) = FlowTransformBindings.box_size(ms, map(_ -> true, ms))
+_coefficient_box(::Type{<:Complex}, ms) = ms
+_published_coefficients(::Type{<:Real}, plan, spec, box, B) = _half_coefficients(plan, spec, box, B)
+_published_coefficients(::Type{<:Complex}, plan, spec, box, B) = spec
 
-# Hermitian expansion over the whole output grid, dispatched on the execution backend: this host method
-# is a scalar loop, and the KernelAbstractions extension adds the device method. Both take arrays and
-# plain numbers only.
-function _r2c_expand!(::ComputationalBackends.AbstractExecutionBackend, full, fk_half, us, gk,
-                      ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
-    @inbounds for I in CartesianIndices(ms)
-        full[I] = _r2c_value(I, fk_half, us, gk, ms, novs, normfactor, invN)
-    end
-    return full
-end
-
-# `full = type1(u)/N` over the `FFTModes` spectrum, from `spec`, the analysis plan's output of its last
-# execution.
-function _to_full!(execution, full, spec, plan::FlowTransformBindings.AbstractNUFFTPlan{<:Real},
-                   ms::NTuple{D,Int}, invN) where {D}
-    spectra, normfactor, gk = FlowTransformBindings.oversampled_spectra(plan)
-    us = first(spectra)
-    novs = ntuple(d -> d == 1 ? 2 * (size(us, 1) - 1) : size(us, d), Val(D))
-    return _r2c_expand!(execution, full, spec, us, gk, ms, novs, normfactor, invN)
-end
-_to_full!(execution, full, spec, ::FlowTransformBindings.AbstractNUFFTPlan{<:Complex}, ms, invN) =
-    (full .= spec .* invN; full)
+_half_coefficients(::FlowTransformBindings.AbstractNUFFTPlan{<:Real}, spec, box, B) = spec
+_half_coefficients(::FlowTransformBindings.AbstractNUFFTPlan{<:Complex}, spec, box, B) =
+    FlowTransformBindings.packed_half_view(spec, box, FlowTransformBindings.packed_size(Real, box), B)
 
 # Copies `x` onto the device a `GPUBackend` names; the KernelAbstractions extension adds that method.
 _nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
 
 # ---------------------------------------------------------------------------
-# Coarse-graining flux at the samples
+# Coarse-graining flux at the samples, through CoarseGrainingEnergyFluxes' nonuniform-FFT filter
 # ---------------------------------------------------------------------------
 
 """
@@ -146,34 +85,35 @@ _nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
                                execution = SerialBackend())
         -> CoarseGrainingFluxResult
 
-Coarse-graining energy flux `Π_ℓ(x)` at scattered (non-uniform) Cartesian points.
+Coarse-graining energy flux `Π_ℓ(x)` at scattered Cartesian points, by CoarseGrainingEnergyFluxes'
+nonuniform-FFT filter over the points as a FlowGeometries node set. Requires
+`using CoarseGrainingEnergyFluxes`.
 
-`velocity_fields` and `scatter_coords` are `D`-tuples of length-`N` vectors (`D ≤ 3`): the velocity
-components and the point coordinates. The fields are filtered on the uniform `ms` mode grid,
-`ū = type2(Ĝ · û)`, and `Π_ℓ = -τ̄ᵢⱼ S̄ᵢⱼ` is formed at the points. `û` is the quadrature
-`(1/∏L) Σⱼ wⱼ uⱼ e^{-ik·xⱼ}` with `weights` `wⱼ`, the volume each sample stands for (`Σw = ∏L`);
-without them every sample stands for `∏L/N`, `û = type1(u)/N`, which is exact for samples on the
-uniform grid and an estimate weighted toward where the samples cluster otherwise. The domain mean is
-the same quadrature of `Π`.
+`velocity_fields` and `scatter_coords` are `D`-tuples of length-`N` vectors, `D` 2 or 3: the velocity
+components and the point coordinates. Each field is analyzed on the `ms` modes of the periodic box,
+`û = (1/∏L) Σⱼ wⱼ uⱼ e^{-ik·xⱼ}`, multiplied by the transfer function of `filter`'s
+CoarseGrainingEnergyFluxes kernel and synthesized at the points; `S̄ᵢⱼ` is the derivative of that filtered
+series and `Π_ℓ = -τ̄ᵢⱼ S̄ᵢⱼ`. `weights` `wⱼ` are the volumes the samples stand for (`Σw = ∏L`); without
+them every sample stands for `∏L/N`, which is exact for samples on the uniform grid and an estimate
+weighted toward where the samples cluster otherwise. The domain mean is the same quadrature of `Π`. An
+even count `m` in `ms` holds the modes `|n| ≤ m/2`, the two at `±m/2` at half weight.
 
 `transform` (required) names the NUFFT library:
 `FlowTransformBindings.NonuniformFFTsBackend()` (`using NonuniformFFTs`) or
 `FlowTransformBindings.FINUFFTBackend()` (`using FINUFFT`). `Ls` (required) is the periodic domain size
-per dimension. It sets the wavenumber grid `k = 2πn/L`, and hence the filter cutoff `Ĝ(|k|, ℓ)` and the
-strain derivatives `i·kⱼ`: points in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` under-span the period, so `L` is never inferred
-from them.
+per dimension. It sets the wavenumber grid `k = 2πn/L`, and hence the filter's transfer function and the
+strain: points in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` under-span the period, so `L` is never inferred from them.
 
 `tol` is the transforms' relative accuracy (`nothing`: `FlowTransformBindings.default_tolerance` of the
-coordinates' float type); `return_diagnostics = true` also returns `τ̄ᵢⱼ` and `S̄ᵢⱼ` at the points;
-`execution = ThreadedBackend()` threads each transform, for a lone call. For a
-filter-scale sweep or a time series on one point set, build an [`NUFFTCoarseGrainingWorkspace`](@ref)
-and call [`nufft_coarse_graining_flux!`](@ref).
+coordinates' float type); `return_diagnostics = true` also returns `τ̄ᵢⱼ` and `S̄ᵢⱼ` at the points, each
+`(N, D, D)`; `execution = ThreadedBackend()` threads each transform. For a filter-scale sweep or a time
+series on one point set, build an [`NUFFTCoarseGrainingWorkspace`](@ref) and call
+[`nufft_coarse_graining_flux!`](@ref).
 """
-function nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms;
-                                    transform::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
-                                    Ls::Tuple, return_diagnostics::Bool = false, kwargs...)
-    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform = transform, Ls = Ls,
-                                      return_diagnostics = return_diagnostics, kwargs...)
+function nufft_coarse_graining_flux(velocity_fields::Tuple, scatter_coords::Tuple, ℓ::Real,
+                                    filter::Types.AbstractFilter, ms::Tuple;
+                                    return_diagnostics::Bool = false, kwargs...)
+    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; return_diagnostics = return_diagnostics, kwargs...)
     try
         return nufft_coarse_graining_flux!(ws, velocity_fields, ℓ, filter, ms;
                                            return_diagnostics = return_diagnostics)
@@ -240,37 +180,26 @@ _nufft_cg_batch!(::ComputationalBackends.AbstractGPUBackend, batch, scatter_coor
 """
     NUFFTCoarseGrainingWorkspace
 
-Reusable resources for [`nufft_coarse_graining_flux!`](@ref): the NUFFT plans over the points (type-1
-analysis, type-2 synthesis of the full spectrum), the spectral-side arrays (`|k|`, per-axis `kⱼ` grids,
-filter weights `Ĝ`), and every working buffer of the flux, so a repeat call re-plans nothing and
-allocates only the small result struct, which wraps the reused `Π`.
+Reusable resources for [`nufft_coarse_graining_flux!`](@ref): the points as a FlowGeometries node set,
+CoarseGrainingEnergyFluxes' nonuniform-FFT filter plan over them (its transforms serve every scale and
+filter, its transfer function refilled per call), the flux workspace, the spectra of the velocity and its
+products, the `Π` output and, when built for them, the `(N, D, D)` stress and strain. A repeat call
+re-plans nothing; its result wraps the reused `Π`.
 
 The plans hold library resources that [`close!`](@ref FlowInvariantTransfer.close!) releases; the
-allocating entries close theirs before returning. One task at a time may use a workspace.
+allocating entries close theirs before returning. One task at a time may use a workspace. Requires
+`using CoarseGrainingEnergyFluxes`.
 """
-struct NUFFTCoarseGrainingWorkspace{P1, P2, KM, KC, K1, SD, UM, TA, SA, SH, CI, CV, RV, QW, R}
-    p1::P1              # type-1 plan; real values where the library transforms them natively
-    p2::P2              # type-2 plan of the full `FFTModes` spectrum (`p1` itself for a complex `p1`)
-    k_mag::KM           # |k| over the coefficient grid
-    k_comp_grids::KC    # per-axis kⱼ arrays, reshaped to broadcast along their own axis
-    ks_1d::K1           # per-axis wavenumber vectors
-    Ĝ::KM               # filter weights Ĝ(k) (recomputed per ℓ into this buffer)
-    û_filt::SD          # (ms…, D) filtered spectral velocity (page c = component c)
-    u_filt::UM          # (N, D) filtered velocity at the scattered points (real)
-    τ::TA               # (N, D, D) SFS stress, or `nothing` when the workspace excludes diagnostics
-    S̄::TA               # (N, D, D) strain rate, or `nothing`
-    Π::RV               # (N,) flux (the result wraps this)
-    spec::SA            # (ms…) full spectrum: analysis result, filtered product, gradient
-    spec_half::SH       # `p1`'s output; `spec` itself for a complex `p1`
-    scat_in::CI         # (N,) `p1`'s input
-    scat_out::CV        # (N,) `p2`'s output
-    prod_r::RV          # (N,) real product / ∂uᵢ∂xⱼ scratch
-    grad_j::RV          # (N,) real ∂uⱼ∂xᵢ scratch
-    tau_ij::RV          # (N,) stress component being contracted
-    s_ij::RV            # (N,) strain component being contracted
-    npoints::Int        # number of scattered points
-    qw::QW              # (N,) quadrature weights, or `nothing` for the uniform `∏L/N`
-    scale::R            # factor of the type-1 sum: 1/N, or 1/∏L with `qw`
+struct NUFFTCoarseGrainingWorkspace{G, FP, W, AN, P, D, A, ST, M}
+    grid::G               # the points as a FlowGeometries `UnstructuredGrid`
+    filter_plan::FP       # CGEF's nonuniform-FFT filter plan over the points
+    cgef_workspace::W     # CGEF.Diagnostics.ΠWorkspace
+    analysis::AN          # spectra of the velocity and its products, refilled per call
+    Π_out::P              # (N,) flux (the result wraps this)
+    diagnostics::D        # nothing, or the (N, D, D) stress and strain
+    weights::A            # per point: its volume over the total
+    stage::ST             # one staging buffer per velocity component, each `nothing` if unused
+    modes::M              # the mode counts `ms`
 end
 Base.show(io::IO, ::NUFFTCoarseGrainingWorkspace) = print(io, "NUFFTCoarseGrainingWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::NUFFTCoarseGrainingWorkspace) = show(io, w)
@@ -281,148 +210,29 @@ Base.show(io::IO, ::MIME"text/plain", w::NUFFTCoarseGrainingWorkspace) = show(io
 
 Build the reusable coarse-graining workspace over `scatter_coords` for the NUFFT library `transform`
 names, with the periodic domain size `Ls` and the samples' quadrature `weights`; see
-[`nufft_coarse_graining_flux`](@ref). `execution = ThreadedBackend()` threads each transform.
+[`nufft_coarse_graining_flux`](@ref). `execution = ThreadedBackend()` threads each transform. Requires
+`using CoarseGrainingEnergyFluxes`.
 """
-function NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple;
-                                      transform::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
-                                      Ls::Tuple, tol::Union{Nothing, Real} = nothing,
-                                      weights::Union{Nothing, AbstractVector} = nothing,
-                                      return_diagnostics::Bool = false,
-                                      execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
-    lib = _nufft_library(transform)
-    N  = _scattered_npoints(scatter_coords, ms, Ls)
-    D  = length(scatter_coords)
-    FT = float(eltype(scatter_coords[1]))
-    CT = Complex{FT}
-    qw, scale = _quadrature(weights, N, Ls, FT)
+NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; kwargs...) =
+    _nufft_cg_workspace(scatter_coords, ms; kwargs...)
 
-    ks_1d = Utils.wavenumber_grid(ms, ntuple(d -> FT(Ls[d]), D))   # FFTModes order
-    k_mag = ShellBinning.shell_coordinate(Types.IsotropicShells(), ks_1d)
-    k_comp_grids = FlowTransformBindings.wavenumber_arrays(zeros(FT, 0), FT, ks_1d)
+_nufft_cg_workspace(args...; kwargs...) = throw(ArgumentError(
+    "the scattered coarse-graining flux requires CoarseGrainingEnergyFluxes.jl. Run " *
+    "`using CoarseGrainingEnergyFluxes` to load the extension."))
 
-    kw = _plan_keywords(scatter_coords, Ls, FT, tol, execution)
-    p1 = _analysis_plan(lib, FT, scatter_coords, ms, kw)
-    real_analysis = FlowTransformBindings.has_real_transform(lib)
-    p2 = if real_analysis
-        try
-            FlowTransformBindings.plan_nufft(lib, CT, scatter_coords, ms;
-                                             order = FlowTransformBindings.FFTModes(), kw...)
-        catch
-            FlowTransformBindings.close!(p1)
-            rethrow()
-        end
-    else
-        p1
-    end
-
-    spec = zeros(CT, ms...)
-    return NUFFTCoarseGrainingWorkspace(
-        p1, p2, k_mag, k_comp_grids, ks_1d, zeros(FT, ms...), zeros(CT, ms..., D), zeros(FT, N, D),
-        return_diagnostics ? zeros(FT, N, D, D) : nothing, return_diagnostics ? zeros(FT, N, D, D) : nothing,
-        zeros(FT, N), spec, real_analysis ? FlowTransformBindings.allocate_modes(p1) : spec,
-        FlowTransformBindings.allocate_values(p1), zeros(CT, N),
-        zeros(FT, N), zeros(FT, N), zeros(FT, N), zeros(FT, N), N, qw, scale)
-end
-
-"""
-    close!(ws) -> ws
-
-Release the NUFFT plans an [`NUFFTCoarseGrainingWorkspace`](@ref) or [`NUFFTToSpectralWorkspace`](@ref)
-holds. Idempotent; a closed workspace refuses to execute.
-"""
-close!(ws::NUFFTCoarseGrainingWorkspace) =
-    (FlowTransformBindings.close!(ws.p1); FlowTransformBindings.close!(ws.p2); ws)
-
-# `ws.spec = scale · type1(w ⊙ field)` over the full spectrum.
-function _analyze!(ws::NUFFTCoarseGrainingWorkspace, field, ms)
-    _weighted!(ws.scat_in, ws.qw, field)
-    FlowTransformBindings.nufft_type1!(ws.spec_half, ws.p1, ws.scat_in)
-    return _to_full!(ComputationalBackends.SerialBackend(), ws.spec, ws.spec_half, ws.p1, ms, ws.scale)
-end
+# The flux of one call on a workspace: a method of the CoarseGrainingEnergyFluxes extension.
+function _nufft_cg_flux! end
 
 """
     nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields, ℓ, filter, ms;
                                 return_diagnostics = false) -> CoarseGrainingFluxResult
 
-In-place scattered coarse-graining flux reusing `ws`: every transform runs through its plans and every
-intermediate is a workspace buffer, so a repeat call allocates only the small result struct. That
-result wraps `ws.Π`, and a later call overwrites it.
+In-place scattered coarse-graining flux reusing `ws`: every transform runs through its plan and every
+intermediate is a workspace buffer. The result wraps `ws.Π_out`, and a later call overwrites it.
 """
-function nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields::Tuple, ℓ::Real,
-                                     filter::Types.AbstractFilter, ms::Tuple; return_diagnostics::Bool = false)
-    D  = length(velocity_fields)
-    nd = length(ws.ks_1d)
-    D == nd || throw(ArgumentError("velocity components ($D) ≠ spatial dimensions ($nd)"))
-    size(ws.spec) == ms || throw(ArgumentError("workspace spectral grid $(size(ws.spec)) ≠ ms $ms"))
-    N  = ws.npoints
-    FT = eltype(ws.Π)
-    length(velocity_fields[1]) == N || throw(DimensionMismatch(
-        "velocity field length $(length(velocity_fields[1])) ≠ workspace points $N"))
-    return_diagnostics && ws.τ === nothing && throw(ArgumentError(
-        "this NUFFTCoarseGrainingWorkspace was built with return_diagnostics = false; rebuild it " *
-        "with return_diagnostics = true to get τ̄ᵢⱼ and S̄ᵢⱼ."))
-
-    Ĝ = ws.Ĝ
-    @inbounds for I in CartesianIndices(ws.k_mag)
-        Ĝ[I] = FT(Filters.filter_response(filter, ws.k_mag[I], FT(ℓ)))
-    end
-
-    # Per component: û_filt = Ĝ·û, then the filtered velocity at the points.
-    for c in 1:D
-        _analyze!(ws, velocity_fields[c], ms)
-        ûfc = _page(ws.û_filt, c)
-        @. ûfc = Ĝ * ws.spec
-        FlowTransformBindings.nufft_type2!(ws.scat_out, ws.p2, ûfc)
-        @views @. ws.u_filt[:, c] = real(ws.scat_out)
-    end
-
-    # Stress τ̄ᵢⱼ, strain S̄ᵢⱼ, and the flux Π = -Σ factor·τ·S̄, streamed pair by pair.
-    fill!(ws.Π, 0)
-    τij = ws.tau_ij; S̄ij = ws.s_ij
-    @inbounds for i in 1:D, j in i:D
-        @. ws.prod_r = velocity_fields[i] * velocity_fields[j]
-        _analyze!(ws, ws.prod_r, ms)
-        @. ws.spec = Ĝ * ws.spec
-        FlowTransformBindings.nufft_type2!(ws.scat_out, ws.p2, ws.spec)
-        @views @. τij = real(ws.scat_out) - ws.u_filt[:, i] * ws.u_filt[:, j]
-
-        # ∂ūᵢ/∂xⱼ = type2(i·kⱼ·û_filt_i). The page views are hoisted out of `@.`, which broadcasts
-        # every call inside it.
-        ûfi = _page(ws.û_filt, i)
-        kj = ws.k_comp_grids[j]
-        @. ws.spec = im * kj * ûfi
-        FlowTransformBindings.nufft_type2!(ws.scat_out, ws.p2, ws.spec)
-        @. ws.prod_r = real(ws.scat_out)
-        if i == j
-            S̄ij .= ws.prod_r
-        else
-            ûfj = _page(ws.û_filt, j)
-            ki = ws.k_comp_grids[i]
-            @. ws.spec = im * ki * ûfj
-            FlowTransformBindings.nufft_type2!(ws.scat_out, ws.p2, ws.spec)
-            @. ws.grad_j = real(ws.scat_out)
-            @. S̄ij = FT(0.5) * (ws.prod_r + ws.grad_j)
-        end
-
-        factor = i == j ? FT(1) : FT(2)
-        @. ws.Π -= factor * τij * S̄ij
-        if ws.τ !== nothing
-            @views ws.τ[:, i, j] .= τij
-            @views ws.S̄[:, i, j] .= S̄ij
-            if i != j
-                @views ws.τ[:, j, i] .= τij
-                @views ws.S̄[:, j, i] .= S̄ij
-            end
-        end
-    end
-    mean_Π = FT(_sample_mean(ws.Π, ws.qw))
-
-    if return_diagnostics
-        return Types.CoarseGrainingFluxResultWithDiagnostics(FT(ℓ), ws.Π, mean_Π, ws.τ, ws.S̄)
-    else
-        return Types.CoarseGrainingFluxResult(FT(ℓ), ws.Π, mean_Π)
-    end
-end
+nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields::Tuple, ℓ::Real,
+                            filter::Types.AbstractFilter, ms::Tuple; return_diagnostics::Bool = false) =
+    _nufft_cg_flux!(ws, velocity_fields, ℓ, filter, ms, return_diagnostics)
 
 # ---------------------------------------------------------------------------
 # Scattered → uniform Fourier coefficients
@@ -440,51 +250,68 @@ The plan holds library resources that [`close!`](@ref FlowInvariantTransfer.clos
 allocating [`to_spectral`](@ref) closes its own before returning. One task at a time may use a
 workspace.
 """
-struct NUFFTToSpectralWorkspace{P, KS, UH, CV, SP, QW, R<:Real, EX}
+struct NUFFTToSpectralWorkspace{P, KS, UH, CV, SP, QW, R<:Real}
     plan::P              # type-1 plan over the points
     ks::KS               # per-axis uniform wavenumber vectors (returned with û)
     û::UH                # (ms…, D) coefficient buffer (the result aliases this)
-    scat::CV             # (N,) type-1 input
+    scat::CV             # (N, D) type-1 input
     spec::SP             # type-1 output
     npoints::Int         # number of scattered points
     qw::QW               # (N,) quadrature weights on the points' device, or `nothing` for `∏L/N`
     scale::R             # factor of the type-1 sum: 1/N, or 1/∏L with `qw`
-    execution::EX        # backend the buffers live on; selects the host or device Hermitian expansion
 end
 Base.show(io::IO, ::NUFFTToSpectralWorkspace) = print(io, "NUFFTToSpectralWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::NUFFTToSpectralWorkspace) = show(io, w)
 
 """
-    NUFFTToSpectralWorkspace(scatter_coords, ms; transform, Ls, tol = nothing, weights = nothing,
-                             ncomponents = D, execution = SerialBackend())
+    NUFFTToSpectralWorkspace(T, scatter_coords, ms; transform, Ls, tol = nothing, weights = nothing,
+                             ncomponents = D, execution = AutoBackend())
 
 Build the reusable scattered → uniform workspace over `scatter_coords` for the NUFFT library
 `transform` names (`FlowTransformBindings.NonuniformFFTsBackend()` or
 `FlowTransformBindings.FINUFFTBackend()`), with the periodic domain size `Ls` (`k = 2πn/L`; the
 samples do not determine it) and the samples' quadrature `weights` (see [`to_spectral`](@ref)).
 `execution = GPUBackend(dev)` builds the plan and buffers on `dev`; `ThreadedBackend()` threads each
-transform.
+transform. `T` is the field element type; its default is the coordinates' floating-point type.
+Real fields use FlowTransformBindings' packed half of an odd coefficient box, with every even requested mode count
+widened by one. Complex fields use the requested full box.
 """
-function NUFFTToSpectralWorkspace(scatter_coords::Tuple, ms::Tuple;
+function NUFFTToSpectralWorkspace(::Type{FE}, scatter_coords::Tuple, ms::Tuple;
                                   transform::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
                                   Ls::Tuple, ncomponents::Int = length(scatter_coords),
                                   tol::Union{Nothing, Real} = nothing,
                                   weights::Union{Nothing, AbstractVector} = nothing,
-                                  execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+                                  execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend()) where {FE<:Number}
     lib = _nufft_library(transform)
     N = _scattered_npoints(scatter_coords, ms, Ls)
     ncomponents >= 1 || throw(ArgumentError("ncomponents must be ≥ 1"))
-    FT = float(real(eltype(scatter_coords[1])))
-    ks = Utils.wavenumber_grid(ms, ntuple(d -> FT(Ls[d]), length(ms)))   # FFTModes order
-    nodes = map(x -> _nufft_to_device(execution, x), scatter_coords)
+    FT = real(FE)
+    box = _coefficient_box(FE, ms)
+    ks = Utils.wavenumber_grid(FE, box, map(FT, Ls))
+    exec = Types.resolve_execution(execution, first(scatter_coords))
+    nodes = map(x -> _nufft_to_device(exec, x), scatter_coords)
     qw, scale = _quadrature(weights, N, Ls, FT)
-    qwd = qw === nothing ? nothing : _nufft_to_device(execution, qw)
-    plan = _analysis_plan(lib, FT, nodes, ms, _plan_keywords(scatter_coords, Ls, FT, tol, execution))
-    û = similar(first(nodes), Complex{FT}, (ms..., ncomponents))
-    return NUFFTToSpectralWorkspace(plan, ks, û, FlowTransformBindings.allocate_values(plan),
-                                    FlowTransformBindings.allocate_modes(plan), N, qwd, scale, execution)
+    qwd = qw === nothing ? nothing : _nufft_to_device(exec, qw)
+    kw = merge(_plan_keywords(scatter_coords, Ls, FT, tol, exec), (; ntrans = ncomponents))
+    plan = _analysis_plan(lib, FE, nodes, box, kw)
+    return _spectral_workspace(plan, FE, ks, box, ncomponents, N, qwd, scale)
 end
 
+function _spectral_workspace(plan, ::Type{FE}, ks, box, ncomponents, N, qw, scale) where {FE}
+    spec = FlowTransformBindings.allocate_modes(plan)
+    û = _published_coefficients(FE, plan, spec, box, ncomponents)
+    return NUFFTToSpectralWorkspace(plan, ks, û, FlowTransformBindings.allocate_values(plan),
+                                    spec, N, qw, scale)
+end
+
+NUFFTToSpectralWorkspace(scatter_coords::Tuple, ms::Tuple; kwargs...) =
+    NUFFTToSpectralWorkspace(float(eltype(first(scatter_coords))), scatter_coords, ms; kwargs...)
+
+"""
+    close!(ws::NUFFTToSpectralWorkspace) -> ws
+
+Release the workspace's NUFFT resources.
+"""
 close!(ws::NUFFTToSpectralWorkspace) = (FlowTransformBindings.close!(ws.plan); ws)
 
 """
@@ -498,25 +325,25 @@ function to_spectral!(ws::NUFFTToSpectralWorkspace, velocity_fields::Tuple)
     D = size(ws.û, ndims(ws.û))
     length(velocity_fields) == D || throw(DimensionMismatch(
         "to_spectral! got $(length(velocity_fields)) fields; workspace was built for $D components"))
-    ms = Base.front(size(ws.û))
     for c in 1:D
         length(velocity_fields[c]) == ws.npoints ||
             throw(DimensionMismatch("field length ≠ workspace points $(ws.npoints)"))
-        _weighted!(ws.scat, ws.qw, velocity_fields[c])
-        FlowTransformBindings.nufft_type1!(ws.spec, ws.plan, ws.scat)
-        _to_full!(ws.execution, _page(ws.û, c), ws.spec, ws.plan, ms, ws.scale)
+        _weighted!(view(ws.scat, :, c), ws.qw, velocity_fields[c])
     end
+    FlowTransformBindings.nufft_type1!(ws.spec, ws.plan, ws.scat)
+    ws.û .*= ws.scale
     return (ws.û, ws.ks)
 end
 
 """
     to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple; transform, Ls, tol = nothing,
-                weights = nothing, execution = SerialBackend()) -> (velocity_hat, ks)
+                weights = nothing, execution = AutoBackend()) -> (velocity_hat, ks)
 
 Scattered-Cartesian physical-space entry: reconstruct the Fourier coefficients `velocity_hat` on a
 uniform `ms = (m₁,…,m_D)` grid from velocity components sampled at **scattered** (non-uniform) points,
 through a NUFFT type-1 transform, and return them with the matching uniform wavenumber grid `ks`, the
-input of every Cartesian flux diagnostic.
+input of every Cartesian flux diagnostic. Real fields use the packed half of FlowTransformBindings' odd coefficient
+box: an even requested count is widened by one on that axis. Complex fields use the full `ms` box.
 
 `scatter_coords = (x, y[, z])` hold one coordinate per sample on each axis (each vector of length `N`,
 the number of samples); `ms` is the target uniform mode count per dimension. `transform` (required)
@@ -542,13 +369,15 @@ function to_spectral(velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
                      tol::Union{Nothing, Real} = nothing,
                      weights::Union{Nothing, AbstractVector} = nothing,
                      Ls::Tuple,
-                     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+                     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend())
     transform isa SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend || throw(ArgumentError(
         "the 3-argument to_spectral(fields, scatter_coords, ms; …) is the scattered-Cartesian NUFFT " *
         "entry: pass transform = FlowTransformBindings.NonuniformFFTsBackend() or " *
         "FlowTransformBindings.FINUFFTBackend(). For uniform-grid data use " *
         "to_spectral(fields, coords_vecs; transform = SpectralBackends.FFTSpectralBackend())."))
-    ws = NUFFTToSpectralWorkspace(scatter_coords, ms; transform = transform, weights = weights,
+    FE = float(promote_type(map(eltype, velocity_fields)...))
+    execution = Types.resolve_execution(execution, first(velocity_fields))
+    ws = NUFFTToSpectralWorkspace(FE, scatter_coords, ms; transform = transform, weights = weights,
                                   ncomponents = length(velocity_fields), tol = tol, Ls = Ls, execution = execution)
     try
         return to_spectral!(ws, velocity_fields)

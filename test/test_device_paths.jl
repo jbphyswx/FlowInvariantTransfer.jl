@@ -17,8 +17,6 @@ using KernelAbstractions: KernelAbstractions as KA
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
 
-KA.synchronize(::JLArrays.JLBackend) = nothing
-
 # An FFT for JLArrays, which has none: a plan holds FFTW's plan of a host copy, and an execution moves
 # its arrays across in bulk.
 struct _HostBounceFFT{P}
@@ -34,28 +32,6 @@ const _SER_D = ComputationalBackends.SerialBackend()
 
 Test.@testset "device paths (JLArrays, allowscalar(false))" begin
     JLArrays.allowscalar(false)
-
-    Test.@testset "real-NUFFT Hermitian expansion — $(ms)" for ms in ((8, 6), (9, 6), (8, 7), (6, 4, 4), (5, 6, 7))
-        # The expansion is a pure function of arrays and numbers, so the host loop and the device
-        # kernel can be compared directly, with no NUFFT plan in the way.
-        D = length(ms); CT = ComplexF64
-        Random.seed!(7 + D)
-        novs = ntuple(d -> 2 * ms[d], D)
-        fk = randn(CT, ms[1] ÷ 2 + 1, ms[2:end]...)
-        us = randn(CT, novs[1] ÷ 2 + 1, novs[2:end]...)
-        gk = ntuple(d -> rand(novs[d]) .+ 0.5, D)
-        nf = prod(ntuple(d -> 2π / novs[d], D)); invN = 0.125
-
-        host = zeros(CT, ms...)
-        FIT._r2c_expand!(_SER_D, host, fk, us, gk, ms, novs, nf, invN)
-        cpu = zeros(CT, ms...)
-        FIT._r2c_expand!(_DEV_CPU, cpu, fk, us, gk, ms, novs, nf, invN)
-        Test.@test cpu == host
-        dev = JLArrays.JLArray(zeros(CT, ms...))
-        FIT._r2c_expand!(_DEV_JL, dev, JLArrays.JLArray(fk), JLArrays.JLArray(us),
-                         map(JLArrays.JLArray, gk), ms, novs, nf, invN)
-        Test.@test Array(dev) == host
-    end
 
     Test.@testset "host inputs staged into device memory" begin
         Random.seed!(13)

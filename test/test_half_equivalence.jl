@@ -16,8 +16,18 @@ using JLArrays: JLArrays
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
+using FlowTransformBindings: FlowTransformBindings as FTB
+
+KA.synchronize(::JLArrays.JLBackend) = nothing
 
 const FFTB_HE = SpectralBackends.FFTSpectralBackend()
+
+function _compressible_bins(proto, indices, nsh, ks)
+    T = real(eltype(proto))
+    fold = T[FTB.fold_weight(first(ks), i) for i in eachindex(first(ks))]
+    return (; sidx = copyto!(similar(proto, Int, size(indices)), indices), centers = Base.OneTo(nsh),
+              shell_sums = similar(proto, T, nsh), fold = copyto!(similar(proto, T, length(fold)), fold))
+end
 
 # A real physical field and its two spectral representations of the same data.
 function _he_field(ns, D; seed = 31)
@@ -25,7 +35,7 @@ function _he_field(ns, D; seed = 31)
     nd = length(ns)
     u = ntuple(_ -> randn(ns...), D)
     ks_full = FIT.Utils.wavenumber_grid(ns, ntuple(_ -> 2π, nd))
-    ks_half = FIT.Utils.wavenumber_grid(ns, ntuple(_ -> 2π, nd); real = true)
+    ks_half = FIT.Utils.wavenumber_grid(Float64, ns, ntuple(_ -> 2π, nd))
     Np = prod(ns)
     û_full = cat((FFTW.fft(u[c]) ./ Np for c in 1:D)...; dims = nd + 1)
     û_half = cat((FFTW.rfft(u[c]) ./ Np for c in 1:D)...; dims = nd + 1)
@@ -168,16 +178,18 @@ Test.@testset "half layout on GPUBackend(KA.CPU()) == serial full layout" begin
     Test.@testset "compressible device helpers $(ns)" for ns in ((16, 16), (15, 14))
         _, _, _, ûh, ksh = _he_field(ns, 2)
         ms = size(ûh)[1:2]
-        dh = similar(ûh); FIT.Compressible._copy_trunc!(dh, ûh, ksh, ms, true)
-        dd = JLArrays.JLArray(similar(ûh)); FIT.Compressible._copy_trunc!(dd, JLArrays.JLArray(ûh), ksh, ms, true)
+        dh = similar(ûh); FIT.Compressible._copy_trunc!(dh, ûh, ksh, ms, true, nothing)
+        dd = JLArrays.JLArray(similar(ûh))
+        keep = FIT.Compressible._keep_table(dd, ksh, FIT.Types.OrszagTwoThirds())
+        FIT.Compressible._copy_trunc!(dd, JLArrays.JLArray(ûh), ksh, ms, true, keep)
         Test.@test Array(dd) == dh
         td = real.(ûh[:, :, 1] .* conj.(ûh[:, :, 2]))
         k = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ksh)
         edges = FIT.ShellBinning.shell_edges(binning, maximum(k))
         sidx = FIT.ShellBinning.assign_shells(k, edges)
         Nsh = length(edges) - 1
-        Th = FIT.Compressible._bin(td, sidx, Nsh, Float64, ksh, ms)
-        Td = FIT.Compressible._bin(JLArrays.JLArray(td), sidx, Nsh, Float64, ksh, ms)
+        Th = FIT.Compressible._bin(td, _compressible_bins(ûh, sidx, Nsh, ksh), Float64, ksh)
+        Td = FIT.Compressible._bin(JLArrays.JLArray(td), _compressible_bins(dd, sidx, Nsh, ksh), Float64, ksh)
         _he_same(Td, Th; rtol = 1e-13)
     end
 end

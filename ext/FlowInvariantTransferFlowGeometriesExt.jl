@@ -13,7 +13,7 @@ using ComputationalBackends: ComputationalBackends
 # in the form the chosen path takes.
 #
 # `FSH.sph_points(N)` is `θᵢ = π(i−½)/N`, `λⱼ = 2π(j−1)/(2N−1)`. `FlowGeometries` builds exactly
-# those nodes for `AbstractClenshawCurtisSampling` at `nlat = N`, where `nlon_for_nlat` is `2N−1`.
+# those nodes for `AbstractFejer1Sampling` at `nlat = N`, where `nlon_for_nlat` is `2N−1`.
 # That sampling at that shape is therefore the exact-transform case; every other sphere sampling —
 # Gauss–Legendre, Driscoll–Healy, lat–lon,
 # reduced Gaussian, HEALPix, cubed-sphere, icosahedral, Yin–Yang, scattered — goes to the scattered
@@ -23,10 +23,15 @@ using ComputationalBackends: ComputationalBackends
 # `true` when this grid's nodes are the equiangular array the exact spherical transform is defined on.
 _is_fsh_grid(grid) = false
 function _is_fsh_grid(grid::FG.Grids.StructuredGrid{T, G, 2}) where {T, G <: FG.Geometry.AbstractSphericalGeometry{T}}
-    FG.Grids.sampling(grid) isa FG.SphericalSampling.AbstractClenshawCurtisSampling || return false
+    FG.Grids.sampling(grid) isa FG.SphericalSampling.AbstractFejer1Sampling || return false
     nlon, nlat = size(grid)
     return nlon == 2 * nlat - 1
 end
+
+# The two analyses a grid's nodes admit: the exact transform on its equiangular array, or the scattered
+# path on its node coordinates.
+struct _FSHRoute end
+struct _NodeRoute end
 
 # A spherical grid's directions are `(λ, φ)`, so a field on it is `(nlon, nlat)`; the exact transform
 # indexes `(nlat, nlon)`; the two node sets agree node for node at `nlon = 2·nlat − 1`.
@@ -49,7 +54,7 @@ the grid's measure, which on a tensor-product sampling is its quadrature, scaled
 Analysis at degree `lmax` integrates an integrand of degree `2·lmax` (`f·conj(Y_lm)`, both of degree
 `lmax`), so the weights are returned only for a tensor-product sampling exact there in both
 directions: a latitude rule with `SphericalSampling.admits_exact_bandlimited_quadrature` and `lmax`
-inside the sampling's `bandlimit` (Gauss–Legendre, Driscoll–Healy; Clenshaw–Curtis integrates the
+inside the sampling's `bandlimit` (Gauss–Legendre, Driscoll–Healy; Fejér's first rule integrates the
 products only for `2·lmax ≤ nlat − 1`), and `nlon ≥ 2·lmax + 1` equispaced longitudes, which integrate
 `e^{imλ}` exactly for `|m| ≤ 2·lmax`.
 
@@ -72,12 +77,12 @@ _sphere_measure(grid, ::Type{FT}) where {FT} = (m = FG.Grids.measure(grid); FT.(
 _fit_weights(grid, ::Nothing, ::Type{FT}) where {FT} = _sphere_measure(grid, FT)
 _fit_weights(_, ::AbstractVector, ::Type) = nothing
 
-# Clenshaw–Curtis's own `bandlimit` is what its grid represents; its weights integrate the degree-2·lmax
+# Fejér's first rule's own `bandlimit` is what its grid represents; its weights integrate the degree-2·lmax
 # products analysis forms only for `2·lmax ≤ nlat − 1`.
 function _quadrature_exact(s, nlat::Integer, lmax::Integer)
     FG.SphericalSampling.admits_exact_bandlimited_quadrature(s) &&
         return lmax <= FG.SphericalSampling.bandlimit(s, nlat)
-    s isa FG.SphericalSampling.AbstractClenshawCurtisSampling && return 2 * lmax <= nlat - 1
+    s isa FG.SphericalSampling.AbstractFejer1Sampling && return 2 * lmax <= nlat - 1
     return false
 end
 
@@ -97,40 +102,172 @@ _require_lmax(grid, lmax) = lmax === nothing && throw(ArgumentError(
 # ---------------------------------------------------------------------------
 
 # The grid's mask as one `Bool` per node, in the order `_sphere_points` lists the nodes, or `nothing`
-# when every node is active.
+# on a grid whose mask is `AllActive`.
 _node_mask(grid) = _node_mask(FG.Grids.mask(grid))
 _node_mask(::FG.Grids.AllActive) = nothing
-_node_mask(m::AbstractArray{Bool}) = all(m) ? nothing : vec(m)
+_node_mask(m::AbstractArray{Bool}) = vec(m)
 
-# The keywords of the fit `Exclude` runs, which are the scattered transfer's own.
-const _FIT_KEYWORDS = (:tol, :rtol, :maxiter, :nufft, :execution)
+# The degree the fit `Exclude` runs at: the exact transform's grid fixes it at `nlat − 1`.
+_fit_degree(::_FSHRoute, grid, _) = size(grid, 2) - 1
+_fit_degree(::_NodeRoute, _, lmax) = lmax
 
-# `fields` (the vorticity at spin `s = 0`, or the velocity `(u_θ, u_φ)` read as `u_θ + i u_φ` at `s = 1`)
-# in their own shapes, the outcome of the fit `Exclude` runs (`nothing` where none runs), and the
-# keywords the route takes. The exact transform takes no fit keywords; where a fit runs, they go to it.
-function _masked_input(fields::Tuple, grid, s::Integer, fsh::Bool, lmax, inactive::FIT.Types.AbstractInactiveCells,
-                       kwargs)
-    kw = values(kwargs)
-    active = _node_mask(grid)
-    fits = inactive isa FIT.Types.Exclude && active !== nothing
-    route = (fsh && fits) ? Base.structdiff(kw, NamedTuple{(:tol, :rtol, :maxiter, :nufft)}) : kw
-    fitkw = NamedTuple{filter(in(_FIT_KEYWORDS), keys(kw))}(kw)
-    filled, fit = _masked_fields(active, inactive, fields, grid, s, fsh ? size(grid, 2) - 1 : lmax, fitkw)
-    return filled, fit, route
+_spin(::Tuple{Any}) = 0
+_spin(::Tuple{Any,Any}) = 1
+_fit_type(::Tuple{Any}, ::Type{T}) where {T} = T
+_fit_type(::Tuple{Any,Any}, ::Type{T}) where {T} = Complex{T}
+
+_active_workspace(::FIT.Types.AbstractInactiveCells, ::Nothing, fields, coords, lmax; kwargs...) = nothing
+_active_workspace(::FIT.Types.ZeroFill, active::AbstractVector, fields, coords, lmax; kwargs...) = nothing
+function _active_workspace(::FIT.Types.Exclude, active::AbstractVector, fields, coords, lmax; kwargs...)
+    T = float(real(eltype(first(fields))))
+    return FIT.Spherical.ActiveSphericalFit(_fit_type(fields, T), _spin(fields), coords, findall(active), lmax;
+                                            kwargs...)
 end
 
-_masked_fields(::Nothing, ::FIT.Types.AbstractInactiveCells, fields, grid, s, lmax, fitkw) = (fields, nothing)
+_transfer_workspace(::Tuple{Any}, ::_FSHRoute, T, coords, lmax; kwargs...) =
+    FIT.Spherical.SphericalTransferWorkspace(T, lmax; kwargs...)
+_transfer_workspace(::Tuple{Any,Any}, ::_FSHRoute, T, coords, lmax; kwargs...) =
+    FIT.Spherical.DivergentSphericalTransferWorkspace(T, lmax; kwargs...)
+_transfer_workspace(::Tuple{Any}, ::_NodeRoute, T, coords, lmax; kwargs...) =
+    FIT.Spherical.ScatteredSphericalTransferWorkspace(T, coords, lmax; kwargs...)
+_transfer_workspace(::Tuple{Any,Any}, ::_NodeRoute, T, coords, lmax; kwargs...) =
+    FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(T, coords, lmax; kwargs...)
 
-_masked_fields(active::AbstractVector{Bool}, ::FIT.Types.ZeroFill, fields, grid, s, lmax, fitkw) =
-    (map(f -> reshape(ifelse.(active, vec(f), zero(eltype(f))), size(f)), fields), nothing)
+function _build_transfer(fields, route::_FSHRoute, T, coords, grid, lmax; tol, rtol, maxiter, nufft,
+                         kwargs...)
+    return _transfer_workspace(fields, route, T, coords, lmax; kwargs...)
+end
+function _build_transfer(fields, route::_NodeRoute, T, coords, grid, lmax;
+                          radius, dealias, tol, rtol, maxiter, nufft, execution)
+    qw = _sphere_quadrature(grid, lmax, T)
+    return _transfer_workspace(fields, route, T, coords, lmax; quadrature_weights = qw,
+        weights = _fit_weights(grid, qw, T), radius, dealias, tol, rtol, maxiter, nufft, execution)
+end
 
-function _masked_fields(active::AbstractVector{Bool}, ::FIT.Types.Exclude, fields, grid, s, lmax, fitkw)
-    FT = float(real(eltype(fields[1])))
-    values = s == 0 ? vec(fields[1]) : complex.(vec(fields[1]), vec(fields[2]))
-    field, fit = FIT.Spherical.active_fit(values, s, _sphere_points(grid, FT), findall(active), lmax; fitkw...)
-    sz = size(fields[1])
-    filled = s == 0 ? (reshape(real.(field), sz),) : (reshape(real.(field), sz), reshape(imag.(field), sz))
-    return filled, fit
+_work_fields(::_NodeRoute, fields, grid) = map(vec, fields)
+_work_fields(::_FSHRoute, fields, grid) = map(f -> similar(f, reverse(size(grid))), fields)
+
+function _grid_workspace(fields, grid, lmax, inactive;
+                          radius::Real = 1.0, dealias::Bool = true, tol::Real = 1e-10,
+                          rtol::Union{Nothing,Real} = nothing, maxiter::Integer = 4000,
+                          nufft::FIT.SpectralBackends.AbstractSpectralBackend = FIT.SpectralBackends.AutoSpectralBackend(),
+                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+                          transform = nothing)
+    _sphere_grid_check(grid)
+    route = _is_fsh_grid(grid) ? _FSHRoute() : _NodeRoute()
+    route isa _NodeRoute && _require_lmax(grid, lmax)
+    path = route isa _FSHRoute ? :regular : :scattered
+    exec = FIT.Types.resolve_execution(execution, first(fields))
+    FIT.Spherical._validate_spherical_backends(transform, exec, path)
+    degree = _fit_degree(route, grid, lmax)
+    T = float(real(eltype(first(fields))))
+    coords = _sphere_points(grid, T)
+    active = _node_mask(grid)
+    fitkw = (; tol, rtol, maxiter, nufft, execution = exec)
+    fit = _active_workspace(inactive, active, fields, coords, degree; fitkw...)
+    try
+        transfer = _build_transfer(fields, route, T, coords, grid, degree;
+                                    radius, dealias, fitkw...)
+        try
+            staged = map(fields) do field
+                length(field) == length(grid) || throw(DimensionMismatch("field and grid sizes differ"))
+                proto = FIT.Types._to_execution(exec, similar(field, T, 0))
+                similar(proto, T, size(grid))
+            end
+            mask = active === nothing ? nothing : copyto!(similar(first(staged), Bool, length(active)), active)
+            return FIT.Spherical.SphericalGridWorkspace(transfer, staged, _work_fields(route, staged, grid),
+                                                         mask, fit, route)
+        catch
+            _close_transfer(route, transfer)
+            rethrow()
+        end
+    catch
+        fit === nothing || FIT.close!(fit)
+        rethrow()
+    end
+end
+
+function FIT.Spherical.SphericalTransferWorkspace(field::AbstractArray, grid::FG.Grids.AbstractGrid;
+                                                   lmax = nothing, inactive::FIT.Types.AbstractInactiveCells = FIT.Types.ZeroFill(),
+                                                   kwargs...)
+    return _grid_workspace((field,), grid, lmax, inactive; kwargs...)
+end
+
+function FIT.Spherical.DivergentSphericalTransferWorkspace(fields::Tuple, grid::FG.Grids.AbstractGrid;
+                                                            lmax = nothing, inactive::FIT.Types.AbstractInactiveCells = FIT.Types.ZeroFill(),
+                                                            kwargs...)
+    return _grid_workspace(fields, grid, lmax, inactive; kwargs...)
+end
+
+_mask_field!(field, ::Nothing) = field
+function _mask_field!(field, mask::AbstractVector)
+    values = vec(field)
+    @. values = ifelse(mask, values, zero(eltype(values)))
+    return field
+end
+
+function _fit_input!(out, fields::Tuple{Any})
+    copyto!(out, vec(fields[1]))
+    return out
+end
+function _fit_input!(out, fields::Tuple{Any,Any})
+    a, b = map(vec, fields)
+    @. out = complex(a, b)
+    return out
+end
+
+function _fit_fields!(fields::Tuple{Any}, out)
+    vec(fields[1]) .= real.(out)
+end
+function _fit_fields!(fields::Tuple{Any,Any}, out)
+    vec(fields[1]) .= real.(out)
+    vec(fields[2]) .= imag.(out)
+end
+
+function _prepare_masked!(fields, mask, ::Nothing)
+    foreach(field -> _mask_field!(field, mask), fields)
+    return nothing
+end
+function _prepare_masked!(fields, mask, fit::FIT.Spherical.ActiveSphericalFit)
+    _fit_input!(fit.output, fields)
+    out, outcome = FIT.Spherical.active_fit!(fit, fit.output)
+    _fit_fields!(fields, out)
+    return outcome
+end
+
+_prepare_work!(::_NodeRoute, work, fields) = nothing
+_prepare_work!(::_FSHRoute, work, fields) = foreach((out, field) -> permutedims!(out, field, (2, 1)), work, fields)
+_apply_transfer(ws, fields::Tuple{Any}) = FIT.calculate_spherical_transfer!(ws, fields[1])
+_apply_transfer(ws, fields::Tuple{Any,Any}) = FIT.calculate_divergent_spherical_transfer!(ws, fields...)
+
+function _grid_transfer!(ws::FIT.Spherical.SphericalGridWorkspace, fields)
+    length(fields) == length(ws.fields) || throw(DimensionMismatch("field component counts differ"))
+    foreach((out, field) -> copyto!(out, reshape(field, size(out))), ws.fields, fields)
+    fit = _prepare_masked!(ws.fields, ws.mask, ws.active_fit)
+    _prepare_work!(ws.route, ws.work, ws.fields)
+    return FIT.Spherical.with_merged_fit(_apply_transfer(ws.transfer, ws.work), fit)
+end
+
+FIT.calculate_spherical_transfer!(ws::FIT.Spherical.SphericalGridWorkspace, field::AbstractArray) =
+    _grid_transfer!(ws, (field,))
+FIT.calculate_divergent_spherical_transfer!(ws::FIT.Spherical.SphericalGridWorkspace, a::AbstractArray, b::AbstractArray) =
+    _grid_transfer!(ws, (a, b))
+
+_close_transfer(::_FSHRoute, transfer) = nothing
+_close_transfer(::_NodeRoute, transfer) = FIT.close!(transfer)
+function FIT.close!(ws::FIT.Spherical.SphericalGridWorkspace)
+    _close_transfer(ws.route, ws.transfer)
+    ws.active_fit === nothing || FIT.close!(ws.active_fit)
+    return ws
+end
+
+function _grid_transfer(method, fields::Tuple, grid, lmax, inactive, kwargs)
+    ws = _grid_workspace(fields, grid, lmax, inactive; radius = method.radius, kwargs...)
+    try
+        return _grid_transfer!(ws, fields)
+    finally
+        FIT.close!(ws)
+    end
 end
 
 """
@@ -141,10 +278,10 @@ Barotropic spherical transfer with the domain given as a `FlowGeometries` grid.
 
 The grid's sampling picks the analysis it admits, in three cases:
 
-  * a Clenshaw–Curtis sphere at `nlon = 2·nlat − 1` carries the nodes of the exact spherical-harmonic
+  * a Fejér first-rule sphere at `nlon = 2·nlat − 1` carries the nodes of the exact spherical-harmonic
     transform and takes it;
   * a tensor-product sampling whose rule integrates the degree-`2·lmax` integrand — a latitude rule
-    exact there (Gauss–Legendre, Driscoll–Healy, and Clenshaw–Curtis below `2·lmax ≤ nlat − 1`) and
+    exact there (Gauss–Legendre, Driscoll–Healy, and Fejér's first rule below `2·lmax ≤ nlat − 1`) and
     `nlon ≥ 2·lmax + 1` longitudes — has its coefficients by projection against the grid's own
     quadrature, one transform;
   * every other node layout has them from the least-squares fit, each node weighted by its cell's area.
@@ -158,28 +295,14 @@ least-squares fit to the active cells alone (`lmax = nlat − 1` on the exact-tr
 NUFSHT with the keywords `tol`, `rtol`, `maxiter`, `nufft` and `execution`; the result's `converged`,
 `iterations` and `residual` include that fit's.
 """
-function FIT.calculate_energy_transfer(
+FIT.calculate_energy_transfer(
     method::FIT.Types.SphericalTransferMethod,
     vorticity::AbstractArray,
     grid::FG.Grids.AbstractGrid;
     lmax::Union{Nothing, Integer} = nothing,
     inactive::FIT.Types.AbstractInactiveCells = FIT.Types.ZeroFill(),
     kwargs...,
-)
-    _sphere_grid_check(grid)
-    fsh = _is_fsh_grid(grid)
-    fsh || _require_lmax(grid, lmax)
-    (ζ,), fit, route = _masked_input((vorticity,), grid, 0, fsh, lmax, inactive, kwargs)
-    res = if fsh
-        FIT.calculate_energy_transfer(method, _to_fsh_layout(ζ, grid); route...)
-    else
-        FT = float(real(eltype(ζ)))
-        qw = _sphere_quadrature(grid, lmax, FT)
-        FIT.calculate_energy_transfer(method, vec(ζ), _sphere_points(grid, FT); lmax = lmax,
-                                      quadrature_weights = qw, weights = _fit_weights(grid, qw, FT), route...)
-    end
-    return FIT.Spherical.with_merged_fit(res, fit)
-end
+) = _grid_transfer(method, (vorticity,), grid, lmax, inactive, kwargs)
 
 """
     calculate_energy_transfer(DivergentSphericalTransferMethod(), (u_θ, u_φ), grid; lmax,
@@ -189,28 +312,14 @@ Divergent (rotational + divergent) spherical KE transfer on a `FlowGeometries` g
 routed on the grid's sampling and the inactive cells read by `inactive` exactly as the barotropic method
 above; the fit `Exclude` runs is that of the spin-1 field `u_θ + i u_φ`.
 """
-function FIT.calculate_energy_transfer(
+FIT.calculate_energy_transfer(
     method::FIT.Types.DivergentSphericalTransferMethod,
     velocity::Tuple{<:AbstractArray, <:AbstractArray},
     grid::FG.Grids.AbstractGrid;
     lmax::Union{Nothing, Integer} = nothing,
     inactive::FIT.Types.AbstractInactiveCells = FIT.Types.ZeroFill(),
     kwargs...,
-)
-    _sphere_grid_check(grid)
-    fsh = _is_fsh_grid(grid)
-    fsh || _require_lmax(grid, lmax)
-    (uθ, uφ), fit, route = _masked_input(velocity, grid, 1, fsh, lmax, inactive, kwargs)
-    res = if fsh
-        FIT.calculate_energy_transfer(method, (_to_fsh_layout(uθ, grid), _to_fsh_layout(uφ, grid)); route...)
-    else
-        FT = float(real(eltype(uθ)))
-        qw = _sphere_quadrature(grid, lmax, FT)
-        FIT.calculate_energy_transfer(method, (vec(uθ), vec(uφ)), _sphere_points(grid, FT); lmax = lmax,
-                                      quadrature_weights = qw, weights = _fit_weights(grid, qw, FT), route...)
-    end
-    return FIT.Spherical.with_merged_fit(res, fit)
-end
+) = _grid_transfer(method, velocity, grid, lmax, inactive, kwargs)
 
 # Physical → spectral on a grid (`FlowFieldSpectra.calculate_spectrum`) lives in
 # `FlowInvariantTransferFlowFieldSpectraExt`.
@@ -227,15 +336,14 @@ function _scattered_points_and_period(grid::FG.Grids.AbstractGrid)
         "the scattered NUFFT entry is Cartesian; this grid is on " *
         "$(nameof(typeof(FG.Grids.grid_geometry(grid))))."))
     # A node set stores its samples as one flat vector, so its storage rank is 1 whatever the space it
-    # samples; `ncoordinates` is the number of coordinate directions.
-    N = FG.Grids.ncoordinates(grid)
-    for d in 1:N
+    # samples; its coordinates are one vector per coordinate direction.
+    coords = FG.Grids.coordinates(grid)
+    for d in eachindex(coords)
         FG.Grids.isperiodic(grid, d) || throw(ArgumentError(
             "direction $d of this grid is bounded, so it carries no period for the Fourier box. " *
-            "Build it with `periodic`/`period` in that direction."))
+            "Build it with `topology = FlowGeometries.Grids.Periodic()` and `period` in that direction."))
     end
-    coords = ntuple(d -> FG.Grids.coordinates(grid, d), N)
-    Ls = ntuple(d -> FG.Grids.period(grid, d), N)
+    Ls = ntuple(d -> FG.Grids.period(grid, d), Val(length(coords)))
     return coords, Ls
 end
 

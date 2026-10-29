@@ -96,31 +96,36 @@ end
                           dealiasing=OrszagTwoThirds())
 
 Reusable workspace for [`calculate_band_to_band_transfer!`](@ref): the nonlinear-term workspace,
-band-field/transfer-density scratch, the smooth band weights ([`BandWeights`](@ref)) and the per-shell
+band-field/transfer-density scratch, the smooth band weights (`BandWeights`) and the per-shell
 sums `Dq`. `dealiasing` is the one the transfer will be called with; `PaddedThreeHalves()` adds the
 padded-grid scratch.
 """
-struct BandTransferWorkspace{WS, FA, DA, WV, CV, QV}
+struct BandTransferWorkspace{WS, FA, DA, WV, CV, QV, PV}
     nlt::WS
     f_m::FA
     d::DA
     W::WV
     centers::CV
     Dq::QV
+    column::QV
+    partials::PV
 end
 
 function BandTransferWorkspace(velocity_hat, ks, bands::Types.SmoothBands;
                                geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds())
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     FT = real(eltype(velocity_hat))
     k_coord = ShellBinning.shell_coordinate(geometry, ks)
-    W = _band_weights(bands.centers, bands.logwidth, k_coord)
+    W = _band_tables(velocity_hat, _band_weights(bands.centers, bands.logwidth, k_coord))
+    Dq = similar(velocity_hat, FT, size(W.table, 2))
     return BandTransferWorkspace(Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing),
                                  similar(velocity_hat), similar(velocity_hat, FT, ns...),
-                                 W, collect(bands.centers), zeros(FT, size(W.table, 2)))
+                                 W, collect(bands.centers), Dq, similar(Dq, length(bands.centers)), typeof(Dq)[])
 end
+
+_band_tables(proto, W::BandWeights) = W
 
 """
     calculate_band_to_band_transfer!(T, net, bws::BandTransferWorkspace, velocity_hat, ks; kwargs...)
@@ -134,13 +139,13 @@ function calculate_band_to_band_transfer!(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     FT = real(eltype(velocity_hat))
     nb = length(bws.centers)
-    _band_to_band_fill!(Types.resolve_execution(execution), T, bws, velocity_hat, ks;
+    _band_to_band_fill!(Types.resolve_execution(execution, velocity_hat), T, bws, velocity_hat, ks;
         dealiasing=dealiasing, invariant=invariant, transform=transform, advecting_hat=advecting_hat)
     @inbounds for n in 1:nb
         acc = zero(FT)
@@ -155,7 +160,7 @@ end
 # own single-threaded workspace.
 function _band_to_band_fill!(::ComputationalBackends.SerialBackend, T, bws::BandTransferWorkspace, velocity_hat, ks;
                              dealiasing, invariant, transform, advecting_hat)
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
+    nd = length(ks); ns = Base.front(size(velocity_hat)); D = size(velocity_hat, nd + 1)
     nb = length(bws.centers)
     ws = bws.nlt
     NonlinearTerm.synthesize_advecting!(ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
@@ -183,7 +188,7 @@ _band_to_band_gpu!(args...; kwargs...) = throw(ArgumentError(
 
 """
     calculate_band_to_band_transfer(velocity_hat, ks; bands::SmoothBands, dealiasing=OrszagTwoThirds(),
-        invariant=KineticEnergy(), transform=SpectralBackends.AutoSpectralBackend(), execution=SerialBackend(),
+        invariant=KineticEnergy(), transform=SpectralBackends.AutoSpectralBackend(), execution=AutoBackend(),
         advecting_hat=velocity_hat, geometry=IsotropicShells())
         -> (centers, transfer_matrix, net_transfer)
 
@@ -202,12 +207,12 @@ function calculate_band_to_band_transfer(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
-    exec = Types.resolve_execution(execution)
+    exec = Types.resolve_execution(execution, velocity_hat)
     velocity_hat, advecting_hat = Types._fields_to_execution(exec, velocity_hat, advecting_hat)
     FT = real(eltype(velocity_hat))
     nb = length(bands.centers)
@@ -238,17 +243,17 @@ function calculate_band_to_band_transfer_batch(
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n       = length(velocity_hats)
-    FT      = real(eltype(first(velocity_hats)))
+    FT      = real(eltype(eltype(velocity_hats)))
     nb      = length(bands.centers)
     centers = collect(bands.centers)
-    NT = @NamedTuple{centers::typeof(centers), transfer_matrix::Matrix{FT}, net_transfer::Vector{FT}}
-    results = Vector{NT}(undef, n)
+    results = [(; centers, transfer_matrix = zeros(FT, nb, nb), net_transfer = zeros(FT, nb))
+               for _ in 1:n]
     n == 0 && return results
-    _band_to_band_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, bands, nb;
+    _band_to_band_batch!(Types.resolve_execution(execution, first(velocity_hats)), results, velocity_hats, ks, bands, nb;
         dealiasing=dealiasing, invariant=invariant, transform=transform, geometry=geometry)
     return results
 end
@@ -256,11 +261,11 @@ end
 # Serial reference: one workspace reused across the whole batch; each snapshot self-advects.
 function _band_to_band_batch!(::ComputationalBackends.AbstractSerialBackend, results, velocity_hats, ks, bands, nb;
                               dealiasing, invariant, transform, geometry)
-    FT  = real(eltype(first(velocity_hats)))
     bws = BandTransferWorkspace(first(velocity_hats), ks, bands; geometry=geometry, dealiasing=dealiasing)
     for i in eachindex(velocity_hats)
         vh = velocity_hats[i]
-        T = zeros(FT, nb, nb); net = zeros(FT, nb)
+        T = results[i].transfer_matrix
+        net = results[i].net_transfer
         results[i] = calculate_band_to_band_transfer!(T, net, bws, vh, ks;
             dealiasing=dealiasing, invariant=invariant, transform=transform,
             execution=ComputationalBackends.SerialBackend(), advecting_hat=vh)
@@ -280,13 +285,13 @@ _band_to_band_batch!(::ComputationalBackends.AbstractThreadedBackend, results, v
 # copied into the staging buffer.
 function _band_to_band_batch!(gpu::ComputationalBackends.AbstractGPUBackend, results, velocity_hats, ks, bands, nb;
                               dealiasing, invariant, transform, geometry)
-    FT  = real(eltype(first(velocity_hats)))
     buf = Types._staging_buffer(gpu, first(velocity_hats))
     bws = BandTransferWorkspace(buf === nothing ? first(velocity_hats) : buf, ks, bands;
                                 geometry=geometry, dealiasing=dealiasing)
     for i in eachindex(velocity_hats)
         vh = Types._staged!(buf, velocity_hats[i])
-        T = zeros(FT, nb, nb); net = zeros(FT, nb)
+        T = results[i].transfer_matrix
+        net = results[i].net_transfer
         results[i] = calculate_band_to_band_transfer!(T, net, bws, vh, ks;
             dealiasing=dealiasing, invariant=invariant, transform=transform, execution=gpu, advecting_hat=vh)
     end
@@ -313,8 +318,8 @@ _density_scale(::Types.Helicity, ::Type{FT}) where {FT} = one(FT)
 
 Content of `invariant` in each band of `bands`, `E(n) = Σ_k w_n(k)·e(k)`.
 
-`bands` fixes the weight `w_n`: an [`AbstractShellBinning`](@ref) gives the indicator of shell `n`,
-[`SmoothBands`](@ref) the graded partition of unity of [`calculate_band_to_band_transfer`](@ref), so
+`bands` fixes the weight `w_n`: an [`AbstractShellBinning`](@ref FlowInvariantTransfer.Types.AbstractShellBinning) gives the indicator of shell `n`,
+[`SmoothBands`](@ref FlowInvariantTransfer.Types.SmoothBands) the graded partition of unity of [`calculate_band_to_band_transfer`](@ref), so
 the same `bands` passed to both describe one partition. `e` is the invariant's quadratic spectral
 density (`½Σ_c|û_c|²` for kinetic energy, `½|ω̂|²` for enstrophy, `Re{conj(û)·ω̂}` for helicity),
 with the Hermitian weight on a half spectrum so the total matches the full-spectrum sum.
@@ -343,7 +348,7 @@ end
 
 function _band_energies(velocity_hat, ks, bands::Types.SmoothBands, invariant, geometry)
     nd = length(ks)
-    ms = size(velocity_hat)[1:nd]
+    ms = Base.front(size(velocity_hat))
     M  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     W = _band_weights(bands.centers, bands.logwidth, ShellBinning.shell_coordinate(geometry, ks))

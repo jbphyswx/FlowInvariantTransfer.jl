@@ -7,6 +7,7 @@ using LinearAlgebra: LinearAlgebra
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
+using FlowGeometries: FlowGeometries as FG
 
 # ---------------------------------------------------------------------------
 # Pencil axis: one grid split across ranks; transpose-based distributed FFT.
@@ -29,10 +30,48 @@ using ComputationalBackends: ComputationalBackends
 # The velocity is real, so axis 1 is a real-to-complex transform and the distributed spectral grid holds
 # the non-redundant half `k₁ ≥ 0`; `PencilWorkspace` takes the matching half wavenumber tuple
 # (`Utils.wavenumber_grid(ns, Ls; real = true)`) and carries the Hermitian weight into the shell sums.
-function FIT.build_pencil_plan(ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD; T = Float64) where {nd}
-    proc_dims  = Tuple(Int.(MPI.Dims_create(MPI.Comm_size(comm), ntuple(_ -> 0, nd - 1))))
-    transforms = (PencilFFTs.Transforms.RFFT(), ntuple(_ -> PencilFFTs.Transforms.FFT(), nd - 1)...)
+function FIT.build_pencil_plan(::Type{T}, ns::NTuple{nd,Int}, comm = MPI.COMM_WORLD) where {T,nd}
+    proc_dims  = Tuple(Int.(MPI.Dims_create(MPI.Comm_size(comm), ntuple(_ -> 0, Val(nd - 1)))))
+    transforms = (PencilFFTs.Transforms.RFFT(), ntuple(_ -> PencilFFTs.Transforms.FFT(), Val(nd - 1))...)
     return PencilFFTs.PencilFFTPlan(ns, transforms, proc_dims, comm, T)
+end
+
+FIT.build_pencil_plan(ns::NTuple{D,Int}, comm = MPI.COMM_WORLD) where {D} =
+    FIT.build_pencil_plan(Float64, ns, comm)
+
+_pencil_transforms(::Type{<:Real}, ::Val{D}) where {D} =
+    (PencilFFTs.Transforms.RFFT(), ntuple(_ -> PencilFFTs.Transforms.FFT(), Val(D - 1))...)
+_pencil_transforms(::Type{<:Complex}, ::Val{D}) where {D} =
+    ntuple(_ -> PencilFFTs.Transforms.FFT(), Val(D))
+
+function FIT.build_pencil_plan(::Type{T}, split::FG.Decomposition.AbstractRankSplit{D}) where {T,D}
+    grid = FG.Decomposition.global_grid(split)
+    FG.Grids.grid_geometry(grid) isa FG.Geometry.AbstractCartesianGeometry ||
+        throw(ArgumentError("pencil transforms require a Cartesian grid"))
+    all(FG.Axes.isuniform, FG.Grids.coordinates(grid)) &&
+        all(d -> FG.Grids.isperiodic(grid, d), 1:D) ||
+        throw(ArgumentError("pencil transforms require uniform periodic axes"))
+    pen = FG.Decomposition.pencil(split)
+    return PencilFFTs.PencilFFTPlan(pen, _pencil_transforms(T, Val(D)), real(T))
+end
+
+function _field_split(fields::NTuple{D,<:FG.Decomposition.AbstractRankField}) where {D}
+    split = FG.Decomposition.split_of(first(fields))
+    all(f -> FG.Decomposition.split_of(f) === split, fields) ||
+        throw(ArgumentError("velocity components must live on the same split grid"))
+    ndims(FG.Decomposition.global_grid(split)) == D ||
+        throw(DimensionMismatch("pencil transfer needs one velocity component per grid direction"))
+    return split
+end
+
+function FIT.PencilWorkspace(fields::NTuple{D,<:FG.Decomposition.AbstractRankField}; kwargs...) where {D}
+    split = _field_split(fields)
+    grid = FG.Decomposition.global_grid(split)
+    T = float(promote_type(map(eltype, fields)...))
+    plan = FIT.build_pencil_plan(T, split)
+    periods = ntuple(d -> FG.Grids.period(grid, d), Val(D))
+    ks = FIT.Utils.wavenumber_grid(T, size(grid), periods)
+    return FIT.PencilWorkspace(plan, ks, FG.Decomposition.cartesian_comm(split); kwargs...)
 end
 
 # Per-mode transfer density for the pencil (distributed) layout, in place into `d` (real spectral),
@@ -94,10 +133,10 @@ function _Owners(pen)
     M = length(decomp)
     pdims = size(PencilArrays.topology(pen))
     ng = PencilArrays.size_global(pen)
-    coord_of = ntuple(M) do i
+    coord_of = ntuple(Val(M)) do i
         v = zeros(Int, ng[decomp[i]])
         for c in 1:pdims[i]
-            for g in PencilArrays.range_remote(pen, ntuple(j -> j == i ? c : 1, M))[decomp[i]]
+            for g in PencilArrays.range_remote(pen, ntuple(j -> j == i ? c : 1, Val(M)))[decomp[i]]
                 v[g] = c
             end
         end
@@ -111,9 +150,9 @@ end
 # The rank owning global (logical) index `G`, and the linear index into that rank's `parent` array.
 function _owner(o::_Owners, G::NTuple{N, Int}) where {N}
     decomp = PencilArrays.decomposition(o.pen)
-    coords = ntuple(i -> o.coord_of[i][G[decomp[i]]], length(decomp))
+    coords = ntuple(i -> o.coord_of[i][G[decomp[i]]], Val(length(decomp)))
     rg = PencilArrays.range_remote(o.pen, coords)
-    L = ntuple(d -> G[d] - first(rg[d]) + 1, N)
+    L = ntuple(d -> G[d] - first(rg[d]) + 1, Val(N))
     szm = map(length, PencilArrays.range_remote(o.pen, coords, PencilArrays.MemoryOrder()))
     Lm = PencilArrays.permutation(o.pen) * L
     return o.ranks[coords...], LinearIndices(szm)[Lm...]
@@ -122,11 +161,11 @@ end
 # A fixed redistribution `dst[j] = Σ w·(conj?)(src[i])` between two pencils, with its send/receive
 # layout and buffers built once. Receive entries are grouped into slots in which every destination
 # index occurs at most once, so each slot accumulates with one broadcast.
-struct _Exchange{VI, VW, VC, SB, RB}
+struct _Exchange{VI, VW, VC, SB, RB, SL}
     sendidx::VI; sendw::VW; conjpos::VI
     sendbuf::VC; recvbuf::VC
     sendv::SB; recvv::RB
-    slots::Vector{Tuple{VI, VI}}
+    slots::SL
 end
 
 # `sends`: (rank, key, source parent index, weight, conjugate); `recvs`: (rank, key, destination parent
@@ -171,26 +210,24 @@ struct _PencilPadding{PL, UPT, IB, SP, R, EX, CM}
     embed::EX; trunc::EX; comm::CM
 end
 
-function _PencilPadding(plan, ks, comm, ::Type{FT}) where {FT}
-    nd = length(ks)
+function _PencilPadding(plan, ks::Tuple{Vararg{Any,nd}}, comm, ::Type{FT}, input, output) where {FT,nd}
     ns = FTB.full_size(ks); ms = FTB.spectral_size(ks)
     half = FTB.is_halved(ks)
-    Ms  = ntuple(d -> FTB.padded_length(ns[d]), nd)
-    Msp = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], nd)
-    pin = PencilArrays.Pencil(PencilArrays.pencil(PencilFFTs.allocate_input(plan)); size_global = Ms)
-    transforms = half ? (PencilFFTs.Transforms.RFFT(), ntuple(_ -> PencilFFTs.Transforms.FFT(), nd - 1)...) :
-                        ntuple(_ -> PencilFFTs.Transforms.FFT(), nd)
+    Ms  = map(FTB.padded_length, ns)
+    Msp = ntuple(d -> (half && d == 1) ? Ms[1] ÷ 2 + 1 : Ms[d], Val(nd))
+    pin = PencilArrays.Pencil(PencilArrays.pencil(input); size_global = Ms)
+    transforms = _pencil_transforms(eltype(input), Val(nd))
     pplan = PencilFFTs.PencilFFTPlan(pin, transforms, FT)
     spec = PencilFFTs.allocate_output(pplan)
     CT = eltype(spec)
-    coarse = PencilArrays.pencil(PencilFFTs.allocate_output(plan)); padded = PencilArrays.pencil(spec)
+    coarse = PencilArrays.pencil(output); padded = PencilArrays.pencil(spec)
     oc = _Owners(coarse); op = _Owners(padded)
     linP = LinearIndices(Msp)
     nyq_row = (half && iseven(ns[1])) ? ms[1] : 0
-    mirror(C) = (C[1], ntuple(d -> C[d + 1] == 1 ? 1 : ms[d + 1] - C[d + 1] + 2, nd - 1)...)
+    mirror(C) = (C[1], ntuple(d -> C[d + 1] == 1 ? 1 : ms[d + 1] - C[d + 1] + 2, Val(nd - 1))...)
     nyqaxes(C) = count(d -> FTB.is_nyquist(ks[d], C[d]), 1:nd)
-    images(C) = Iterators.product(ntuple(d -> FTB.padded_images(ks[d], C[d], Ms[d]), nd)...)
-    preimage(P) = ntuple(d -> FTB.padded_preimage(ks[d], P[d], Ms[d]), nd)
+    images(C) = Iterators.product(ntuple(d -> FTB.padded_images(ks[d], C[d], Ms[d]), Val(nd))...)
+    preimage(P) = ntuple(d -> FTB.padded_preimage(ks[d], P[d], Ms[d]), Val(nd))
     local_globals(pen) = (Tuple(I) for I in CartesianIndices(PencilArrays.range_local(pen)))
     # The owner ranks are ranks of the pencils' Cartesian communicator, which the exchanges run on.
     cart = PencilArrays.get_comm(coarse)
@@ -239,7 +276,7 @@ function _PencilPadding(plan, ks, comm, ::Type{FT}) where {FT}
     proto = parent(spec)
     embed = _Exchange(proto, CT, esend, erecv, nranks)
     trunc = _Exchange(proto, CT, tsend, trecv, nranks)
-    uphys = ntuple(_ -> PencilFFTs.allocate_input(pplan), nd)
+    uphys = ntuple(_ -> PencilFFTs.allocate_input(pplan), Val(nd))
     return _PencilPadding(pplan, uphys, PencilFFTs.allocate_input(pplan), PencilFFTs.allocate_input(pplan),
                           spec, FT(prod(Ms)), embed, trunc, cart)
 end
@@ -269,50 +306,51 @@ end
 # Reusable pencil workspace: the (geometry/dealiasing/binning-fixed) wavenumber grids + shell structure
 # and every per-snapshot scratch field, so `pencil_spectral_flux!` reuses them (0 alloc beyond the small
 # per-shell result vectors). Spectral-layout buffers via PencilFFTs.allocate_output; physical-layout via PencilFFTs.allocate_input.
-struct PencilWorkspace{PL, CM, KCT, KM, KP, SI, CE, ED, UST, OT, SP, UPT, IB, WT, R, EX, IV, PD}
+struct PencilWorkspace{PL, CM, KCT, KM, KP, SI, CE, ED, UST, OT, SP, UPT, IB, WT, R, EX, IV, PD, SB, RES}
     plan::PL; comm::CM
     KC::KCT; KD::KCT; KMAG::KM; KEEP::KP; W::KM; shell_idx::SI; centers::CE; edges::ED
     û::UST; Nhat::UST; ω::OT; spec::SP; dloc::KM
-    uphys::UPT; N_i::IB; g::IB; ph::IB
+    uphys::UPT; N_i::IB; g::IB
     Tloc::WT; Np::R; do_trunc::Bool; nd::Int; inner::EX; invariant::IV
     pad::PD                                  # `_PencilPadding` for PaddedThreeHalves, else `nothing`
+    shell_buffer::SB
+    result::RES
 end
 
-function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
+function FIT.PencilWorkspace(plan, ks::Tuple{Vararg{Any,nd}}, comm = MPI.COMM_WORLD;
         binning::FIT.Types.AbstractShellBinning,
         dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
         geometry::FIT.Types.AbstractShellGeometry = FIT.Types.IsotropicShells(),
         invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
-        execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend())
+        execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend()) where {nd}
     geometry isa FIT.Types.ShellMagnitude || throw(ArgumentError(
         "pencil workspace supports FIT.Types.ShellMagnitude shell geometries (FIT.Types.IsotropicShells / " *
         "FIT.Types.PerpendicularShells / FIT.Types.ParallelShells); got $(typeof(geometry))."))
-    nd = length(ks)
     ns = FTB.full_size(ks)          # physical grid
     out_proto = PencilFFTs.allocate_output(plan)
     ph = PencilFFTs.allocate_input(plan)           # ifft output (physical)
     FT = real(eltype(out_proto))
     (eltype(ph) <: Real) == FTB.is_halved(ks) || throw(ArgumentError(
         "a real-input pencil plan needs the half wavenumber layout and a complex-input plan the full " *
-        "one; build `ks` with `Utils.wavenumber_grid(ns, Ls; real = $(eltype(ph) <: Real))`."))
+        "one; build `ks` with `Utils.wavenumber_grid($(eltype(ph)), ns, Ls)`."))
     Np = FT(prod(ns))
     do_trunc = dealiasing isa FIT.Types.OrszagTwoThirds
-    pad = dealiasing isa FIT.Types.PaddedThreeHalves ? _PencilPadding(plan, ks, comm, FT) : nothing
+    pad = dealiasing isa FIT.Types.PaddedThreeHalves ? _PencilPadding(plan, ks, comm, FT, ph, out_proto) : nothing
 
     # Local Fourier wavenumbers in the spectral (output) layout — permutation-aware.
     gf = PencilArrays.localgrid(out_proto, ks)
-    KC = ntuple(nd) do d
+    KC = ntuple(Val(nd)) do d
         a = similar(out_proto, FT); a .= gf[d]; a               # k_d value at every local spectral point
     end
     # Shell coordinate = √(Σ_{d∈dims} k_d²) — |k| (isotropic) or k_⊥/k_∥ for an anisotropic projection.
-    gdims = geometry.dims === nothing ? ntuple(identity, nd) : geometry.dims
+    gdims = geometry.dims === nothing ? ntuple(identity, Val(nd)) : geometry.dims
     KMAG = similar(out_proto, FT); fill!(KMAG, zero(FT))
     for d in gdims
         KMAG .+= KC[d] .^ 2
     end
     KMAG .= sqrt.(KMAG)
     # Orszag 2/3 keep-mask: keep the folded integer index |m_d| ≤ `FlowTransformBindings.dealias_cutoff(N_d)`.
-    dk = ntuple(d -> abs(ks[d][2] - ks[d][1]), nd)
+    dk = map(k -> abs(k[2] - k[1]), ks)
     KEEP = similar(out_proto, Bool); fill!(KEEP, true)
     if do_trunc
         for d in 1:nd
@@ -332,7 +370,7 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
     # Wavenumber for the operators that are first order in k (the gradient, and the vorticity behind the
     # helicity/enstrophy densities). The Nyquist slot of an even axis holds `+n/2` and `−n/2` at once, so
     # `k` is not single-valued there and it carries zero — matching the serial `derivative_wavenumber`.
-    KD = ntuple(nd) do d
+    KD = ntuple(Val(nd)) do d
         a = similar(out_proto, FT); a .= KC[d]
         if iseven(ns[d])
             a .= ifelse.(abs.(round.(Int, KC[d] ./ FT(dk[d]))) .== ns[d] ÷ 2, zero(FT), a)
@@ -341,29 +379,36 @@ function FIT.PencilWorkspace(plan, ks, comm = MPI.COMM_WORLD;
     end
     # Local execution backend (Serial default; ComputationalBackends.GPUBackend for a per-rank device pencil / multi-GPU,
     # possibly wrapped in ComputationalBackends.MPIBackend, unwrapped here). Drives the per-rank shell reduction below.
-    inner = ComputationalBackends.local_backend(execution)
+    inner = ComputationalBackends.local_backend(FIT.Types.resolve_execution(execution))
     # Shell edges/centers from the global max |k| (MPI.Allreduce → identical on all ranks); local shell index.
     kmax = MPI.Allreduce(maximum(KMAG), max, comm)
     edges     = FIT.ShellBinning.shell_edges(binning, kmax)
     centers   = collect(FIT.ShellBinning.shell_centers(binning, kmax))
     # `FIT.ShellBinning.assign_shells` is a host scalar-indexed builder; on a device backend build it once from a host copy
     # of the local |k| grid (the device reduction moves this index grid back on-device per snapshot).
-    shell_idx = inner isa ComputationalBackends.GPUBackend ? FIT.ShellBinning.assign_shells(Array(parent(KMAG)), edges) : FIT.ShellBinning.assign_shells(KMAG, edges)
+    shell_idx = if inner isa ComputationalBackends.GPUBackend
+        idx = FIT.ShellBinning.assign_shells(Array(parent(KMAG)), edges)
+        FIT.Types._to_execution(inner, idx)
+    else
+        FIT.ShellBinning.assign_shells(KMAG, edges)
+    end
 
-    û     = ntuple(_ -> PencilFFTs.allocate_output(plan), nd)   # spectral velocity coeffs
-    Nhat  = ntuple(_ -> PencilFFTs.allocate_output(plan), nd)   # nonlinear-term spectral
+    û     = ntuple(_ -> PencilFFTs.allocate_output(plan), Val(nd))   # spectral velocity coeffs
+    Nhat  = ntuple(_ -> PencilFFTs.allocate_output(plan), Val(nd))   # nonlinear-term spectral
     # Vorticity scratch: only the helicity and enstrophy densities form ω̂ = i k × û.
     ω     = invariant isa FIT.Types.KineticEnergy ? nothing :
-            ntuple(_ -> PencilFFTs.allocate_output(plan), nd)
+            ntuple(_ -> PencilFFTs.allocate_output(plan), Val(nd))
     spec  = PencilFFTs.allocate_output(plan)                    # spectral scratch (KEEP·û, i k·û)
     dloc  = similar(out_proto, FT)                   # transfer density (real spectral)
-    uphys = ntuple(_ -> PencilFFTs.allocate_input(plan), nd)    # physical velocity
-    N_i   = PencilFFTs.allocate_input(plan)                     # nonlinear accumulator (physical)
+    uphys = ntuple(_ -> PencilFFTs.allocate_input(plan), Val(nd))    # physical velocity
+    N_i   = ph                                                # nonlinear accumulator (physical)
     g     = PencilFFTs.allocate_input(plan)                     # gradient (physical)
     Tloc  = zeros(FT, length(centers))
+    shell_buffer = inner isa ComputationalBackends.GPUBackend ? similar(parent(out_proto), FT, length(centers)) : Tloc
+    result = FIT.Types.SpectralFluxResult(centers, edges, similar(Tloc), similar(Tloc))
     return PencilWorkspace(plan, comm, KC, KD, KMAG, KEEP, W, shell_idx, centers, edges,
-                           û, Nhat, ω, spec, dloc, uphys, N_i, g, ph, Tloc, Np, do_trunc, nd, inner, invariant,
-                           pad)
+                           û, Nhat, ω, spec, dloc, uphys, N_i, g, Tloc, Np, do_trunc, nd, inner, invariant,
+                           pad, shell_buffer, result)
 end
 
 # N̂_i = fft(Σ_j u_j ∂_j u_i)/Np on the pencil grid, with the 2/3 keep-mask on inputs and output when
@@ -413,11 +458,34 @@ function FIT.pencil_spectral_flux!(ws::PencilWorkspace, u_phys::NTuple{D};
     ws.dloc .*= ws.W
     # Local shell reduction dispatched on the per-rank backend: scalar host loop (Serial/Threaded) or an
     # atomic device scatter-add (ComputationalBackends.GPUBackend, device-resident) — writes into the host `Tloc`, then reduce.
-    FIT.ShellBinning.shell_scatter_add!(ws.Tloc, ws.dloc, ws.shell_idx, ws.inner)
-    Tglob = MPI.Allreduce(ws.Tloc, +, ws.comm)     # global per-shell transfer
-    flux  = cumsum(Tglob)                           # Π[n]: the flux through shell_edges[n+1]
-    return (centers = ws.centers, shell_edges = ws.edges, transfer_spectrum = Tglob, flux = flux)
+    FIT.ShellBinning.shell_scatter_add!(ws.Tloc, ws.dloc, ws.shell_idx, ws.inner, ws.shell_buffer)
+    MPI.Allreduce!(ws.Tloc, ws.result.transfer_spectrum, +, ws.comm)
+    cumsum!(ws.result.flux, ws.result.transfer_spectrum)
+    return ws.result
 end
+
+function FIT.pencil_spectral_flux!(ws::PencilWorkspace,
+        fields::NTuple{D,<:FG.Decomposition.AbstractRankField}; kwargs...) where {D}
+    split = _field_split(fields)
+    block = FG.Decomposition.block(split)
+    PencilArrays.range_local(first(ws.uphys)) == block.ranges ||
+        throw(DimensionMismatch("the fields and the pencil workspace own different grid cells"))
+    for c in 1:D
+        data = FG.Decomposition.local_array(fields[c])
+        ndims(data) == D || throw(DimensionMismatch("a velocity component must have one field per grid cell"))
+        copyto!(parent(ws.uphys[c]), view(data, block.interior...))
+    end
+    return FIT.pencil_spectral_flux!(ws, ws.uphys; kwargs...)
+end
+
+function FIT.pencil_spectral_flux(fields::NTuple{D,<:FG.Decomposition.AbstractRankField}; kwargs...) where {D}
+    ws = FIT.PencilWorkspace(fields; kwargs...)
+    return FIT.pencil_spectral_flux!(ws, fields)
+end
+
+FIT.calculate_energy_transfer(::FIT.Types.SpectralFluxMethod,
+    fields::NTuple{D,<:FG.Decomposition.AbstractRankField}; kwargs...) where {D} =
+    FIT.pencil_spectral_flux(fields; kwargs...)
 
 # Allocating convenience: build a one-shot workspace and delegate to the in-place form.
 function FIT.pencil_spectral_flux(
@@ -429,7 +497,7 @@ function FIT.pencil_spectral_flux(
     dealiasing::FIT.Types.AbstractDealiasing = FIT.Types.OrszagTwoThirds(),
     invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
     geometry::FIT.Types.AbstractShellGeometry = FIT.Types.IsotropicShells(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 ) where {D}
     ws = FIT.PencilWorkspace(plan, ks, comm; binning = binning, dealiasing = dealiasing,
                              geometry = geometry, invariant = invariant, execution = execution)

@@ -7,10 +7,7 @@ using SpectralBackends: SpectralBackends
 using LinearAlgebra: LinearAlgebra
 
 # With this extension loaded, `AutoSpectralBackend` resolves to the FFT path.
-function __init__()
-    FIT.Types._FFT_BACKEND_LOADED[] = true
-    return nothing
-end
+FIT.Types._available(::FIT.Types._HostFFT) = true
 
 # ---------------------------------------------------------------------------
 # FFT plan/scratch bundle + allocation-free nonlinear term
@@ -103,14 +100,15 @@ Base.show(io::IO, ::MIME"text/plain", b::AnyFFTPlans) = show(io, b)
 # More specific than the core `_make_fft_plans`, so the extension adds a method without overwriting
 # one. The padded plans are built only when the workspace has a padded grid. `AbstractFFTs.plan_fft`
 # dispatches on the array type: FFTW for an `Array`, cuFFT for a `CuArray`.
-function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, pad, fft_nthreads::Int)
+function FIT.Workspaces._make_fft_plans(velocity_hat::AbstractArray{<:Complex}, ks, pad, fft_nthreads::Int,
+                                       operators)
     ns = FTB.full_size(ks)        # physical grid
     ms = FTB.spectral_size(ks)    # coefficient grid
     FT = real(eltype(velocity_hat))
     # `derivative = true`: axis d's array is 0 at axis d's own Nyquist mode, where the grid derivative
     # along d vanishes. A mode at Nyquist on another axis keeps a well-defined, Hermitian derivative
     # along d, so the zero goes in the per-axis wavenumber array.
-    kg   = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
+    kg = operators.kd
     # The 2/3 keep factors; the legs apply them only when called to truncate.
     keep = FTB.dealias_factors(velocity_hat, FT, ks, true)
 
@@ -477,7 +475,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_fft!(
     advecting_hat = velocity_hat,
 )
     nd    = length(ks)
-    ns    = size(velocity_hat)[1:nd]
+    ns    = Base.front(size(velocity_hat))
     M     = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT    = real(eltype(velocity_hat))
     N_sh  = size(result.transfer_matrix, 1)
@@ -522,20 +520,22 @@ end
 # non-redundant half of a Hermitian spectrum; `_temporal_block_dft_fft!` mirrors it back to the full
 # bin range the triad indexing needs. A device-array prototype plans on its own library (cuFFT).
 function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(
-    nDFT, nx, isreal_data::Bool, ::SpectralBackends.FFTSpectralBackend, ::Type{RT}, proto,
-) where {RT}
+    nDFT, nx, ::Type{RT}, ::SpectralBackends.FFTSpectralBackend, proto,
+) where {RT<:Real}
     CT = Complex{RT}
-    # One FFTW thread: the block transforms run inside the per-block loop.
-    if isreal_data
-        windowed = similar(proto, RT, nDFT, nx)
-        spec = similar(proto, CT, nDFT ÷ 2 + 1, nx)
-        plan = FFTW.set_num_threads(() -> FFTW.plan_rfft(windowed, 1), 1)
-        return (plan = plan, windowed = windowed, spec = spec, half = true)
-    end
+    windowed = similar(proto, RT, nDFT, nx)
+    spec = similar(proto, CT, nDFT ÷ 2 + 1, nx)
+    plan = FFTW.set_num_threads(() -> FFTW.plan_rfft(windowed, 1), 1)
+    return (; plan, windowed, spec)
+end
+
+function FIT.TriadicOrthogonalDecomposition._temporal_dft_plan(
+    nDFT, nx, ::Type{CT}, ::SpectralBackends.FFTSpectralBackend, proto,
+) where {CT<:Complex}
     windowed = similar(proto, CT, nDFT, nx)
     spec = similar(proto, CT, nDFT, nx)
     plan = FFTW.set_num_threads(() -> FFTW.plan_fft(windowed, 1), 1)
-    return (plan = plan, windowed = windowed, spec = spec, half = false)
+    return (; plan, windowed, spec)
 end
 
 """
@@ -566,16 +566,11 @@ function FIT.TriadicOrthogonalDecomposition._temporal_block_dft_fft!(
     n2 = nDFT - shift                 # length of the run that maps to the tail of the destination
     s0 = n2 + 1                       # first source of the run that maps to the head
     sdirect = min(nh, nDFT)           # sources up to here are stored; beyond it they are mirrored
-    @inbounds for ix in axes(spec, 2)
-        for s in 1:n2
-            Q_blk[shift + s, ix] = spec[s, ix]
-        end
-        for s in s0:sdirect
-            Q_blk[s - n2, ix] = spec[s, ix]
-        end
-        for s in max(s0, nh + 1):nDFT
-            Q_blk[s - n2, ix] = conj(spec[nDFT - s + 2, ix])
-        end
+    view(Q_blk, (shift + 1):nDFT, :) .= view(spec, 1:n2, :)
+    view(Q_blk, 1:(sdirect - n2), :) .= view(spec, s0:sdirect, :)
+    mirror_start = max(s0, nh + 1)
+    if mirror_start <= nDFT
+        view(Q_blk, (mirror_start - n2):shift, :) .= conj.(view(spec, (nDFT - mirror_start + 2):-1:2, :))
     end
     return Q_blk
 end

@@ -54,7 +54,7 @@ FlowInvariantTransferKernelAbstractionsExt = "KernelAbstractions"
 FlowInvariantTransferMPIExt = "MPI"
 FlowInvariantTransferNUFSHTExt = "NUFSHT"
 FlowInvariantTransferOhMyThreadsExt = "OhMyThreads"
-FlowInvariantTransferPencilFFTsExt = ["MPI", "PencilFFTs", "PencilArrays"]
+FlowInvariantTransferPencilFFTsExt = ["MPI", "PencilFFTs", "PencilArrays", "FlowGeometries"]
 
 [compat]
 CairoMakie = "0.15"

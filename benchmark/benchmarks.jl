@@ -145,10 +145,10 @@ function add_uniform!(ns::NTuple{D,Int}) where {D}
         group("decomposition")[HOT * "/helical/" * tag] =
             BenchmarkTools.@benchmarkable FIT.Decomposition.decompose_field(
                 FIT.Types.HelicalDecomposition(), $û, $ks) evals = 1
-        pfw = FIT.Workspaces.NonlinearTermWorkspace(û, ks)
+        pfw = FIT.Workspaces.SpectralFluxWorkspace(û, ks, b)
         group("partial_fluxes")[HOT * "/helical/" * tag] =
             BenchmarkTools.@benchmarkable FIT.calculate_helical_partial_fluxes!(
-                $pfw, $û, $ks; binning = $b, transform = $FFT) evals = 1
+                $pfw, $û, $ks; transform = $FFT) evals = 1
     end
 
     # --- uniform-grid physical → spectral (no workspace exists: convenience only) ---

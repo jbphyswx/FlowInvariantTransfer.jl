@@ -143,8 +143,9 @@ working grid's spectral outputs (`coarse`, the same arrays unless padded).
 Every buffer lives in the memory the workspace's `execution` computes in. A workspace on a device built
 from a host array holds in `stage` the device buffers its host inputs are copied into once per call.
 """
-struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM, CO, RM, SI, CE, ED, ST}
+struct CompressibleWorkspace{ND, DA, DC, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM, CO, RM, SI, CE, ED, ST, KP, SV}
     dealiasing::DA
+    decomposition::DC
     ks::KS; kd::KD; kdc::KD        # working-grid axes and derivative wavenumbers; `kdc` the caller grid's
     tf::TF
     vel::CA; ρh::CS; v̂::CA; N̂1::CA; N̂2::CA
@@ -160,16 +161,20 @@ struct CompressibleWorkspace{ND, DA, KS, KD, TF, CA, CS, RA, RS, RG, CH, PD, PM,
     ns::NTuple{ND, Int}           # working physical grid
     ms::NTuple{ND, Int}           # working coefficient grid (differs from `ns` on the half layout)
     stage::ST                     # `(vel, ρ, p)` staging buffers of host inputs, each `nothing` if unused
+    keep::KP
+    shell_sums::SV
+    fold::SV
 end
 
 # Buffers used only by the Helmholtz R/C channel decomposition: the working-grid splits and giver
 # fields, and `rc`, the receivers and the givers' nonlinear terms on the caller's grid.
-struct CompressibleChannels{CA, RA, RC}
+struct CompressibleChannels{CA, RA, RC, PJ}
     sscr::CA
     ûR::CA; ûC::CA; v̂R::CA; v̂C::CA
     uR::RA; uC::RA; vR::RA; vC::RA
     N̂1R::CA; N̂2R::CA; N̂1C::CA; N̂2C::CA
     rc::RC
+    projection::PJ
 end
 
 # Buffers used only by the KE↔IE pressure-dilatation term; `σ̃c`, `σhc`, `kdotuC` and `qscr` are on the
@@ -183,14 +188,14 @@ end
 
 """
     CompressibleWorkspace(velocity_hat, ks; transform, binning, geometry, execution,
-                          dealiasing = OrszagTwoThirds(), decompose = true, with_pressure = false)
+                          dealiasing = OrszagTwoThirds(), decomposition = HelmholtzDecomposition(), pressure_hat = nothing)
 
 `dealiasing` fixes the working grid. The transfer's products are cubic (`ρ·u·∇u`), so
 `OrszagTwoThirds()` keeps `|m_d| ≤ ⌊(N_d−1)/4⌋` (`FlowTransformBindings.dealias_cutoff(N, 3)`), where
 every term is exact and `Σ_k T_u = 0`; `PaddedThreeHalves()` forms the products on the grid padded for
 them (`FlowTransformBindings.padded_length(N, 3)`) and returns every spectral output to the caller's grid;
-`NoDealiasing()` takes the raw products. `decompose` and `with_pressure` fix which optional terms the
-workspace can compute, and their scratch is allocated only when selected.
+`NoDealiasing()` takes the raw products. `decomposition` selects the channel buffers, and a supplied
+`pressure_hat` allocates pressure-dilatation scratch.
 
 `execution` places the work: `ThreadedBackend()` threads the transforms, and `GPUBackend(dev)` puts
 every buffer on `dev`, with buffers there for host inputs. The direct-sum transform indexes scalars, so
@@ -200,17 +205,17 @@ function CompressibleWorkspace(velocity_hat, ks;
                                transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
                                binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
                                geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
-                               execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+                               execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
                                dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-                               decompose::Bool = true,
-                               with_pressure::Bool = false)
+                               decomposition::Union{Types.NoDecomposition,Types.HelmholtzDecomposition} = Types.HelmholtzDecomposition(),
+                               pressure_hat = nothing)
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
-    execution = Types.resolve_execution(execution)
+    execution = Types.resolve_execution(execution, velocity_hat)
     nd = length(ks)
     mc = FTB.spectral_size(ks)      # the caller's coefficient grid
     FT = real(eltype(velocity_hat)); CT = complex(FT)
-    size(velocity_hat)[1:nd] == mc || throw(DimensionMismatch(
-        "field spatial size $(size(velocity_hat)[1:nd]) does not match the wavenumber grid $mc."))
+    Base.front(size(velocity_hat)) == mc || throw(DimensionMismatch(
+        "field spatial size $(Base.front(size(velocity_hat))) does not match the wavenumber grid $mc."))
     # An array in the memory `execution` computes in: `velocity_hat`, or its copy on the device.
     vbuf  = Types._staging_buffer(execution, velocity_hat)
     proto = vbuf === nothing ? velocity_hat : vbuf
@@ -239,7 +244,7 @@ function CompressibleWorkspace(velocity_hat, ks;
     # Host inputs on a device workspace are copied into these, the velocity's being the copy above.
     stage = vbuf === nothing ? (vel = nothing, ρ = nothing, p = nothing) :
             (vel = vbuf, ρ = similar(proto, CT, mc..., 1),
-             p = with_pressure ? similar(proto, CT, mc..., 1) : nothing)
+             p = pressure_hat === nothing ? nothing : similar(proto, CT, mc..., 1))
     # Shell structure of the caller's grid, hoisted so the per-snapshot `!` reallocates nothing. The
     # shell index is in the workspace's memory, where the shell sums read it.
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
@@ -251,14 +256,21 @@ function CompressibleWorkspace(velocity_hat, ks;
     coarse = (v̂ = onc(v̂, nd), N̂1 = onc(N̂1, nd), N̂2 = onc(N̂2, nd))
     # The pressure-dilatation term projects the velocity and momentum onto the rotational/compressive
     # split and reads it out of this scratch, so it is allocated for either term.
-    channels = if decompose || with_pressure
+    channels = if decomposition isa Types.HelmholtzDecomposition
         w = (ûR = ca(), ûC = ca(), v̂R = ca(), v̂C = ca(), N̂1R = ca(), N̂2R = ca(), N̂1C = ca(), N̂2C = ca())
+        work_projection = _projection_workspace(proto, kd, ms)
+        coarse_projection = padded ? _projection_workspace(proto, kdc, mc) : work_projection
         CompressibleChannels(ca(), w.ûR, w.ûC, w.v̂R, w.v̂C, ra(), ra(), ra(), ra(),
-                             w.N̂1R, w.N̂2R, w.N̂1C, w.N̂2C, map(a -> onc(a, nd), w))
+                             w.N̂1R, w.N̂2R, w.N̂1C, w.N̂2C, map(a -> onc(a, nd), w),
+                             (; work = work_projection, coarse = coarse_projection))
+    elseif pressure_hat !== nothing
+        rc = (; ûR = similar(proto, CT, mc..., nd), ûC = similar(proto, CT, mc..., nd),
+                 v̂R = similar(proto, CT, mc..., nd), v̂C = similar(proto, CT, mc..., nd))
+        (; rc, projection = (; coarse = _projection_workspace(proto, kdc, mc)))
     else
         nothing
     end
-    pressure = if with_pressure
+    pressure = if pressure_hat !== nothing
         σh = cs(); σ̃ = ca()
         CompressiblePressure(σh, rg1(), ra(), σ̃, onc(σ̃, nd), onc(σh, 1),
                              similar(proto, CT, mc...), similar(proto, FT, mc...))
@@ -266,7 +278,7 @@ function CompressibleWorkspace(velocity_hat, ks;
         nothing
     end
     return CompressibleWorkspace(
-        dealiasing, ksw, kd, kdc,
+        dealiasing, decomposition, ksw, kd, kdc,
         _resolve_tf(transform, proto, ksw, ns, kd; fft_nthreads = fft_nthreads),
         vel, cs(), v̂, N̂1, N̂2,
         ra(), ra(), ra(), ra(),
@@ -274,18 +286,24 @@ function CompressibleWorkspace(velocity_hat, ks;
         rg(), rg(),
         channels, pressure, maps, coarse,
         similar(proto, FT, mc...),
-        sidx, centers, edges, ns, ms, stage)
+        sidx, centers, edges, ns, ms, stage,
+        _keep_table(proto, ks, dealiasing), similar(proto, FT, length(centers)),
+        copyto!(similar(proto, FT, length(first(ks))), FT[FTB.fold_weight(first(ks), i) for i in eachindex(first(ks))]))
 end
+
+_keep_table(proto, ks, dealiasing) = nothing
+_projection_workspace(proto, kd, ms) = nothing
 
 """
     calculate_compressible_flux(velocity_hat, density_hat, ks; transform=SpectralBackends.AutoSpectralBackend(),
-        binning, geometry=IsotropicShells(), execution=SerialBackend(), pressure_hat=nothing, decompose=true,
+        binning, geometry=IsotropicShells(), execution=AutoBackend(), pressure_hat=nothing,
+        decomposition=HelmholtzDecomposition(),
         dealiasing=OrszagTwoThirds()) -> CompressibleFluxResult
 
 Compressible kinetic-energy spectral transfer `T_u(k)` and cumulative flux `Π(K)` (Singh–Tiwari–
 Sharma–Verma 2025): momentum `v = ρu`, `E_u(k) = ½Re[v·u*]`; the nonlinear transfer conserves total KE
 (`Σ_k T_u ≈ 0`), and the KE↔internal-energy pressure-dilatation is returned separately when
-`pressure_hat` is supplied. `decompose=true` also returns the Helmholtz rotational/compressive flux
+`pressure_hat` is supplied. `decomposition=HelmholtzDecomposition()` also returns the rotational/compressive flux
 channels. `T_u(k) = −dE_u(k)/dt` from the nonlinear terms (positive when shell `k` gives energy to
 other shells) and `Π(K) = Σ_{k≤K} T_u(k)`; in the incompressible limit `T_u` reduces to `ρ ×` the
 incompressible transfer spectrum.
@@ -301,29 +319,24 @@ function calculate_compressible_flux(
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     kwargs...,
 )
     nd = length(ks)
     size(velocity_hat, nd + 1) == nd ||
         throw(ArgumentError("compressible transfer needs D = nd velocity components (got $(size(velocity_hat, nd+1)) for nd=$nd)."))
-    exec = Types.resolve_execution(execution)
-    # Which optional terms a workspace can compute is fixed when it is built, so the one-shot sizes it
-    # from what this call asks for: a supplied `pressure_hat` needs the pressure scratch, `decompose`
-    # the channel set. The batch entry derives them the same way.
-    with_pressure = get(kwargs, :pressure_hat, nothing) !== nothing
-    decompose = get(kwargs, :decompose, true)
+    exec = Types.resolve_execution(execution, velocity_hat)
+    pressure_hat = get(kwargs, :pressure_hat, nothing)
+    decomposition = get(kwargs, :decomposition, Types.HelmholtzDecomposition())
     dealiasing = get(kwargs, :dealiasing, Types.OrszagTwoThirds())
     if exec isa ComputationalBackends.DistributedBackend
-        # The independent work units are the channel set and the pressure-dilatation, each computed on
-        # its own worker from the raw inputs and assembled on the master (Distributed extension).
         return _compressible_distributed(velocity_hat, density_hat, ks, exec;
             transform=transform, binning=binning, geometry=geometry, kwargs...)
     end
     # The workspace lives in `exec`'s memory, the device of a `GPUBackend`, and stages host inputs there.
     ws = CompressibleWorkspace(velocity_hat, ks; transform=transform, binning=binning, geometry=geometry,
-                               execution=exec, dealiasing=dealiasing, decompose=decompose,
-                               with_pressure=with_pressure)
+                               execution=exec, dealiasing=dealiasing, decomposition=decomposition,
+                               pressure_hat=pressure_hat)
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
 end
 
@@ -334,7 +347,7 @@ _compressible_distributed(args...; kwargs...) = throw(ArgumentError(
 
 """
     calculate_compressible_flux_batch(velocity_hats, density_hats, ks; pressure_hats=nothing,
-        transform, binning, geometry, dealiasing, decompose, execution) -> Vector
+        transform, binning, geometry, dealiasing, decomposition, execution) -> Vector
 
 Compressible transfer for a batch of snapshots sharing one grid (`velocity_hats`/`density_hats`
 iterables of coefficient arrays). One [`CompressibleWorkspace`](@ref) is built per worker and reused
@@ -351,8 +364,8 @@ function calculate_compressible_flux_batch(
     binning::Types.AbstractShellBinning = ShellBinning.default_binning(ks),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
-    decompose::Bool = true,
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    decomposition::Union{Types.NoDecomposition,Types.HelmholtzDecomposition} = Types.HelmholtzDecomposition(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n = length(velocity_hats)
@@ -363,25 +376,28 @@ function calculate_compressible_flux_batch(
     if n == 0
         kmax = ShellBinning.max_shell_coordinate(geometry, ks)
         R = _result_type(real(eltype(eltype(velocity_hats))), collect(ShellBinning.shell_centers(binning, kmax)),
-                         ShellBinning.shell_edges(binning, kmax), decompose, pressure_hats !== nothing)
+                         ShellBinning.shell_edges(binning, kmax), decomposition, pressure_hats)
         return R[]
     end
-    return _compressible_batch!(Types.resolve_execution(execution), velocity_hats, density_hats,
+    return _compressible_batch!(Types.resolve_execution(execution, first(velocity_hats)), velocity_hats, density_hats,
                                 pressure_hats, ks; transform = transform, binning = binning,
-                                geometry = geometry, dealiasing = dealiasing, decompose = decompose)
+                                geometry = geometry, dealiasing = dealiasing, decomposition = decomposition)
 end
 
 # One workspace in `execution`'s memory reused across the whole batch, each snapshot staged into it.
 function _compressible_reuse(execution, velocity_hats, density_hats, pressure_hats, ks;
-                             transform, binning, geometry, dealiasing, decompose)
+                             transform, binning, geometry, dealiasing, decomposition)
     ws = CompressibleWorkspace(first(velocity_hats), ks; transform = transform, binning = binning,
-                               geometry = geometry, dealiasing = dealiasing, decompose = decompose,
-                               with_pressure = pressure_hats !== nothing, execution = execution)
+                               geometry = geometry, dealiasing = dealiasing, decomposition = decomposition,
+                               pressure_hat = _pressure_prototype(pressure_hats), execution = execution)
     return [calculate_compressible_flux!(ws, velocity_hats[i], density_hats[i], ks;
                 pressure_hat = pressure_hats === nothing ? nothing : pressure_hats[i],
-                dealiasing = dealiasing, decompose = decompose)
+                dealiasing = dealiasing, decomposition = decomposition)
             for i in eachindex(velocity_hats)]
 end
+
+_pressure_prototype(::Nothing) = nothing
+_pressure_prototype(fields) = first(fields)
 
 # Serial reference.
 _compressible_batch!(::ComputationalBackends.AbstractSerialBackend, velocity_hats, density_hats,
@@ -409,10 +425,10 @@ _compressible_batch!(be::ComputationalBackends.AbstractExecutionBackend, velocit
 
 """
     calculate_compressible_flux!(ws::CompressibleWorkspace, velocity_hat, density_hat, ks;
-                                 pressure_hat=nothing, dealiasing=ws.dealiasing, decompose=true)
+                                 pressure_hat=nothing, dealiasing=ws.dealiasing, decomposition=ws.decomposition)
 
 In-place momentum-weighted compressible transfer reusing `ws` (FFT plans + all field scratch). Returns
-a fresh [`CompressibleFluxResult`](@ref) whose arrays are the small per-shell vectors; the O(field)
+a fresh [`CompressibleFluxResult`](@ref FlowInvariantTransfer.Types.CompressibleFluxResult) whose arrays are the small per-shell vectors; the O(field)
 intermediates live in `ws` and are reused across calls (build the workspace once, loop over snapshots).
 On a workspace in device memory, host inputs are copied into its staging buffers and the per-shell
 vectors are host vectors.
@@ -424,23 +440,21 @@ function calculate_compressible_flux!(
     ks;
     pressure_hat = nothing,
     dealiasing::Types.AbstractDealiasing = ws.dealiasing,
-    decompose::Bool = true,
+    decomposition::Union{Types.NoDecomposition,Types.HelmholtzDecomposition} = ws.decomposition,
 )
     nd = length(ks)
     ns = ws.ns          # working physical grid
     mc = FTB.spectral_size(ks)   # the caller's coefficient grid
     FT = real(eltype(velocity_hat))
     tf = ws.tf
-    colons = ntuple(_ -> Colon(), nd)   # component-slice views for device-generic broadcasts
+    colons = ntuple(_ -> Colon(), Val(length(ks)))   # component-slice views for device-generic broadcasts
     typeof(dealiasing) === typeof(ws.dealiasing) || throw(ArgumentError(
         "this CompressibleWorkspace was built for $(nameof(typeof(ws.dealiasing))); rebuild it with " *
         "dealiasing = $(nameof(typeof(dealiasing)))()."))
-    decompose && ws.channels === nothing && throw(ArgumentError(
-        "this CompressibleWorkspace was built with decompose = false; rebuild it with decompose = true " *
-        "to compute the Helmholtz R/C channels."))
+    decomposition isa Types.HelmholtzDecomposition && !(ws.channels isa CompressibleChannels) && throw(ArgumentError(
+        "this CompressibleWorkspace needs decomposition = HelmholtzDecomposition() to compute channels."))
     pressure_hat !== nothing && ws.pressure === nothing && throw(ArgumentError(
-        "this CompressibleWorkspace was built with with_pressure = false; rebuild it with " *
-        "with_pressure = true to compute the pressure-dilatation term."))
+        "build this CompressibleWorkspace with a pressure_hat prototype to compute pressure dilatation."))
 
     # Inputs in the workspace's memory, then on the working grid: truncated to the kept band, embedded in
     # the padded grid, or copied.
@@ -480,10 +494,10 @@ function calculate_compressible_flux!(
     centers = ws.centers
     N_sh    = length(centers)
 
-    T_spec = _bin(ws.td, sidx, N_sh, FT, ks, mc)
+    T_spec = _bin(ws.td, ws, FT, ks)
     flux   = _flux_from_transfer(T_spec)
 
-    channels = decompose ? _rc_channels!(ws, ûc, ks, mc, sidx, N_sh, FT) : nothing
+    channels = _channel_fluxes!(decomposition, ws, ûc, ks, mc, sidx, N_sh, FT)
     pdil = nothing
     if pressure_hat !== nothing
         pr = ws.pressure
@@ -497,12 +511,21 @@ function calculate_compressible_flux!(
 end
 
 # The result type for shells with these centres and edges, with or without each optional term.
-function _result_type(::Type{FT}, centers, edges, decompose::Bool, with_pressure::Bool) where {FT}
+function _result_type(::Type{FT}, centers, edges, decomposition, pressure) where {FT}
     V  = Vector{FT}
-    CH = decompose ? NamedTuple{(:rotational, :compressive, :rot_to_comp, :comp_to_rot), NTuple{4, V}} : Nothing
-    PD = with_pressure ? NamedTuple{(:rotational, :compressive), NTuple{2, V}} : Nothing
+    CH = _channel_type(FT, decomposition)
+    PD = _pressure_type(FT, pressure)
     return Types.CompressibleFluxResult{typeof(centers), typeof(edges), V, V, CH, PD}
 end
+
+_channel_type(::Type{T}, ::Types.NoDecomposition) where {T} = Nothing
+_channel_type(::Type{T}, ::Types.HelmholtzDecomposition) where {T} =
+    NamedTuple{(:rotational, :compressive, :rot_to_comp, :comp_to_rot), NTuple{4,Vector{T}}}
+_pressure_type(::Type{T}, ::Nothing) where {T} = Nothing
+_pressure_type(::Type{T}, fields) where {T} = NamedTuple{(:rotational, :compressive), NTuple{2,Vector{T}}}
+
+_channel_fluxes!(::Types.NoDecomposition, args...) = nothing
+_channel_fluxes!(::Types.HelmholtzDecomposition, args...) = _rc_channels!(args...)
 
 # `td = ½Re{û*·N̂₁} + ½Re{v̂*·N̂₂}` summed over components, on the caller's grid. `td`'s rank fixes the
 # component-slice views at compile time.
@@ -521,7 +544,7 @@ end
 # the band the cubic products keep alias-free, or copied.
 function _load!(dst, src, ws, ks)
     ws.maps === nothing || return FTB.padded_embed!(dst, src, ws.maps)
-    return _copy_trunc!(dst, src, ks, ws.ms, ws.dealiasing isa Types.OrszagTwoThirds)
+    return _copy_trunc!(dst, src, ks, ws.ms, ws.dealiasing isa Types.OrszagTwoThirds, ws.keep)
 end
 
 # The working grid's coefficients returned to the caller's grid; the same array when they are one.
@@ -529,7 +552,7 @@ _unload!(dst, src, ws) = ws.maps === nothing ? dst : FTB.padded_truncate!(dst, s
 
 # Copy `src` (ms...,C) into `dst`, zeroing the modes outside the band the transfer's cubic products keep
 # alias-free (`FlowTransformBindings.dealias_cutoff(n, 3)` on every axis) if `trunc`.
-function _copy_trunc!(dst, src, ks, ms::NTuple{nd,Int}, trunc::Bool) where {nd}
+function _copy_trunc!(dst, src, ks, ms::NTuple{nd,Int}, trunc::Bool, keep) where {nd}
     C = size(src, nd + 1)
     @inbounds for c in 1:C, I in CartesianIndices(ms)
         dst[I, c] = (trunc && FTB.is_dealiased(ks, I, 3)) ? zero(eltype(dst)) : src[I, c]
@@ -540,7 +563,7 @@ end
 # 𝒩₁ = (u·∇)v + v(∇·u), 𝒩₂ = (u·∇)u  (physical), into preallocated N1,N2. Device-generic: component
 # slices are broadcast/accumulated (no scalar indexing), so this runs on CPU `Array`s and device arrays.
 function _assemble_N!(N1, N2, u_phys, v_phys, gradu, gradv, divu, ns::NTuple{nd,Int}, nd_::Int) where {nd}
-    colons = ntuple(_ -> Colon(), nd)
+    colons = ntuple(_ -> Colon(), Val(nd))
     @inbounds for c in 1:nd_
         N1c = view(N1, colons..., c); N2c = view(N2, colons..., c)
         fill!(N1c, zero(eltype(N1))); fill!(N2c, zero(eltype(N2)))
@@ -565,8 +588,8 @@ function _rc_channels!(ws, ûc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) 
     rc = ch.rc
     ns = ws.ns
     # Givers on the working grid, split with the working grid's derivative wavenumbers.
-    _helmholtz_split!(ch.ûR, ch.ûC, ws.vel, ws.kd, ws.ms)
-    _helmholtz_split!(ch.v̂R, ch.v̂C, ws.v̂, ws.kd, ws.ms)
+    _helmholtz_split!(ch.ûR, ch.ûC, ws.vel, ws.kd, ws.ms, ch.projection.work)
+    _helmholtz_split!(ch.v̂R, ch.v̂C, ws.v̂, ws.kd, ws.ms, ch.projection.work)
     tf.idft!(ch.uR, ch.ûR)
     tf.idft!(ch.uC, ch.ûC)
     tf.idft!(ch.vR, ch.v̂R)
@@ -595,7 +618,7 @@ function _rc_channels!(ws, ûc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) 
     # the rate at which the β part gives energy to the α part (T = −dE/dt, as `T(n,m)` of the
     # shell-to-shell transfer).
     Π(û_β, v̂_β, N̂1, N̂2) =
-        _flux_from_transfer(_bin(_density!(ws.td, û_β, v̂_β, N̂1, N̂2), sidx, N_sh, FT, ks, mc))
+        _flux_from_transfer(_bin(_density!(ws.td, û_β, v̂_β, N̂1, N̂2), ws, FT, ks))
     rr = Π(rc.ûR, rc.v̂R, rc.N̂1R, rc.N̂2R)   # R gives to R
     cc = Π(rc.ûC, rc.v̂C, rc.N̂1C, rc.N̂2C)   # C gives to C
     rc_ = Π(rc.ûR, rc.v̂R, rc.N̂1C, rc.N̂2C)  # R gives to C
@@ -608,8 +631,8 @@ end
 # fields; otherwise the two are the same arrays.
 function _receiver_splits!(ws, ûc, mc)
     rc = ws.channels.rc
-    _helmholtz_split!(rc.ûR, rc.ûC, ûc, ws.kdc, mc)
-    _helmholtz_split!(rc.v̂R, rc.v̂C, ws.coarse.v̂, ws.kdc, mc)
+    _helmholtz_split!(rc.ûR, rc.ûC, ûc, ws.kdc, mc, ws.channels.projection.coarse)
+    _helmholtz_split!(rc.v̂R, rc.v̂C, ws.coarse.v̂, ws.kdc, mc, ws.channels.projection.coarse)
     return rc
 end
 
@@ -617,10 +640,10 @@ end
 # derivative wavenumbers, so the split is built from the grid divergence `i k·û`: the Nyquist component
 # of an even axis contributes nothing to `∂_d` and so nothing to `∇·u`, and a mode at Nyquist on every
 # axis is divergence-free on the grid and comes out purely rotational.
-function _helmholtz_split!(rot, comp, field_hat, kd, ms::NTuple{nd,Int}) where {nd}
+function _helmholtz_split!(rot, comp, field_hat, kd, ms::NTuple{nd,Int}, projection) where {nd}
     FT = real(eltype(field_hat))
     @inbounds for kI in CartesianIndices(ms)
-        k = ntuple(d -> FT(kd[d][kI[d]]), nd)
+        k = ntuple(d -> FT(kd[d][kI[d]]), Val(nd))
         k2 = zero(FT)
         for d in 1:nd; k2 += k[d]^2; end
         if k2 == 0
@@ -648,7 +671,7 @@ end
 function _pressure_dilatation!(ws, ûc, σhc, ks, mc::NTuple{nd,Int}, sidx, N_sh, ::Type{FT}) where {nd, FT}
     tf = ws.tf
     pr = ws.pressure
-    colons = ntuple(_ -> Colon(), nd)
+    colons = ntuple(_ -> Colon(), Val(length(ks)))
     rc = _receiver_splits!(ws, ûc, mc)
     # σ̃ = ∇σ / ρ : physical gradient of σ divided by ρ, back to spectral, then to the caller's grid.
     tf.grad!(pr.gradσ, pr.σh)                             # (ns..., 1, nd) real
@@ -668,7 +691,7 @@ function _pressure_dilatation!(ws, ûc, σhc, ks, mc::NTuple{nd,Int}, sidx, N_sh
         kdotuC .+= ws.kdc[c] .* conj.(view(rc.ûC, colons..., c))
     end
     QC .-= FT(0.5) .* imag.(reshape(σhc, mc) .* kdotuC)
-    return (rotational = _bin(QR, sidx, N_sh, FT, ks, mc), compressive = _bin(QC, sidx, N_sh, FT, ks, mc))
+    return (rotational = _bin(QR, ws, FT, ks), compressive = _bin(QC, ws, FT, ks))
 end
 
 # ---------------------------------------------------------------------------
@@ -679,14 +702,19 @@ _as_scalar(field, ns::NTuple{nd,Int}) where {nd} =
 
 # Shell-sum a per-mode density with the Hermitian weight. Every mode enters: under truncation the
 # momentum term `v̂*·𝒩̂₂` is exact out to twice the kept band, and conservation needs all of it.
-function _bin(td, sidx, N_sh, ::Type{FT}, ks, ms::NTuple{nd,Int}) where {nd, FT}
-    T = zeros(FT, N_sh)
+function _bin(td, ws, ::Type{FT}, ks) where {FT}
+    sidx = ws.sidx
+    T = ws.shell_sums
+    fill!(T, zero(FT))
+    ms = FTB.spectral_size(ks)
     @inbounds for I in CartesianIndices(ms)
         n = sidx[I]; n == 0 && continue
-        T[n] += FTB.mode_fold(ks, I) * td[I]
+        T[n] += ws.fold[I[1]] * td[I]
     end
-    return T
+    return copy(T)
 end
+
+_bin_device!(args...) = throw(ArgumentError("device shell sums require `using KernelAbstractions`."))
 
 # Π(K) = Σ_{k≤K} T_u(k); the last entry is Σ_k T_u, the conservation residual.
 _flux_from_transfer(T_spec) = cumsum(T_spec)

@@ -40,11 +40,11 @@ end
 
 Test.@testset "spherical transfer on a FlowGeometries grid" begin
     N = 12
-    ax = _SS.spherical_axes(_SS.ClenshawCurtisSampling(), N)
+    ax = _SS.spherical_axes(_SS.Fejer1Sampling(), N)
     grid = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(1.0), ax.λ, ax.φ;
-                                   sampling = _SS.ClenshawCurtisSampling())
+                                   sampling = _SS.Fejer1Sampling())
 
-    Test.@testset "Clenshaw–Curtis nodes are the exact-transform nodes" begin
+    Test.@testset "Fejér first-rule nodes are the exact-transform nodes" begin
         θfsh, φfsh = FSH.sph_points(N)
         lats = [FG.Grids.coords(grid, 1, j)[2] for j in 1:N]
         lons = [FG.Grids.coords(grid, i, 1)[1] for i in 1:(2N - 1)]
@@ -89,13 +89,15 @@ Test.@testset "spherical transfer on a FlowGeometries grid" begin
         NUFSHT.nusht_type2_spin!(fbuf, Cs, plan)
         ζv = real.(fbuf)
 
-        # Passing the grid must agree with handing the same nodes, weighted by their cells' areas, to the
-        # scattered entry directly.
-        area = vec(FG.Grids.measure(gll))
+        # Passing the grid must agree with handing the same nodes, weighted by their cells' areas over the
+        # grid's total area, to the scattered entry directly.
+        cell = FG.Grids.measure(gll)
         ref = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(1.0), ζv, (θ, φ);
-                                            lmax = lmax, weights = area .* (4π / sum(area)))
+                                            lmax = lmax, weights = vec(cell) .* (4π / sum(cell)),
+                                            execution = ComputationalBackends.SerialBackend())
         got = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(1.0),
-                                            reshape(ζv, size(gll)), gll; lmax = lmax)
+                                            reshape(ζv, size(gll)), gll; lmax = lmax,
+                                            execution = ComputationalBackends.SerialBackend())
         Test.@test maximum(abs, ref.energy_transfer) > 1e-12
         Test.@test got.energy_transfer == ref.energy_transfer
 
@@ -197,12 +199,13 @@ _input(fields::Tuple{Any, Any}) = fields
 
 # Both strategies on `gm`, the grid `grid` under the mask `m`, against their references on `grid`. `L`
 # is the degree of the fit over the active nodes; `kw` the route's keywords.
-function _check_masked(mth, fields, grid, gm, m, L; kw...)
+function _check_masked(mth, fields, grid, gm, m, L;
+                       execution = ComputationalBackends.SerialBackend(), kw...)
     s = length(fields) == 1 ? 0 : 1
     nan_in = map(f -> ifelse.(m, f, NaN), fields)
 
-    ref0 = FIT.calculate_energy_transfer(mth, _input(map(f -> ifelse.(m, f, 0.0), fields)), grid; kw...)
-    got0 = FIT.calculate_energy_transfer(mth, _input(nan_in), gm; kw...)
+    ref0 = FIT.calculate_energy_transfer(mth, _input(map(f -> ifelse.(m, f, 0.0), fields)), grid; execution, kw...)
+    got0 = FIT.calculate_energy_transfer(mth, _input(nan_in), gm; execution, kw...)
     for (a, b) in zip(_transfers(got0), _transfers(ref0))
         Test.@test maximum(abs, b) > 1e-10                       # the reference carries signal
         Test.@test a == b
@@ -214,8 +217,18 @@ function _check_masked(mth, fields, grid, gm, m, L; kw...)
     Test.@test ok
     sz = size(fields[1])
     fitted = s == 0 ? (reshape(real.(fit), sz),) : (reshape(real.(fit), sz), reshape(imag.(fit), sz))
-    refd = FIT.calculate_energy_transfer(mth, _input(fitted), grid; kw...)
-    gotd = FIT.calculate_energy_transfer(mth, _input(nan_in), gm; inactive = FIT.Types.Exclude(), kw...)
+    refd = FIT.calculate_energy_transfer(mth, _input(fitted), grid; execution, kw...)
+    ws = if mth isa FIT.Types.SphericalTransferMethod
+        FIT.Spherical.SphericalTransferWorkspace(nan_in[1], gm; inactive = FIT.Types.Exclude(), execution, kw...)
+    else
+        FIT.Spherical.DivergentSphericalTransferWorkspace(nan_in, gm; inactive = FIT.Types.Exclude(), execution, kw...)
+    end
+    gotd = try
+        mth isa FIT.Types.SphericalTransferMethod ? FIT.calculate_spherical_transfer!(ws, nan_in[1]) :
+            FIT.calculate_divergent_spherical_transfer!(ws, nan_in...)
+    finally
+        FIT.close!(ws)
+    end
     Test.@test gotd.converged
     for (a, b) in zip(_transfers(gotd), _transfers(refd))
         sc = maximum(abs, b)
@@ -235,7 +248,7 @@ Test.@testset "masked sphere: inactive cells under ZeroFill and Exclude" begin
 
     Test.@testset "exact-transform grid" begin
         N = 12
-        cc = _SS.ClenshawCurtisSampling()
+        cc = _SS.Fejer1Sampling()
         ax = _SS.spherical_axes(cc, N)
         grid = FG.Grids.StructuredGrid(sph, ax.λ, ax.φ; sampling = cc)
         m = trues(size(grid)); m[5:8, 4:6] .= false
@@ -286,15 +299,15 @@ Test.@testset "to_spectral on a FlowGeometries grid" begin
     Random.seed!(21)
     u = randn(N, N); v = randn(N, N)
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    grid = FG.Grids.StructuredGrid(cart, x, y; topology = (true, true))
+    grid = FG.Grids.StructuredGrid(cart, x, y; topology = (FG.Grids.Periodic(), FG.Grids.Periodic()))
 
     ûg, ksg = FIT.to_spectral((u, v), grid)
-    ksc = FIT.Utils.wavenumber_grid((N, N), (L, L); real = true)
+    ksc = FIT.Utils.wavenumber_grid(Float64, (N, N), (L, L))
     Test.@test maximum(abs, ûg[:, :, 1] .- FFTW.rfft(u) ./ N^2) == 0.0
     Test.@test maximum(abs, ûg[:, :, 2] .- FFTW.rfft(v) ./ N^2) == 0.0
     Test.@test all(maximum(abs, collect(ksg[d]) .- collect(ksc[d])) < 1e-12 for d in 1:2)
 
-    ws = FIT.ToSpectralWorkspace((u, v), grid)
+    ws = FIT.ToSpectralWorkspace((u, v), grid; execution = ComputationalBackends.SerialBackend())
     Test.@test FIT.to_spectral!(ws, (u, v))[1] == ûg
     _alloc_to_spectral!(ws, (u, v))                       # warm
     Test.@test _alloc_to_spectral!(ws, (u, v)) == 0
@@ -306,13 +319,13 @@ Test.@testset "to_spectral on a FlowGeometries grid" begin
     Test.@test _alloc_to_spectral!(wst, (u, v)) < 4096
 
     # A bounded direction carries no Fourier period.
-    gb = FG.Grids.StructuredGrid(cart, x, y; topology = (true, false))
+    gb = FG.Grids.StructuredGrid(cart, x, y; topology = (FG.Grids.Periodic(), FG.Grids.Bounded()))
     Test.@test_throws ArgumentError FIT.to_spectral((u, v), gb)
 
     # A spherical grid is not this transform's domain.
-    ax = _SS.spherical_axes(_SS.ClenshawCurtisSampling(), 8)
+    ax = _SS.spherical_axes(_SS.Fejer1Sampling(), 8)
     gsph = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(1.0), ax.λ, ax.φ;
-                                   sampling = _SS.ClenshawCurtisSampling())
+                                   sampling = _SS.Fejer1Sampling())
     Test.@test_throws ArgumentError FIT.to_spectral((zeros(15, 8), zeros(15, 8)), gsph)
 end
 
@@ -327,12 +340,13 @@ Test.@testset "scattered NUFFT entries on a node grid" begin
     u = sin.(xs) .* cos.(ys); v = cos.(xs) .* sin.(ys)
     geom = FG.Geometry.CartesianGeometry{Float64}()
     grid = FG.Grids.UnstructuredGrid(geom, (xs, ys), fill(L^2 / n, n);
-                                     periodic = (true, true), period = (L, L))
+                                     topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (L, L))
     ms = (12, 12)
 
-    ûg, ksg = FIT.to_spectral((u, v), grid, ms; transform = FTB.NonuniformFFTsBackend(), tol = 1e-12)
+    ûg, ksg = FIT.to_spectral((u, v), grid, ms; transform = FTB.NonuniformFFTsBackend(), tol = 1e-12,
+                              execution = ComputationalBackends.SerialBackend())
     ûc, ksc = FIT.to_spectral((u, v), (xs, ys), ms; transform = FTB.NonuniformFFTsBackend(),
-                              Ls = (L, L), tol = 1e-12)
+                              Ls = (L, L), tol = 1e-12, execution = ComputationalBackends.SerialBackend())
     # Both run their transforms on one thread, so the two plan instances agree bit for bit.
     Test.@test maximum(abs, ûg .- ûc) == 0
     Test.@test all(collect(ksg[d]) == collect(ksc[d]) for d in 1:2)

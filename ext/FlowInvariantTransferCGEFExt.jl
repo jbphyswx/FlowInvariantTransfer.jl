@@ -11,6 +11,10 @@ _to_cgef_kernel(::FIT.Types.GaussianFilter)      = CGEF.Kernels.GaussianKernel()
 _to_cgef_kernel(::FIT.Types.TopHatFilter)        = CGEF.Kernels.TopHatKernel()
 _to_cgef_kernel(::FIT.Types.SharpSpectralFilter) = CGEF.Kernels.SharpSpectralKernel()
 
+# The vertical velocity of a three-component field, `nothing` for two components.
+_vertical(fields::Tuple{Any,Any,Any}) = fields[3]
+_vertical(::Tuple{Any,Any}) = nothing
+
 # ---------------------------------------------------------------------------
 # Override CoarseGrainingFlux._cg_flux_cgef
 # ---------------------------------------------------------------------------
@@ -128,8 +132,8 @@ function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagno
     filter_plan = CGEF.Filtering.plan_filter(grid, kernel, FT(ℓ); mask_strategy = mask_strategy, execution = backend)
     # The workspace lives in the memory of the plan's backend and holds the vector filter CGEF resolves for
     # the grid and the plan's mask strategy. A third component on a two-dimensional grid is the thin-layer
-    # vertical velocity, whose buffers the workspace holds only when asked.
-    workspace = CGEF.Diagnostics.ΠWorkspace(grid; has_w = D == 3,
+    # vertical velocity, whose buffers the workspace holds only when given one.
+    workspace = CGEF.Diagnostics.ΠWorkspace(grid, (), _vertical(velocity_fields);
                                            execution = CGEF.Filtering.plan_execution(filter_plan),
                                            vector_filter = CGEF.Filtering.resolve_vector_filter(
                                                grid, mask_strategy, vector_filter))
@@ -189,10 +193,9 @@ function FIT.CoarseGrainingFlux._cg_flux_cgef!(
     # vector, so the array rank does not say how many velocity directions there are. `compute_Π!` takes
     # the kernel and scale positionally and reuses the prebuilt plans.
     D = length(velocity_fields)
-    w_comp = D == 3 ? fields[3] : nothing
     CGEF.Diagnostics.compute_Π!(
         Π_out,
-        fields[1], fields[2], w_comp,
+        fields[1], fields[2], _vertical(fields),
         ws.grid,
         ws.kernel,
         ws.scale;
@@ -262,8 +265,7 @@ function FIT.CoarseGrainingFlux.calculate_band_energies(
 )
     FT = eltype(velocity_fields[1])
     grid = _cg_domain_grid(geometry, FT, radius, mask)
-    w = length(velocity_fields) == 3 ? velocity_fields[3] : nothing
-    return CGEF.Diagnostics.band_energies(velocity_fields[1], velocity_fields[2], w, grid,
+    return CGEF.Diagnostics.band_energies(velocity_fields[1], velocity_fields[2], _vertical(velocity_fields), grid,
                                           _to_cgef_kernel(filter), collect(FT, scales);
                                           vector_filter = vector_filter, kwargs...)
 end

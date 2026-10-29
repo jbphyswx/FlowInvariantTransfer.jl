@@ -18,17 +18,22 @@ export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, Coa
 # ---------------------------------------------------------------------------
 # Execution-backend resolution
 # ---------------------------------------------------------------------------
+# Whether a capability's extension is loaded: `false` here, `true` from the extension that provides it.
+# `_HostFFT` is an FFT library for host arrays (FFTW), `_Threads` the threaded paths (OhMyThreads).
+abstract type _Capability end
+struct _HostFFT <: _Capability end
+struct _Threads <: _Capability end
+_available(::_Capability) = false
+
 # Concrete execution backends pass through `ComputationalBackends.resolve_backend`; `AutoBackend`
 # resolves to `ThreadedBackend` when the OhMyThreads extension is loaded and Julia has more than one
 # thread, else to `SerialBackend`.
 resolve_execution(execution::ComputationalBackends.AbstractExecutionBackend) = ComputationalBackends.resolve_backend(execution)
-function resolve_execution(::ComputationalBackends.AutoBackend)
-    if Threads.nthreads() > 1 &&
-       Base.get_extension(parentmodule(@__MODULE__), :FlowInvariantTransferOhMyThreadsExt) !== nothing
-        return ComputationalBackends.ThreadedBackend()
-    end
-    return ComputationalBackends.SerialBackend()
-end
+resolve_execution(::ComputationalBackends.AutoBackend) =
+    (Threads.nthreads() > 1 && _available(_Threads())) ? ComputationalBackends.ThreadedBackend() :
+                                                        ComputationalBackends.SerialBackend()
+resolve_execution(execution::ComputationalBackends.AbstractExecutionBackend, input) = resolve_execution(execution)
+function _device_execution end
 
 # The error a batch `entry` raises when the method for `be` is not loaded: the threaded, Distributed and
 # MPI methods live in the extensions of those packages.
@@ -55,7 +60,7 @@ with a one-time warning.
 """
 resolve_transform(transform::SpectralBackends.AbstractSpectralBackend) = transform
 function resolve_transform(::SpectralBackends.AbstractAutoSpectralBackend)
-    if _fft_backend_available()
+    if _available(_HostFFT())
         return SpectralBackends.FFTSpectralBackend()
     end
     @warn("No FFT backend loaded: falling back to the O(N^2D) direct-sum reference, which is " *
@@ -109,17 +114,6 @@ copied into `buf`. A `nothing` buffer stages nothing.
 """
 _staged!(::Nothing, x) = x
 _staged!(buf, x) = (_is_device(buf) && !_is_device(x)) ? copyto!(buf, x) : x
-
-"""
-    _FFT_BACKEND_LOADED
-
-Set to `true` by the FFTW extension's `__init__` and read by [`resolve_transform`](@ref) on every
-call. The extension signals through a flag because an extension that overwrites a parent method
-fails to precompile.
-"""
-const _FFT_BACKEND_LOADED = Ref(false)
-
-_fft_backend_available() = _FFT_BACKEND_LOADED[]
 
 # ---------------------------------------------------------------------------
 # Method hierarchy

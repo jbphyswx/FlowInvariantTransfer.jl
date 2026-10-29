@@ -120,9 +120,10 @@ Spectral decomposition into the caller-provided component buffers of `out` (`(po
 `(toroidal, poloidal)`), allocation-free and device-generic.
 
 Both components are Hermitian for a real field, so either spectral layout represents them: under
-`k ↦ −k` the frame obeys `e1 ↦ −e1` and `e2 ↦ e2`, which carries `u_±(−k) = conj(u_±(k))`. The
-Nyquist mode of an even axis is its own mirror and fixes no `k` direction; the 2/3 rule discards that
-mode before any decomposition-based diagnostic sees it.
+`k ↦ −k` the frame obeys `e1 ↦ −e1` and `e2 ↦ e2`, which carries `u_±(−k) = conj(u_±(k))`. The frame
+is built from the derivative wavenumbers the package's curl and divergence use, zero along an even
+axis at its Nyquist slot, so a mode there has the frame of its own mirror and is split as those
+operators see it.
 """
 function decompose_field! end
 
@@ -133,7 +134,7 @@ function decompose_field!(out::NamedTuple, ::Types.HelicalDecomposition,
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     up = out.positive; um = out.negative
-    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)
@@ -195,7 +196,7 @@ function decompose_field!(out::NamedTuple, ::Types.ToroidalPoloidalDecomposition
     D  = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
     tor = out.toroidal; pol = out.poloidal
-    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks)
+    kg = FTB.wavenumber_arrays(velocity_hat, FT, ks; derivative = true)
     kxg, kyg, kzg = kg[1], kg[2], kg[3]
     u1 = selectdim(velocity_hat, nd + 1, 1)
     u2 = selectdim(velocity_hat, nd + 1, 2)

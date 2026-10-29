@@ -29,16 +29,17 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    wavenumber_grid(ns, Ls; real=false) -> NTuple{D, AbstractWavenumberAxis}
+    wavenumber_grid([T,] ns, Ls) -> NTuple{D, AbstractWavenumberAxis}
 
 The physical wavenumber axes of an `ns`-point periodic grid of side lengths `Ls`, `k = 2πm/L`, in the
-FFTW `fftfreq` order (`m = 0, 1, …, ⌊(N−1)/2⌋, −⌊N/2⌋, …, −1`). With `real = true` the first axis is
-the `rfftfreq` half `m = 0…N₁÷2` — the layout of a real field's `rfft` — and the remaining axes stay
-`fftfreq`. The axes are `FlowTransformBindings.RFFTAxis` / `FlowTransformBindings.FFTAxis`: no
-wavenumber array is stored, and they carry the field's spectral layout for every diagnostic.
+FFTW `fftfreq` order (`m = 0, 1, …, ⌊(N−1)/2⌋, −⌊N/2⌋, …, −1`), for a spectrum of a field of element
+type `T`. For a real `T` the first axis is the `rfftfreq` half `m = 0…N₁÷2` — the layout of a real
+field's `rfft` — and the remaining axes stay `fftfreq`; without `T`, every axis is `fftfreq`. The axes are
+`FlowTransformBindings.RFFTAxis` / `FlowTransformBindings.FFTAxis`: no wavenumber array is stored, and
+they carry the field's spectral layout for every diagnostic.
 """
-wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D,Real}; real::Bool = false) where {D} =
-    real ? FTB.wavenumber_axes(Ls, ns, Val(true)) : FTB.wavenumber_axes(Ls, ns, Val(false))
+wavenumber_grid(::Type{T}, ns::NTuple{D,Int}, Ls::NTuple{D,Real}) where {T<:Number,D} = FTB.wavenumber_axes(T, Ls, ns)
+wavenumber_grid(ns::NTuple{D,Int}, Ls::NTuple{D,Real}) where {D} = wavenumber_grid(ComplexF64, ns, Ls)
 
 """
     wavenumber_magnitude_grid(ks) -> Array{T, D}
@@ -93,31 +94,16 @@ function validate_velocity_input(velocity_components::Tuple, dims::Int)
 end
 
 """
-    validate_uniform_grid(coords_vecs; tol = nothing) -> NTuple{D}
+    validate_uniform_grid(coords_vecs) -> NTuple{D}
 
-The spacing `Δ = (x_N − x_1)/(N − 1)` of each coordinate vector, in its float type, after checking
-that every step equals `Δ` to `tol` relative to the coordinates' magnitude `max(|x_1|, |x_N|, |Δ|)`
-(`tol = nothing`: `√eps` of the coordinates' float type). A vector of fewer than two points has spacing
-zero.
-
-Throws `ArgumentError` if a step differs from `Δ` by more than that.
+Return the spacing of each range. Coordinate vectors require a FlowGeometries grid that declares
+their sampling and period.
 """
-function validate_uniform_grid(coords_vecs::NTuple{D, <:AbstractVector}; tol::Union{Nothing, Real} = nothing) where {D}
-    return ntuple(Val(D)) do d
-        cv = coords_vecs[d]
-        FT = float(eltype(cv))
-        length(cv) < 2 && return zero(FT)
-        Δ = FT(cv[end] - cv[begin]) / (length(cv) - 1)
-        rtol = tol === nothing ? sqrt(eps(FT)) : FT(tol)
-        bound = rtol * max(abs(FT(cv[begin])), abs(FT(cv[end])), abs(Δ))
-        for i in 2:length(cv)
-            abs(FT(cv[i] - cv[i-1]) - Δ) > bound && throw(ArgumentError(
-                "coordinate direction $d is not uniform: step $(cv[i] - cv[i-1]) at index $i against the " *
-                "mean spacing $Δ (tolerance $bound)."))
-        end
-        return Δ
-    end
-end
+validate_uniform_grid(coords_vecs::Tuple) = map(_uniform_spacing, coords_vecs)
+
+_uniform_spacing(axis::AbstractRange) = float(step(axis))
+_uniform_spacing(::AbstractVector) = throw(ArgumentError(
+    "coordinate-vector input needs a FlowGeometries grid with an explicit period; pass ranges for a uniform periodic box."))
 
 """
     domain_size_from_coords(coords_vecs) -> NTuple{D}
@@ -127,14 +113,7 @@ x_1 + (N−1)Δ`, the last one step short of `x_1 + L`, in the coordinates' floa
 ends at `x_1 + L` repeats the first sample and does not meet this contract. A vector of fewer than two
 points has period 1.
 """
-function domain_size_from_coords(coords_vecs::NTuple{D, <:AbstractVector}) where {D}
-    return ntuple(Val(D)) do d
-        cv = coords_vecs[d]
-        FT = float(eltype(cv))
-        N = length(cv)
-        N < 2 && return one(FT)
-        return N * (FT(cv[end] - cv[begin]) / (N - 1))
-    end
-end
+domain_size_from_coords(coords_vecs::Tuple) = map((axis, spacing) -> length(axis) * spacing,
+                                                coords_vecs, validate_uniform_grid(coords_vecs))
 
 end # module Utils

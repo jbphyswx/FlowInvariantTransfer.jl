@@ -28,13 +28,13 @@ allocating API and zero-allocation `!`-variants.
 The hierarchy is exact: `S(k|p)` → (sum over `p`) → `T(k)` → (cumsum) → `Π(K)`; and
 `S(k|p)` → (sum over shells) → `T(n,m)`.
 
-**Invariants** (`invariant=`): [`KineticEnergy`](@ref), [`Helicity`](@ref), [`Enstrophy`](@ref),
-[`PassiveScalar`](@ref) (+ scalar convenience wrappers, and the buoyancy/APE & QG mapping).
-**Decompositions** (`decomposition=`): [`HelmholtzDecomposition`](@ref),
-[`HelicalDecomposition`](@ref), [`ToroidalPoloidalDecomposition`](@ref).
-**Geometry** (`geometry=`): [`IsotropicShells`](@ref), [`PerpendicularShells`](@ref),
-[`ParallelShells`](@ref). **Dealiasing** (`dealiasing=`): [`OrszagTwoThirds`](@ref) (default),
-[`NoDealiasing`](@ref), [`PaddedThreeHalves`](@ref) (exact 3/2 padding).
+**Invariants** (`invariant=`): [`KineticEnergy`](@ref FlowInvariantTransfer.Types.KineticEnergy), [`Helicity`](@ref FlowInvariantTransfer.Types.Helicity), [`Enstrophy`](@ref FlowInvariantTransfer.Types.Enstrophy),
+[`PassiveScalar`](@ref FlowInvariantTransfer.Types.PassiveScalar) (+ scalar convenience wrappers, and the buoyancy/APE & QG mapping).
+**Decompositions** (`decomposition=`): [`HelmholtzDecomposition`](@ref FlowInvariantTransfer.Types.HelmholtzDecomposition),
+[`HelicalDecomposition`](@ref FlowInvariantTransfer.Types.HelicalDecomposition), [`ToroidalPoloidalDecomposition`](@ref FlowInvariantTransfer.Types.ToroidalPoloidalDecomposition).
+**Geometry** (`geometry=`): [`IsotropicShells`](@ref FlowInvariantTransfer.Types.IsotropicShells), [`PerpendicularShells`](@ref FlowInvariantTransfer.Types.PerpendicularShells),
+[`ParallelShells`](@ref FlowInvariantTransfer.Types.ParallelShells). **Dealiasing** (`dealiasing=`): [`OrszagTwoThirds`](@ref FlowInvariantTransfer.Types.OrszagTwoThirds) (default),
+[`NoDealiasing`](@ref FlowInvariantTransfer.Types.NoDealiasing), [`PaddedThreeHalves`](@ref FlowInvariantTransfer.Types.PaddedThreeHalves) (exact 3/2 padding).
 
 ---
 
@@ -45,14 +45,14 @@ using Pkg
 Pkg.add("FlowInvariantTransfer")
 ```
 
-The core is dependency-free ([`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend)); load `FFTW` for the `O(N log N)`
-[`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend) and other packages for optional features.
+The direct-sum backend has no transform-library dependency. Load `FFTW` for `FFTSpectralBackend`
+and other packages for optional features.
 
 ## Backends
 
-Two orthogonal axes: **`transform`** ([`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend), [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend), …)
-× **`execution`** (parallelism: [`SerialBackend`](@ref ComputationalBackends.SerialBackend), [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend),
-[`DistributedBackend`](@ref ComputationalBackends.DistributedBackend), [`GPUBackend`](@ref ComputationalBackends.GPUBackend)).
+Two orthogonal axes: **`transform`** (`DirectSumSpectralBackend`, `FFTSpectralBackend`, …)
+× **`execution`** (parallelism: `SerialBackend`, `ThreadedBackend`,
+`DistributedBackend`, `GPUBackend`).
 
 | Diagnostic | Direct | FFT | Threaded | Distributed | GPU |
 |-----------|:------:|:---:|:--------:|:-----------:|:---:|
@@ -84,7 +84,7 @@ using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
 
 # A real divergence-free 2-D velocity on the 2π-periodic box, as its half spectrum
 N = 32; L = 2π
-ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L); real = true)
+ks = FlowInvariantTransfer.Utils.wavenumber_grid(Float64, (N, N), (L, L))
 kx = [k for k in ks[1], _ in ks[2]]; ky = [k for _ in ks[1], k in ks[2]]
 ψ̂  = FFTW.rfft(randn(N, N)) ./ N^2
 û  = cat(im .* ky .* ψ̂, -im .* kx .* ψ̂; dims = 3)   # (u, v) = (∂ψ/∂y, −∂ψ/∂x)
@@ -124,7 +124,7 @@ sf.flux        # Π_θ; Σ T_θ = 0 to round-off for a divergence-free velocity
 
 ```julia
 M  = 16
-k3 = FlowInvariantTransfer.Utils.wavenumber_grid((M, M, M), (L, L, L); real = true)
+k3 = FlowInvariantTransfer.Utils.wavenumber_grid(Float64, (M, M, M), (L, L, L))
 q1 = [k for k in k3[1], _ in k3[2], _ in k3[3]]
 q2 = [k for _ in k3[1], k in k3[2], _ in k3[3]]
 q3 = [k for _ in k3[1], _ in k3[2], k in k3[3]]
