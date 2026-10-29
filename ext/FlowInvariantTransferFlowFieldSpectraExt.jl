@@ -15,6 +15,9 @@ using ComputationalBackends: ComputationalBackends
 const _FFSMethod = Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTransferMethod,
                          FIT.Types.ModeToModeTransferMethod}
 
+# One `Periodic()` tag per direction of `axes`.
+_all_periodic(axes::Tuple) = map(_ -> FFS.FlowGeometries.Grids.Periodic(), axes)
+
 # `FFS.calculate_spectrum` is declared on `FlowGeometries.Grids.AbstractGrid` and selects its transform
 # from the grid, so a grid passed here reaches whichever one its geometry and sampling admit. It returns
 # `û = fft(u)/∏ms` on FlowTransformBindings' axes, the packed half for a real field, which is the input
@@ -25,7 +28,7 @@ function FIT._physical_energy_transfer(
     velocity_fields::Tuple,
     grid::FFS.FlowGeometries.Grids.AbstractGrid,
     ms::Tuple;
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     kwargs...
 )
     coeffs, ks = FFS.calculate_spectrum(grid, velocity_fields, ms; transform = spectral, execution = execution)
@@ -44,11 +47,10 @@ function FIT._physical_energy_transfer(
     domain_size = nothing,
     kwargs...
 )
-    nd  = length(coords_vecs)
     FT  = float(eltype(coords_vecs[1]))
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
     grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...;
-                                                   topology = ntuple(_ -> true, nd), period = domain_size)
+                                                   topology = _all_periodic(coords_vecs), period = domain_size)
     return FIT._physical_energy_transfer(spectral, method, velocity_fields, grid, ms; kwargs...)
 end
 
@@ -70,6 +72,7 @@ plans: the packed half for a real field, the full cube for a complex one. The wa
 analysis plan's: along an axis where `±N/2` are distinct modes the box holds both, an odd length.
 """
 function _ffs_workspace(proto, grid, ns::Tuple, ::Type{ET}, D::Int, spectral, execution) where {ET}
+    execution = FIT.Types.resolve_execution(execution, proto)
     ap = FFS.plan_spectrum(grid, ET, ns; transform = spectral, execution = execution, batch = (D,))
     sp = FFS.plan_synthesis(grid, ET, ns; transform = spectral, execution = execution, batch = (D,))
     ks = FFS.wavenumbers(ap)
@@ -89,17 +92,16 @@ function _check_fourier_grid(grid)
             "`to_spectral` is the Cartesian Fourier analysis; this grid is on " *
             "$(nameof(typeof(FFS.FlowGeometries.Grids.grid_geometry(grid)))). Spherical data goes to " *
             "`calculate_energy_transfer(SphericalTransferMethod(), field, grid)`."))
-    nd = ndims(grid)
-    Ls = ntuple(d -> FFS.FlowGeometries.Grids.period(grid, d), nd)
+    Ls = ntuple(d -> FFS.FlowGeometries.Grids.period(grid, d), Val(ndims(grid)))
     all(L -> isfinite(L) && L > 0, Ls) || throw(ArgumentError(
         "physical → spectral expands in a periodic basis, and direction " *
         "$(findfirst(L -> !(isfinite(L) && L > 0), Ls)) of this grid carries no period. Build it with " *
-        "`topology = true` (or `periodic`/`period`) in every direction."))
+        "`topology = FlowGeometries.Grids.Periodic()` and `period` in every direction."))
     return size(grid)
 end
 
 """
-    ToSpectralWorkspace(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution, real_layout)
+    ToSpectralWorkspace(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution)
 
 Analysis workspace with the domain given as a `FlowGeometries` grid. The transform is
 `FlowFieldSpectra.plan_spectrum` on that grid, so the grid's own geometry, spacing and topology select
@@ -109,11 +111,7 @@ function FIT.ToSpectralWorkspace(
     velocity_fields::Tuple,
     grid::FFS.FlowGeometries.Grids.AbstractGrid;
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    # The thread count is fixed in the transform plan, and a multithreaded plan spawns a task per thread
-    # on every execution, so the default plans single-threaded; `execution = ThreadedBackend()` threads a
-    # single large transform.
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-    real_layout::Bool = eltype(first(velocity_fields)) <: Real,
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     D = length(velocity_fields)
     D >= 1 || throw(ArgumentError("to_spectral needs ≥1 physical field component."))
@@ -125,20 +123,13 @@ function FIT.ToSpectralWorkspace(
         "`to_spectral` analyses gridded data; got transform = $(nameof(typeof(transform))). Scattered " *
         "Cartesian points take `to_spectral(fields, points, ms; Ls)` with a NUFFT provider, and " *
         "spherical data `calculate_energy_transfer(SphericalTransferMethod(), field, grid)`."))
-    real_layout && !(eltype(first(velocity_fields)) <: Real) && throw(ArgumentError(
-        "the half spectral layout stores the non-redundant half of a REAL field's transform, and these " *
-        "fields are $(eltype(first(velocity_fields))); pass `real_layout = false` for the full spectrum."))
     ns = _check_fourier_grid(grid)
-    FT = float(real(eltype(first(velocity_fields))))
-    # The transform's layout follows the element type it is planned for: a real field packs to the
-    # non-redundant half, a complex one to the full cube. A real field asked for the full spectrum is
-    # therefore staged complex.
-    ET = real_layout ? FT : Complex{FT}
+    ET = float(promote_type(map(eltype, velocity_fields)...))
     return _ffs_workspace(first(velocity_fields), grid, ns, ET, D, transform, execution)
 end
 
 """
-    to_spectral(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution, real_layout)
+    to_spectral(velocity_fields, grid::FlowGeometries.Grids.AbstractGrid; transform, execution)
 
 Physical → spectral on a `FlowGeometries` grid; see [`to_spectral`](@ref).
 """
@@ -150,26 +141,21 @@ FIT.to_spectral(velocity_fields::Tuple, grid::FFS.FlowGeometries.Grids.AbstractG
 function FIT._to_spectral_workspace_on_coeffs(
     velocity_hat::AbstractArray, ks::Tuple;
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     nd = length(ks)
     ns = FTB.full_size(ks)
     ms = FTB.spectral_size(ks)
-    size(velocity_hat)[1:nd] == ms || throw(DimensionMismatch(
-        "coefficient size $(size(velocity_hat)[1:nd]) does not match the wavenumber grid $ms."))
+    lead = ntuple(d -> size(velocity_hat, d), Val(nd))
+    lead == ms || throw(DimensionMismatch("coefficient size $lead does not match the wavenumber grid $ms."))
     D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
-    Ls = ntuple(d -> begin
-        a = ks[d]
-        dk = length(a) > 1 ? abs(a[2] - a[1]) : one(FT)
-        FT(2π) / FT(dk)
-    end, nd)
+    Ls = map(a -> FT(2π) / FT(length(a) > 1 ? abs(a[2] - a[1]) : one(FT)), ks)
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    axes_ = ntuple(d -> range(zero(FT); step = Ls[d] / ns[d], length = ns[d]), nd)
-    grid = FFS.FlowGeometries.Grids.StructuredGrid(
-        geom, axes_...; topology = ntuple(_ -> true, nd), period = Ls)
+    axes_ = map((L, n) -> range(zero(FT); step = L / n, length = n), Ls, ns)
+    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, axes_...; topology = _all_periodic(ks), period = Ls)
     # A half layout is the transform of a real field, so the plans are built for one.
-    ET = FTB.is_halved(ks) ? FT : Complex{FT}
+    ET = _field_type(first(ks), FT)
     return _ffs_workspace(velocity_hat, grid, ns, ET, D, transform, execution)
 end
 
@@ -181,10 +167,12 @@ function FIT._to_spectral_workspace_on_axes(velocity_fields::Tuple, coords_vecs:
     Ls = FIT.Utils.domain_size_from_coords(coords_vecs)
     FT = float(real(eltype(first(velocity_fields))))
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    grid = FFS.FlowGeometries.Grids.StructuredGrid(
-        geom, coords_vecs...; topology = ntuple(_ -> true, length(coords_vecs)), period = Ls)
+    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...; topology = _all_periodic(coords_vecs), period = Ls)
     return FIT.ToSpectralWorkspace(velocity_fields, grid; kwargs...)
 end
+
+_field_type(::FTB.RFFTAxis, ::Type{T}) where {T} = T
+_field_type(::AbstractVector, ::Type{T}) where {T} = Complex{T}
 
 
 # ---------------------------------------------------------------------------

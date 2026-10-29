@@ -95,7 +95,7 @@ using FlowInvariantTransfer.Workspaces: ShellToShellWorkspace
 
 # A real divergence-free 2-D velocity on the 2π-periodic box, as its half spectrum
 N = 32; L = 2π
-ks = FlowInvariantTransfer.Utils.wavenumber_grid((N, N), (L, L); real = true)
+ks = FlowInvariantTransfer.Utils.wavenumber_grid(Float64, (N, N), (L, L))
 kx = [k for k in ks[1], _ in ks[2]]; ky = [k for _ in ks[1], k in ks[2]]
 ψ̂  = FFTW.rfft(randn(N, N)) ./ N^2
 û  = cat(im .* ky .* ψ̂, -im .* kx .* ψ̂; dims = 3)   # (u, v) = (∂ψ/∂y, −∂ψ/∂x)
@@ -140,7 +140,7 @@ sf.flux        # Π_θ; Σ T_θ = 0 to round-off for a divergence-free velocity
 
 ```julia
 M  = 16
-k3 = FlowInvariantTransfer.Utils.wavenumber_grid((M, M, M), (L, L, L); real = true)
+k3 = FlowInvariantTransfer.Utils.wavenumber_grid(Float64, (M, M, M), (L, L, L))
 q1 = [k for k in k3[1], _ in k3[2], _ in k3[3]]
 q2 = [k for _ in k3[1], k in k3[2], _ in k3[3]]
 q3 = [k for _ in k3[1], _ in k3[2], k in k3[3]]
@@ -287,7 +287,7 @@ coarse-graining / spherical layers.
 | `Distributed` | multi-process diagnostics and batches |
 | `KernelAbstractions` | GPU kernels |
 | `GPUArraysCore` | device-array paths of the compressible transfer and TOD |
-| `MPI` / `MPI` + `PencilFFTs` + `PencilArrays` | batch axis (`mpi_batch_map`) / pencil axis (`pencil_spectral_flux`) |
+| `MPI` / `MPI` + `PencilFFTs` + `PencilArrays` + `FlowGeometries` | batch axis (`mpi_batch_map`) / pencil axis (`pencil_spectral_flux`) |
 | `HelmholtzDecomposition` | rotational/divergent decomposition |
 | `CoarseGrainingEnergyFluxes` | pointwise coarse-graining flux `Π_ℓ(x)` |
 | `NonuniformFFTs` or `FINUFFT` / `NUFSHT` / `FastSphericalHarmonics` + `FFTW` | scattered-Cartesian (through FlowTransformBindings) / scattered-spherical / regular-spherical front-ends |

@@ -20,14 +20,14 @@ using FlowInvariantTransfer.ComputationalBackends: ThreadedBackend, DistributedB
 *Which transform* computes a diagnostic and *how that work is run* are separate choices:
 
 - **Transform** (`transform::AbstractSpectralBackend`) — **which transform** computes the
-  pseudospectral nonlinear term: [`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend) (direct DFT, no deps, the correctness
-  oracle), [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend) (FFTW, the `O(Nᴰ log N)` workhorse), the NUFFT library tags
-  `FlowTransformBindings.NonuniformFFTsBackend` / `FINUFFTBackend` (scattered Cartesian), [`FSHTSpectralBackend`](@ref SpectralBackends.FastSphericalHarmonicsTransformSpectralBackend) (regular spherical), [`NUFSHTSpectralBackend`](@ref SpectralBackends.NonUniformFastSphericalHarmonicsTransformSpectralBackend)
+  pseudospectral nonlinear term: `DirectSumSpectralBackend` (direct DFT, no deps, the correctness
+  oracle), `FFTSpectralBackend` (FFTW, the `O(Nᴰ log N)` workhorse), the NUFFT library tags
+  `FlowTransformBindings.NonuniformFFTsBackend` / `FINUFFTBackend` (scattered Cartesian), `FSHTSpectralBackend` (regular spherical), `NUFSHTSpectralBackend`
   (scattered spherical).
 - **Execution backend** (`execution::AbstractExecutionBackend`) — **how the outer work** (shell/mode
-  loops and reductions) is parallelised: [`SerialBackend`](@ref ComputationalBackends.SerialBackend), [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend)
-  (OhMyThreads), [`DistributedBackend`](@ref ComputationalBackends.DistributedBackend) (`Distributed`),
-  [`GPUBackend`](@ref ComputationalBackends.GPUBackend)`{B}` (KernelAbstractions), [`AutoBackend`](@ref ComputationalBackends.AutoBackend) (best-available).
+  loops and reductions) is parallelised: `SerialBackend`, `ThreadedBackend`
+  (OhMyThreads), `DistributedBackend` (`Distributed`),
+  `GPUBackend{B}` (KernelAbstractions), `AutoBackend` (best-available).
 
 They compose: e.g. `transform = FFTSpectralBackend(), execution = ThreadedBackend()` runs FFT nonlinear
 terms with a threaded mediator loop. A typical call:
@@ -45,19 +45,19 @@ result = calculate_shell_to_shell_transfer(û, ks;
 
 | Transform | Dependency | Best for |
 |---|---|---|
-| [`DirectSumSpectralBackend`](@ref SpectralBackends.DirectSumSpectralBackend) | None | Reference results, debugging, tiny grids (the oracle) |
-| [`FFTSpectralBackend`](@ref SpectralBackends.FastFourierTransformSpectralBackend) | `FFTW` | Production spectral diagnostics on regular periodic grids |
+| `DirectSumSpectralBackend` | None | Reference results, debugging, tiny grids (the oracle) |
+| `FFTSpectralBackend` | `FFTW` | Production spectral diagnostics on regular periodic grids |
 | `FlowTransformBindings.NonuniformFFTsBackend` / `FINUFFTBackend` | `NonuniformFFTs` / `FINUFFT` | Scattered / non-uniform Cartesian data |
-| [`FSHTSpectralBackend`](@ref SpectralBackends.FastSphericalHarmonicsTransformSpectralBackend) | `FastSphericalHarmonics` | Regular latitude–longitude grids |
-| [`NUFSHTSpectralBackend`](@ref SpectralBackends.NonUniformFastSphericalHarmonicsTransformSpectralBackend) | `NUFSHT` | Scattered spherical observations |
+| `FSHTSpectralBackend` | `FastSphericalHarmonics` | Regular latitude–longitude grids |
+| `NUFSHTSpectralBackend` | `NUFSHT` | Scattered spherical observations |
 
 | Execution backend | Dependency | Best for |
 |---|---|---|
-| [`SerialBackend`](@ref ComputationalBackends.SerialBackend) | None | Default; small/medium grids |
-| [`ThreadedBackend`](@ref ComputationalBackends.ThreadedBackend) | `OhMyThreads` | Multi-core mediator/triad loops |
-| [`DistributedBackend`](@ref ComputationalBackends.DistributedBackend) | `Distributed` | Julia worker processes |
-| [`GPUBackend`](@ref ComputationalBackends.GPUBackend) | `KernelAbstractions` + vendor pkg | Large grids on GPU (CUDA validated) |
-| [`AutoBackend`](@ref ComputationalBackends.AutoBackend) | Varies | Automatic best-available execution |
+| `SerialBackend` | None | Single-threaded execution |
+| `ThreadedBackend` | `OhMyThreads` | Multi-core mediator/triad loops |
+| `DistributedBackend` | `Distributed` | Julia worker processes |
+| `GPUBackend` | `KernelAbstractions` + vendor pkg | Large grids on GPU (CUDA validated) |
+| `AutoBackend` | Varies | Automatic best-available execution |
 
 ---
 
@@ -66,13 +66,13 @@ result = calculate_shell_to_shell_transfer(û, ks;
 Pseudospectral products alias high wavenumbers back onto resolved modes. Every nonlinear-term
 entry point takes a `dealiasing::AbstractDealiasing` strategy, a type on which the path dispatches:
 
-- [`OrszagTwoThirds`](@ref) **(default)** — keep `|m_d| ≤ ⌊(N_d−1)/3⌋` of every input field
+- [`OrszagTwoThirds`](@ref FlowInvariantTransfer.Types.OrszagTwoThirds) **(default)** — keep `|m_d| ≤ ⌊(N_d−1)/3⌋` of every input field
   *before* forming the product, the largest band whose products alias outside it (exact on the retained
   modes). Works with any transform.
-- [`PaddedThreeHalves`](@ref) — exact `3/2` zero-padding: embed into a `3/2`-sized grid, multiply,
+- [`PaddedThreeHalves`](@ref FlowInvariantTransfer.Types.PaddedThreeHalves) — exact `3/2` zero-padding: embed into a `3/2`-sized grid, multiply,
   truncate back. No aliasing at all on any retained mode. Works with any transform; the direct sum
   forms the padded product by direct sums on the padded grid.
-- [`NoDealiasing`](@ref) — raw product; only for analytic single-triad tests where no aliasing
+- [`NoDealiasing`](@ref FlowInvariantTransfer.Types.NoDealiasing) — raw product; only for analytic single-triad tests where no aliasing
   can occur.
 
 ```julia
@@ -129,7 +129,7 @@ result = calculate_energy_transfer(SphericalTransferMethod(), ζ)   # ζ of size
 
 ### SerialBackend
 
-Single-threaded, no dependencies. The default `execution` for every diagnostic.
+Single-threaded execution with no parallelism dependency.
 
 ### ThreadedBackend
 
@@ -153,9 +153,10 @@ calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(1.0),
 ### DistributedBackend
 
 Multi-process via `Distributed`: the outer loop (mediator shells, slots, bands, channel pairs,
-triads, or the mode→shell scatter of the spectral flux) is partitioned across worker processes with
-`pmap` / `@distributed` and reduced on the caller. The work shipped to the workers captures plain
-arrays, and every worker needs `using FlowInvariantTransfer`.
+triads, or the mode→shell scatter of the spectral flux) is partitioned across worker processes and
+reduced on the caller. Spectral flux retains each worker's shell tables and sends that worker its
+density slice. Compressible transfer runs its complete pipeline on one worker. Every worker needs
+`using FlowInvariantTransfer`.
 
 ```julia
 using Distributed: Distributed
@@ -201,7 +202,8 @@ result = calculate_shell_to_shell_transfer(û, ks;
 
 ### AutoBackend
 
-Resolves at call time to `ThreadedBackend()` when the OhMyThreads extension is loaded and Julia has
+The default execution backend. A device-array input selects its device backend. Host input resolves
+to `ThreadedBackend()` when the OhMyThreads extension is loaded and Julia has
 more than one thread, else to `SerialBackend()` (`FlowInvariantTransfer.Types.resolve_execution`).
 The transform resolves independently: `transform = AutoSpectralBackend()` is the FFT when the FFTW
 extension is loaded (`FlowInvariantTransfer.Types.resolve_transform`).
@@ -213,7 +215,7 @@ extension is loaded (`FlowInvariantTransfer.Types.resolve_transform`).
 `DistributedBackend` above spreads one call's outer loop over Julia worker processes. For MPI
 **multi-process / multi-node** work there are two distinct ways to distribute, and the package
 provides one entry point for each (loaded by `using MPI` — the pencil axis also needs
-`PencilFFTs, PencilArrays`). MPI.jl bundles its own `mpiexec`, so a launcher works out of the box;
+`PencilFFTs, PencilArrays, FlowGeometries`). MPI.jl bundles its own `mpiexec`, so a launcher works out of the box;
 both paths are validated single-machine with `mpiexec -n 2`.
 
 ### Batch axis — many independent inputs ([`mpi_batch_map`](@ref))
@@ -251,12 +253,22 @@ using FlowInvariantTransfer: FlowInvariantTransfer
 using MPI: MPI
 using PencilFFTs: PencilFFTs
 using PencilArrays: PencilArrays
+using FlowGeometries: FlowGeometries
 MPI.Init()
 
 plan = build_pencil_plan((N, N), MPI.COMM_WORLD)     # auto-balanced process grid
 u    = ntuple(_ -> PencilFFTs.allocate_input(plan), 2)   # fill each rank's local portion of u, v
 res  = pencil_spectral_flux(u, plan, ks; binning = LinearBinning(dk))
 ```
+
+A tuple of FlowGeometries rank fields supplies its existing ownership and communicator:
+
+```julia
+workspace = PencilWorkspace(fields; binning = LinearBinning(dk))
+result = pencil_spectral_flux!(workspace, fields)
+```
+
+The result is a `SpectralFluxResult`; repeated in-place calls reuse its arrays.
 
 The two axes are complementary and compose (a batch of large grids = batch axis over pencil-axis
 groups). The pencil path covers every invariant (KE / helicity / enstrophy), every dealiasing
@@ -294,8 +306,8 @@ Notes:
   their per-mode transfer density through a KernelAbstractions device kernel; spectral flux threads or
   runs on the device the mode→shell reduction, and copies the per-shell spectrum to the host for the
   cumulative sum. `✓*` compressible is a single FFT pipeline: its `Threaded` path threads the FFTs, and
-  its `Distributed` path computes the transfer + channel set and the pressure-dilatation on separate
-  workers. Its GPU path is a device-generic broadcast pipeline + `GPUArraysCore` reductions. TOD's GPU
+  its `Distributed` path runs the same complete pipeline on a worker. Its GPU path uses broadcasts and
+  one device scatter into the shell sums. TOD's GPU
   path is the serial triad loop on device arrays (`GPUArraysCore` methods; the small per-triad
   eigenproblem runs on the host). GPU verified on `GPUBackend(KA.CPU())` and on JLArrays device-generic
   building blocks (cuFFT rides `AbstractFFTs` on a `CuArray` by construction).
@@ -327,6 +339,7 @@ using KernelAbstractions: KernelAbstractions     # → GPUBackend (+ a vendor pk
 using MPI: MPI                    # → mpi_batch_map (batch axis)
 using PencilFFTs: PencilFFTs
 using PencilArrays: PencilArrays  # (+ MPI) → pencil_spectral_flux / build_pencil_plan (pencil axis)
+using FlowGeometries: FlowGeometries # grid ownership for the pencil path
 using HelmholtzDecomposition: HelmholtzDecomposition # → decompose_field / Helmholtz partial fluxes
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes  # → calculate_coarse_graining_flux
 using FlowFieldSpectra: FlowFieldSpectra     # → to_spectral / from_spectral on uniform grids

@@ -13,11 +13,11 @@ calculate_energy_transfer
 ## Physical → Spectral
 
 The diagnostics take Fourier coefficients, so gridded physical data is transformed here once. A real
-field takes the half (`rfft`) layout by default — the non-redundant `k₁ ≥ 0` coefficients, with `ks[1]`
-an `rfftfreq` axis — which every diagnostic consumes directly; pass `real_layout = false` for the full
-complex spectrum. Build the workspace once to reuse the plans and buffers across snapshots.
+field takes the half (`rfft`) layout: the non-redundant `k₁ ≥ 0` coefficients, with `ks[1]`
+an `rfftfreq` axis. Complex input takes the full spectrum. Build the workspace once to reuse the plans
+and buffers across snapshots.
 
-The domain is given either as the per-axis coordinate vectors of a uniform periodic box, or as a
+The domain is given either as per-axis ranges describing a uniform periodic box, or as a
 `FlowGeometries` grid. Passing a grid (`using FlowFieldSpectra`) selects the transform from the grid
 itself through `FlowFieldSpectra.plan_spectrum` — the tensor-product FFT on a uniform Cartesian grid,
 the FFT/NUFFT composite where some directions are stretched — and reads the period the grid declares.
@@ -36,6 +36,7 @@ calculate_spectral_flux
 calculate_spectral_flux!
 calculate_spectral_flux_batch
 calculate_scalar_flux
+calculate_scalar_flux!
 ```
 
 ## Shell-to-Shell Transfer
@@ -45,13 +46,17 @@ calculate_shell_to_shell_transfer
 calculate_shell_to_shell_transfer!
 calculate_shell_to_shell_transfer_batch
 calculate_scalar_shell_to_shell_transfer
+calculate_scalar_shell_to_shell_transfer!
 ```
 
 ## Mode-to-Mode Triad Transfer
 
 ```@docs
 calculate_mode_to_mode_transfer
+calculate_mode_to_mode_transfer!
 calculate_scalar_mode_to_mode_transfer
+calculate_scalar_mode_to_mode_transfer!
+FlowInvariantTransfer.ModeToModeTransfer.mode_weights
 ```
 
 ## Smooth Band-to-Band Transfer
@@ -85,6 +90,8 @@ calculate_compressible_flux_batch
 ```@docs
 calculate_coarse_graining_flux
 calculate_coarse_graining_flux_batch
+FlowInvariantTransfer.CoarseGrainingFlux.calculate_coarse_graining_flux!
+FlowInvariantTransfer.CoarseGrainingFlux.CoarseGrainingFluxWorkspace
 calculate_enstrophy_flux
 nufft_coarse_graining_flux
 nufft_coarse_graining_flux_batch
@@ -98,6 +105,9 @@ keyword names: `FlowTransformBindings.NonuniformFFTsBackend()` (`using Nonunifor
 points). They drive the scattered coarse-graining flux and the scattered→uniform `to_spectral`
 reconstruction; the workspace forms hold the plans and buffers for reuse, and `close!` releases the
 plans.
+
+For real scattered input, every even requested mode count is widened by one and the result is the
+packed half of that odd box. Complex input keeps the requested full box.
 
 ```@docs
 NUFFTCoarseGrainingWorkspace
@@ -129,6 +139,8 @@ FlowInvariantTransfer.Types.Exclude
 ```@docs
 mpi_batch_map
 FlowInvariantTransfer.pencil_spectral_flux
+FlowInvariantTransfer.pencil_spectral_flux!
+FlowInvariantTransfer.PencilWorkspace
 build_pencil_plan
 ```
 
@@ -136,9 +148,16 @@ build_pencil_plan
 
 ```@docs
 triadic_orthogonal_decomposition
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.triadic_orthogonal_decomposition!
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.TODWorkspace
 FlowInvariantTransfer.TriadicOrthogonalDecomposition.hamming_window
 FlowInvariantTransfer.TriadicOrthogonalDecomposition.hann_window
 FlowInvariantTransfer.TriadicOrthogonalDecomposition.tukey_window
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.ModesOnly
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.WithCoefficients
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.WithAuxiliaryModes
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.ZeroMean
+FlowInvariantTransfer.TriadicOrthogonalDecomposition.BlockMean
 ```
 
 ## Nonlinear Term
@@ -156,6 +175,7 @@ FlowInvariantTransfer.NonlinearTerm.compute_rotational_term!
 ```@docs
 FlowInvariantTransfer.Invariants.transfer_density
 FlowInvariantTransfer.Invariants.transfer_density!
+FlowInvariantTransfer.Invariants.transfer_density_scatter!
 ```
 
 ## Field Decomposition
@@ -184,78 +204,6 @@ in real space (so it also serves masked and bounded domains).
 calculate_band_energies
 ```
 
-## Method Types
-
-```@docs
-FlowInvariantTransfer.Types.AbstractEnergyTransferMethod
-FlowInvariantTransfer.Types.SpectralFluxMethod
-FlowInvariantTransfer.Types.ShellToShellTransferMethod
-FlowInvariantTransfer.Types.ModeToModeTransferMethod
-FlowInvariantTransfer.Types.CoarseGrainingFluxMethod
-FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionMethod
-FlowInvariantTransfer.Types.SphericalTransferMethod
-FlowInvariantTransfer.Types.DivergentSphericalTransferMethod
-```
-
-## Invariant Types
-
-```@docs
-FlowInvariantTransfer.Types.AbstractInvariant
-FlowInvariantTransfer.Types.KineticEnergy
-FlowInvariantTransfer.Types.Helicity
-FlowInvariantTransfer.Types.Enstrophy
-FlowInvariantTransfer.Types.PassiveScalar
-```
-
-## Decomposition Types
-
-```@docs
-FlowInvariantTransfer.Types.AbstractFieldDecomposition
-FlowInvariantTransfer.Types.NoDecomposition
-FlowInvariantTransfer.Types.HelmholtzDecomposition
-FlowInvariantTransfer.Types.RotationalDecomposition
-FlowInvariantTransfer.Types.DivergentDecomposition
-FlowInvariantTransfer.Types.HelicalDecomposition
-FlowInvariantTransfer.Types.ToroidalPoloidalDecomposition
-```
-
-## Dealiasing Strategies
-
-```@docs
-FlowInvariantTransfer.Types.AbstractDealiasing
-FlowInvariantTransfer.Types.NoDealiasing
-FlowInvariantTransfer.Types.OrszagTwoThirds
-FlowInvariantTransfer.Types.PaddedThreeHalves
-```
-
-## Result Types
-
-```@docs
-FlowInvariantTransfer.Types.SpectralFluxResult
-FlowInvariantTransfer.Types.CompressibleFluxResult
-FlowInvariantTransfer.Types.ShellToShellResult
-FlowInvariantTransfer.Types.ModeToModeTriadResult
-FlowInvariantTransfer.Types.CoarseGrainingFluxResult
-FlowInvariantTransfer.Types.CoarseGrainingFluxResultWithDiagnostics
-FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionResult
-FlowInvariantTransfer.Types.SphericalTransferResult
-FlowInvariantTransfer.Types.DivergentSphericalTransferResult
-```
-
-## Workspace Types
-
-```@docs
-FlowInvariantTransfer.Workspaces.NonlinearTermWorkspace
-FlowInvariantTransfer.Workspaces.PaddedGrid
-FlowInvariantTransfer.Workspaces.SpectralFluxWorkspace
-FlowInvariantTransfer.Workspaces.ShellToShellWorkspace
-FlowInvariantTransfer.Compressible.CompressibleWorkspace
-FlowInvariantTransfer.Spherical.SphericalTransferWorkspace
-FlowInvariantTransfer.Spherical.ScatteredSphericalTransferWorkspace
-FlowInvariantTransfer.Spherical.DivergentSphericalTransferWorkspace
-FlowInvariantTransfer.Spherical.ScatteredDivergentSphericalTransferWorkspace
-```
-
 ## Wavenumber Utilities
 
 The wavenumber axes, their fold weights and the dealiasing cutoffs are the packed layout of
@@ -266,6 +214,10 @@ The wavenumber axes, their fold weights and the dealiasing cutoffs are the packe
 ```@docs
 FlowInvariantTransfer.Utils.wavenumber_grid
 FlowInvariantTransfer.Utils.wavenumber_magnitude_grid
+FlowInvariantTransfer.Utils.as_component_field
+FlowInvariantTransfer.Utils.validate_velocity_input
+FlowInvariantTransfer.Utils.validate_uniform_grid
+FlowInvariantTransfer.Utils.domain_size_from_coords
 ```
 
 ## Shell Binning & Geometry
@@ -276,6 +228,8 @@ FlowInvariantTransfer.ShellBinning.shell_edges
 FlowInvariantTransfer.ShellBinning.shell_centers
 FlowInvariantTransfer.ShellBinning.n_shells
 FlowInvariantTransfer.ShellBinning.shell_coordinate
+FlowInvariantTransfer.ShellBinning.max_shell_coordinate
+FlowInvariantTransfer.ShellBinning.default_binning
 ```
 
 ## Binning Types
@@ -323,6 +277,7 @@ there): `ComputationalBackends.SerialBackend`, `ThreadedBackend`, `DistributedBa
 `GPUBackend`, and `AutoBackend`, all `<: ComputationalBackends.AbstractExecutionBackend`. FIT resolves
 `ComputationalBackends.AutoBackend` through its own `FlowInvariantTransfer.Types.resolve_execution`
 (threaded when the OhMyThreads extension is loaded and `Threads.nthreads() > 1`, else serial).
+`AutoBackend()` is the execution default; a device-array input selects its device backend.
 
 ## Filters
 
@@ -334,4 +289,10 @@ FlowInvariantTransfer.Types.TopHatFilter
 FlowInvariantTransfer.Filters.filter_response
 FlowInvariantTransfer.Filters.apply_filter_spectral
 FlowInvariantTransfer.Filters.apply_filter_spectral!
+```
+
+## Plotting
+
+```@docs
+plot_energy_transfer
 ```

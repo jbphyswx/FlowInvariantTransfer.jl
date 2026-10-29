@@ -219,6 +219,42 @@ active_fit(args...; kwargs...) = throw(ArgumentError(
     "the fit over a grid's active cells (`inactive = Types.Exclude()`) runs NUFSHT; " *
     "run `using NUFSHT`, or pass `inactive = Types.ZeroFill()`."))
 
+struct ActiveSphericalFit{PA, PF, C, V, O, A, W, R}
+    active_plan::PA
+    full_plan::PF
+    coefficients::C
+    values::V
+    output::O
+    active::A
+    lsmr::W
+    rtol::R
+    maxiter::Int
+end
+
+function ActiveSphericalFit(args...; kwargs...)
+    throw(ArgumentError("ActiveSphericalFit requires `using NUFSHT`."))
+end
+
+function active_fit! end
+
+"""
+    SphericalGridWorkspace
+
+Reusable spherical transfer and masked-field buffers on a FlowGeometries grid. Construct it with
+`SphericalTransferWorkspace(field, grid)` or `DivergentSphericalTransferWorkspace(velocity, grid)`.
+"""
+struct SphericalGridWorkspace{W, F, WF, M, AF, R}
+    transfer::W
+    fields::F
+    work::WF
+    mask::M
+    active_fit::AF
+    route::R
+end
+
+Base.show(io::IO, ::SphericalGridWorkspace) = print(io, "SphericalGridWorkspace(…)")
+Base.show(io::IO, ::MIME"text/plain", ws::SphericalGridWorkspace) = show(io, ws)
+
 """
     spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm) -> result
 
@@ -300,7 +336,7 @@ function calculate_divergent_spherical_transfer! end
 
 Reusable buffers for the regular-grid [`calculate_divergent_spherical_transfer!`](@ref)
 (FastSphericalHarmonics extension; loading it provides the constructor): the work-grid fields, the
-embed targets, the transforms' plans and the reused [`DivergentSphericalTransferResult`](@ref).
+embed targets, the transforms' plans and the reused [`DivergentSphericalTransferResult`](@ref FlowInvariantTransfer.Types.DivergentSphericalTransferResult).
 FastSphericalHarmonics has no in-place transform API, so the spin-weighted transforms/eth allocate
 their outputs on every call. Requires `using FastSphericalHarmonics`.
 """

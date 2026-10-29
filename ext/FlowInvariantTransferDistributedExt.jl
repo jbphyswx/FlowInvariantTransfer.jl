@@ -6,6 +6,57 @@ using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
 
+struct _ShellPart{C, R}
+    channel::C
+    rows::R
+    worker::Int
+end
+
+FIT.Workspaces._process_slots(proto::AbstractArray{<:Complex}) =
+    _ShellPart{Distributed.RemoteChannel{Channel{Any}},UnitRange{Int}}[]
+
+function _shell_parts!(ws, ks, shell_idx)
+    parts = ws.processes
+    isempty(parts) || return parts
+    n = length(shell_idx)
+    workers = Distributed.workers()
+    count = min(length(workers), n)
+    cart = CartesianIndices(size(shell_idx))
+    for i in 1:count
+        rows = (fld((i - 1) * n, count) + 1):fld(i * n, count)
+        indices = collect(view(vec(shell_idx), rows))
+        T = eltype(ws.T_spec)
+        fold = T[FTB.mode_fold(ks, cart[j]) for j in rows]
+        channel = Distributed.RemoteChannel(() -> Channel{Any}(1), workers[i])
+        state = (; indices, fold, sums = zeros(T, length(ws.T_spec)))
+        put!(channel, state)
+        push!(parts, _ShellPart(channel, rows, workers[i]))
+    end
+    return parts
+end
+
+function _shell_part!(channel, density)
+    return _shell_part!(fetch(channel), density)
+end
+function _shell_part!(state::NamedTuple, density)
+    fill!(state.sums, zero(eltype(state.sums)))
+    @inbounds for i in eachindex(density)
+        shell = state.indices[i]
+        shell == 0 && continue
+        state.sums[shell] += state.fold[i] * density[i]
+    end
+    return state.sums
+end
+
+function FIT.Workspaces.release!(ws::FIT.Workspaces.SpectralFluxWorkspace)
+    ws.processes === nothing && return nothing
+    for part in ws.processes
+        close(part.channel)
+    end
+    empty!(ws.processes)
+    return nothing
+end
+
 # The closures shipped to workers capture plain arrays, never a workspace: a workspace's FFTW plan
 # bundle does not deserialize on a worker without the FFTW extension. Worker processes must have
 # `using FlowInvariantTransfer` loaded.
@@ -72,26 +123,21 @@ function FIT.SpectralFlux._spectral_flux_distributed!(
     invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
 )
     nd   = length(ks)
-    ns   = size(velocity_hat)[1:nd]
+    ns   = Base.front(size(velocity_hat))
     FT   = real(eltype(velocity_hat))
     N_sh = length(ws.T_spec)
     Np   = prod(ns)
 
-    td = FIT.Invariants.transfer_density(invariant, velocity_hat, N̂, ks)
-    sidx = shell_idx
-    nw = max(1, Distributed.nworkers())
-
-    T = Distributed.@distributed (+) for w in 1:nw
-        t = zeros(FT, N_sh)
-        cis = CartesianIndices(ns)
-        @inbounds for i in w:nw:Np
-            n = sidx[i]
-            n == 0 && continue
-            t[n] += FTB.mode_fold(ks, cis[i]) * td[i]
-        end
-        t
+    td = FIT.Workspaces.density_buffer(ws.nonlinear, ks)
+    FIT.Invariants.transfer_density!(td, invariant, velocity_hat, N̂, ks)
+    parts = _shell_parts!(ws, ks, shell_idx)
+    pending = map(parts) do part
+        Distributed.remotecall(_shell_part!, part.worker, part.channel, collect(view(vec(td), part.rows)))
     end
-    copyto!(ws.T_spec, T)
+    fill!(ws.T_spec, zero(FT))
+    for future in pending
+        ws.T_spec .+= fetch(future)
+    end
     return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
@@ -105,7 +151,7 @@ end
 function _shell_to_shell_worker_columns(ms, velocity_hat, ks, shell_idx, N_sh, invariant, dealiasing,
                                         FT, spectral, advecting_hat, inner)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     M  = size(velocity_hat, nd + 1)   # components of the binned/carried primary field
     out = Vector{Tuple{Int, Vector{FT}}}(undef, length(ms))
     fill_run!(run) = begin
@@ -150,7 +196,7 @@ function FIT.TriadicOrthogonalDecomposition._triadic_loop_distributed!(
     weights, nBlks, nFreq, nState, nx, nmode,
     Q_nonlinear, LHS,
     return_coefficients, return_auxiliary_modes,
-    _sc, sqrt_w, inv_sqrt_w, _permbuf, _permbuf_kl,
+    _sc, sqrt_w, inv_sqrt_w, _permbuf, _permbuf_kl, tasks,
     execution::ComputationalBackends.DistributedBackend,
 )
     nTriads = length(fk_idx)
@@ -190,9 +236,9 @@ function FIT.ModeToModeTransfer._mode_to_mode_distributed!(
     transform = SpectralBackends.DirectSumSpectralBackend(),
     advecting_hat = velocity_hat,
 )
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; M = size(velocity_hat, nd + 1)
+    nd = length(ks); ns = Base.front(size(velocity_hat)); M = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat))
-    cis = CartesianIndices(ns); colons = ntuple(_ -> Colon(), nd)
+    cis = CartesianIndices(ns); colons = ntuple(_ -> Colon(), Val(length(ks)))
     inner = ComputationalBackends.local_backend(execution)
     nw = max(1, Distributed.nworkers())
     idx_sets = [collect(w:nw:length(cis)) for w in 1:nw]
@@ -262,7 +308,7 @@ function FIT.BandTransfer._band_to_band_distributed!(
     transform = SpectralBackends.DirectSumSpectralBackend(),
     advecting_hat = velocity_hat,
 )
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
+    nd = length(ks); ns = Base.front(size(velocity_hat)); D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat)); nb = length(bws.centers); W = bws.W
     inner = ComputationalBackends.local_backend(execution)
     nw = max(1, Distributed.nworkers())
@@ -314,7 +360,7 @@ function FIT.SpectralFlux._partial_fluxes_distributed!(
     transform::SpectralBackends.AbstractSpectralBackend,
     decomposition::FIT.Types.AbstractFieldDecomposition,
 )
-    FT = real(eltype(velocity_hat)); nd = length(ks); ns = size(velocity_hat)[1:nd]
+    FT = real(eltype(velocity_hat)); nd = length(ks); ns = Base.front(size(velocity_hat))
     prs = [(sp, sq) for sp in names for sq in names]; np = length(prs)
     inner = ComputationalBackends.local_backend(execution)
     nw = max(1, Distributed.nworkers())
@@ -374,33 +420,14 @@ function FIT.Compressible._compressible_distributed(
     transform, binning, geometry,
     pressure_hat = nothing,
     dealiasing = FIT.Types.OrszagTwoThirds(),
-    decompose = true,
+    decomposition::Union{FIT.Types.NoDecomposition,FIT.Types.HelmholtzDecomposition} = FIT.Types.HelmholtzDecomposition(),
 )
     inner = ComputationalBackends.local_backend(execution)
-    # Each group's workspace carries only the scratch its own call uses: group A the channel set,
-    # group B the pressure term. The flags are fixed at construction, so they are set to match.
-    runA = () -> begin
-        ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            transform = transform, binning = binning, geometry = geometry, execution = inner,
-            dealiasing = dealiasing, decompose = decompose, with_pressure = false)
-        FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
-            dealiasing = dealiasing, decompose = decompose, pressure_hat = nothing)
+    return fetch(Distributed.@spawnat :any begin
+        FIT.calculate_compressible_flux(velocity_hat, density_hat, ks;
+            transform, binning, geometry, execution = inner, pressure_hat, dealiasing, decomposition)
     end
-    if pressure_hat === nothing
-        return fetch(Distributed.@spawnat :any runA())
-    end
-    runB = () -> begin
-        ws = FIT.Compressible.CompressibleWorkspace(velocity_hat, ks;
-            transform = transform, binning = binning, geometry = geometry, execution = inner,
-            dealiasing = dealiasing, decompose = false, with_pressure = true)
-        FIT.Compressible.calculate_compressible_flux!(ws, velocity_hat, density_hat, ks;
-            dealiasing = dealiasing, decompose = false, pressure_hat = pressure_hat)
-    end
-    fA = Distributed.@spawnat :any runA()
-    fB = Distributed.@spawnat :any runB()
-    rA = fetch(fA); rB = fetch(fB)
-    return FIT.Types.CompressibleFluxResult(rA.k_shells, rA.shell_edges, rA.transfer_spectrum, rA.flux,
-                                            rA.channels, rB.pressure_dilatation)
+    )
 end
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,6 @@ using FlowTransformBindings: FlowTransformBindings as FTB
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
-using LinearAlgebra: LinearAlgebra
 
 # ---------------------------------------------------------------------------
 # Spherical spectral energy/enstrophy transfer at scattered points on the sphere, via NUFSHT
@@ -30,15 +29,14 @@ _default_rtol(::Nothing, tol::Real, ::Type{FT}) where {FT} = max(FT(tol), 100 * 
 
 # Colatitudes, longitudes and weights (`Σw = 4π`) of the product rule exact for every spherical
 # polynomial of degree ≤ `L`: the `⌊L/2⌋+1` Gauss–Legendre nodes in cos θ by `L+1` equispaced longitudes.
-# Nodes and weights from the eigenvectors of the Legendre recurrence's Jacobi matrix (Golub & Welsch 1969).
-function _gauss_grid(L::Integer)
+function _gauss_grid(L::Integer, ::Type{FT} = Float64) where {FT}
     nlat = L ÷ 2 + 1
     nlon = L + 1
-    J = LinearAlgebra.SymTridiagonal(zeros(nlat), [k / sqrt(4k^2 - 1.0) for k in 1:(nlat - 1)])
-    E = LinearAlgebra.eigen(J)
-    θ = acos.(clamp.(E.values, -1.0, 1.0))
-    w = (4π / nlon) .* E.vectors[1, :] .^ 2
-    return repeat(θ, nlon), repeat((2π / nlon) .* (0:(nlon - 1)); inner = nlat), repeat(w, nlon)
+    w, lat = Vector{FT}(undef, nlat), Vector{FT}(undef, nlat)
+    FTB.gauss_legendre!(Float64, nothing, w, lat, nlat)
+    θ = FT(π / 2) .- lat
+    φ = range(zero(FT); step = FT(2π) / nlon, length = nlon)
+    return θ, φ, repeat(FT(2π / nlon) .* w, nlon)
 end
 
 # The degree the grid's rule integrates: projecting a degree-2·lmax product onto degree lmax integrates
@@ -68,6 +66,7 @@ _fit_operator(plan, w::AbstractVector, ::Type{FT}) where {FT} =
     FTB.RangeWeighted(plan, copyto!(similar(NUFSHT.allocate_coefficients(plan), FT, length(w)), FT.(w)))
 
 function FIT.Spherical.ScatteredSphericalTransferWorkspace(
+    ::Type{FT},
     coords::Tuple{<:AbstractVector, <:AbstractVector},
     lmax::Integer;
     radius::Real = 1.0,
@@ -75,31 +74,34 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
     tol::Real = 1e-10,
     rtol::Union{Nothing, Real} = nothing,
     maxiter::Integer = 4000,
-    T::Type = Float64,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     weights::Union{Nothing, AbstractVector} = nothing,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-)
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+) where {FT<:AbstractFloat}
     θ, φ = coords
     M = length(θ)
     length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     _check_analysis(M, lmax, quadrature_weights, weights)
-    FT = float(T)
-    CT = Complex{FT}
-
-    # `execution` sets where the plans run: one thread under `SerialBackend()` (the default), which
+    # `execution` sets where the plans run: one thread under `SerialBackend()`, which
     # leaves the cores to an outer batch axis, every thread under `ThreadedBackend()`, and the device of
     # `GPUBackend(b)`, which holds their nodes. Device-array coordinates give device plans under any of
     # them. The vorticity and the Jacobian are real fields, so their plans are a real field's.
-    exec = FIT.Types.resolve_execution(execution)
-    θg, φg, wq = _gauss_grid(_grid_degree(lmax, dealias))
-    Mg = length(θg)
-    kw = (; tol = tol, execution = exec, nufft = nufft)
-    plan0 = NUFSHT.make_spin_plan(FT, θ, φ, lmax, 0; kw...)
-    grid1 = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 1; ntrans = 2, directions = NUFSHT.SynthesisOnly(), kw...)
-    grid0 = NUFSHT.make_spin_plan(FT, θg, φg, lmax, 0; kw...)
+    exec = FIT.Types.resolve_execution(execution, θ)
+    plan0 = NUFSHT.make_spin_plan(FT, θ, φ, lmax, 0; tol, execution = exec, nufft)
+    return _barotropic_workspace(plan0, FT, M, lmax, exec;
+        radius, dealias, tol, rtol, maxiter, quadrature_weights, weights)
+end
+
+function _barotropic_workspace(plan0, ::Type{FT}, M, lmax, exec;
+                                radius, dealias, tol, rtol, maxiter, quadrature_weights, weights) where {FT}
+    CT = Complex{FT}
+    θg, φg, wq = _gauss_grid(_grid_degree(lmax, dealias), FT)
+    Mg = length(wq)
+    grid1 = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 1, NUFSHT.TensorProduct();
+                                  ntrans = 2, directions = NUFSHT.SynthesisOnly(), execution = exec)
+    grid0 = NUFSHT.make_spin_plan(FT, θg, φg, lmax, 0, NUFSHT.TensorProduct(); execution = exec)
 
     # Every buffer lives in the plans' memory, which `allocate_coefficients` allocates in.
     mem = NUFSHT.allocate_coefficients(plan0)
@@ -131,6 +133,9 @@ function FIT.Spherical.ScatteredSphericalTransferWorkspace(
         ladl, invll1, Pr, Tcol, qw, result, FT(radius), Int(lmax), _default_rtol(rtol, tol, FT), Int(maxiter))
 end
 
+FIT.Spherical.ScatteredSphericalTransferWorkspace(coords::Tuple, lmax::Integer; kwargs...) =
+    FIT.Spherical.ScatteredSphericalTransferWorkspace(float(eltype(first(coords))), coords, lmax; kwargs...)
+
 function FIT.close!(ws::FIT.Spherical.ScatteredSphericalTransferWorkspace)
     foreach(NUFSHT.close!, (ws.plan0, ws.grid1, ws.grid0))
     return ws
@@ -142,8 +147,8 @@ _fit_workspace(::AbstractVector, _) = nothing
 
 # One plan over the active nodes fits the coefficients, one over every node evaluates them; the defaults
 # are the scattered workspaces'.
-function FIT.Spherical.active_fit(
-    values::AbstractVector,
+function FIT.Spherical.ActiveSphericalFit(
+    ::Type{FE},
     s::Integer,
     coords::Tuple{<:AbstractVector, <:AbstractVector},
     active::AbstractVector{<:Integer},
@@ -152,34 +157,66 @@ function FIT.Spherical.active_fit(
     rtol::Union{Nothing, Real} = nothing,
     maxiter::Integer = 4000,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-)
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+) where {FE<:Number}
     θ, φ = coords
     M = length(θ)
     Ma = length(active)
     Ma ≥ (lmax + 1)^2 || throw(ArgumentError(
         "the fit over the active cells determines (lmax+1)² = $((lmax + 1)^2) coefficients from $Ma active " *
         "nodes, fewer than it needs; analyse at a lower degree, or pass `inactive = Types.ZeroFill()`."))
-    FT = float(real(eltype(values)))
-    CT = Complex{FT}
-    # Real values at spin 0 are a real field, whose plan fits the `(lmax+1)²` real degrees of freedom.
-    FE = (s == 0 && eltype(values) <: Real) ? FT : CT
-    exec = FIT.Types.resolve_execution(execution)
-    pa = NUFSHT.make_spin_plan(FE, θ[active], φ[active], lmax, s; tol = tol, execution = exec, nufft = nufft)
-    pf = nothing
+    exec = FIT.Types.resolve_execution(execution, θ)
+    pa = NUFSHT.make_spin_plan(FE, θ[active], φ[active], lmax, s; tol, execution = exec, nufft)
     try
-        pf = NUFSHT.make_spin_plan(FE, θ, φ, lmax, s; tol = tol, execution = exec, nufft = nufft)
-        mem = NUFSHT.allocate_coefficients(pa)
-        C = fill!(similar(mem, CT, lmax + 1, 2lmax + 1), zero(CT))
-        f = copyto!(similar(mem, FE, Ma), FE.(values[active]))
-        r = NUFSHT.nusht_analyze!(C, f, pa; ws = FTB.LSMRWorkspace(pa), rtol = _default_rtol(rtol, tol, FT),
-                                  maxiter = maxiter)
-        out = similar(mem, FE, M)
-        NUFSHT.nusht_type2_spin!(out, C, pf)
-        return Array(out), (; converged = r.converged, iterations = r.iterations, residual = FT(r.residual))
-    finally
+        pf = NUFSHT.make_spin_plan(FE, θ, φ, lmax, s; tol, execution = exec, nufft)
+        try
+            return _active_fit_workspace(pa, pf, FE, active, M, lmax; tol, rtol, maxiter)
+        catch
+            NUFSHT.close!(pf)
+            rethrow()
+        end
+    catch
         NUFSHT.close!(pa)
-        pf === nothing || NUFSHT.close!(pf)
+        rethrow()
+    end
+end
+
+function _active_fit_workspace(pa, pf, ::Type{FE}, active, M, lmax; tol, rtol, maxiter) where {FE}
+    FT = real(FE)
+    CT = Complex{FT}
+    mem = NUFSHT.allocate_coefficients(pa)
+    C = fill!(similar(mem, CT, lmax + 1, 2lmax + 1), zero(CT))
+    f = similar(mem, FE, length(active))
+    out = similar(mem, FE, M)
+    indices = copyto!(similar(mem, Int, length(active)), active)
+    return FIT.Spherical.ActiveSphericalFit(pa, pf, C, f, out, indices, FTB.LSMRWorkspace(pa),
+        _default_rtol(rtol, tol, FT), Int(maxiter))
+end
+
+function FIT.Spherical.active_fit!(ws::FIT.Spherical.ActiveSphericalFit, values::AbstractVector)
+    copyto!(ws.values, view(values, ws.active))
+    fill!(ws.coefficients, zero(eltype(ws.coefficients)))
+    r = NUFSHT.nusht_analyze!(ws.coefficients, ws.values, ws.active_plan;
+                              ws = ws.lsmr, rtol = ws.rtol, maxiter = ws.maxiter)
+    NUFSHT.nusht_type2_spin!(ws.output, ws.coefficients, ws.full_plan)
+    fit = (; converged = r.converged, iterations = r.iterations, residual = oftype(ws.rtol, r.residual))
+    return ws.output, fit
+end
+
+function FIT.close!(ws::FIT.Spherical.ActiveSphericalFit)
+    NUFSHT.close!(ws.active_plan)
+    NUFSHT.close!(ws.full_plan)
+    return ws
+end
+
+function FIT.Spherical.active_fit(values::AbstractVector, s::Integer, coords::Tuple,
+                                   active::AbstractVector{<:Integer}, lmax::Integer; kwargs...)
+    ws = FIT.Spherical.ActiveSphericalFit(float(eltype(values)), s, coords, active, lmax; kwargs...)
+    try
+        field, fit = FIT.Spherical.active_fit!(ws, values)
+        return Array(field), fit
+    finally
+        FIT.close!(ws)
     end
 end
 
@@ -243,7 +280,7 @@ end
                               coords::Tuple{<:AbstractVector,<:AbstractVector};
                               lmax, dealias=true, tol=1e-10, rtol=max(tol, 100eps(T)), maxiter=4000,
                               transform=nothing, quadrature_weights=nothing, weights=nothing,
-                              nufft=AutoSpectralBackend(), execution=SerialBackend())
+                              nufft=AutoSpectralBackend(), execution=AutoBackend())
 
 Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
 flow on the sphere, from the **vorticity field** `ζ` sampled at `M` **scattered** points
@@ -279,15 +316,15 @@ function FIT.calculate_energy_transfer(
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     weights::Union{Nothing, AbstractVector} = nothing,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     FIT.Spherical._validate_spherical_backends(transform, execution, :scattered)
     M = length(vorticity)
     (length(coords[1]) == M && length(coords[2]) == M) || throw(ArgumentError(
         "vorticity and both coordinate vectors must have equal length; got $((M, length(coords[1]), length(coords[2])))."))
     ws = FIT.Spherical.ScatteredSphericalTransferWorkspace(
-        coords, lmax; radius = float(method.radius), dealias = dealias,
-        tol = tol, rtol = rtol, maxiter = maxiter, T = float(eltype(vorticity)),
+        float(eltype(vorticity)), coords, lmax; radius = float(method.radius), dealias = dealias,
+        tol = tol, rtol = rtol, maxiter = maxiter,
         quadrature_weights = quadrature_weights, weights = weights, nufft = nufft, execution = execution)
     try
         return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
@@ -305,11 +342,11 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ScatteredDivergentSphericalTransferWorkspace(coords, lmax; radius=1.0, dealias=true,
+    ScatteredDivergentSphericalTransferWorkspace(T, coords, lmax; radius=1.0, dealias=true,
                                                  tol=1e-10, rtol=max(tol, 100eps(T)), maxiter=4000,
-                                                 T=Float64, quadrature_weights=nothing, weights=nothing,
+                                                 quadrature_weights=nothing, weights=nothing,
                                                  nufft=AutoSpectralBackend(),
-                                                 execution=ComputationalBackends.SerialBackend())
+                                                 execution=ComputationalBackends.AutoBackend())
 
 Reusable buffers and NUFSHT spin plans (points preset) for the scattered divergent KE transfer.
 `coords = (θ, φ)` are the `M` colatitudes/longitudes. Without `quadrature_weights` the fit needs
@@ -319,6 +356,7 @@ fitted velocity is projected on a Gauss–Legendre grid as there. `nufft` is the
 runs. Requires `using NUFSHT`.
 """
 function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
+    ::Type{FT},
     coords::Tuple{<:AbstractVector, <:AbstractVector},
     lmax::Integer;
     radius::Real = 1.0,
@@ -326,28 +364,30 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     tol::Real = 1e-10,
     rtol::Union{Nothing, Real} = nothing,
     maxiter::Integer = 4000,
-    T::Type = Float64,
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     weights::Union{Nothing, AbstractVector} = nothing,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-)
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+) where {FT<:AbstractFloat}
     θ, φ = coords
     M = length(θ)
     length(φ) == M || throw(ArgumentError("θ and φ must have equal length; got $((length(θ), length(φ)))."))
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     _check_analysis(M, lmax, quadrature_weights, weights)
-    FT = float(T)
-    CT = Complex{FT}
-
     # `execution` sets where the plans run, as in the barotropic workspace above.
-    exec = FIT.Types.resolve_execution(execution)
-    θg, φg, wq = _gauss_grid(_grid_degree(lmax, dealias))
-    Mg = length(θg)
-    kw = (; tol = tol, execution = exec, nufft = nufft)
-    planp = NUFSHT.make_spin_plan(CT, θ, φ, lmax, 1; kw...)
-    gridp = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 1; kw...)
-    grid0 = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 0; kw...)
+    exec = FIT.Types.resolve_execution(execution, θ)
+    planp = NUFSHT.make_spin_plan(Complex{FT}, θ, φ, lmax, 1; tol, execution = exec, nufft)
+    return _divergent_workspace(planp, FT, M, lmax, exec;
+        radius, dealias, tol, rtol, maxiter, quadrature_weights, weights)
+end
+
+function _divergent_workspace(planp, ::Type{FT}, M, lmax, exec;
+                               radius, dealias, tol, rtol, maxiter, quadrature_weights, weights) where {FT}
+    CT = Complex{FT}
+    θg, φg, wq = _gauss_grid(_grid_degree(lmax, dealias), FT)
+    Mg = length(wq)
+    gridp = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 1, NUFSHT.TensorProduct(); execution = exec)
+    grid0 = NUFSHT.make_spin_plan(CT, θg, φg, lmax, 0, NUFSHT.TensorProduct(); execution = exec)
 
     # Every buffer lives in the plans' memory, which `allocate_coefficients` allocates in.
     mem = NUFSHT.allocate_coefficients(planp)
@@ -378,6 +418,9 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         ap, am, sym, anti, wc, Khat, Ahat, Up, uθ, uφ, Ug, wg, Bg, Kg, gw, ladl, msign, Pr, Tcol, qw, result,
         FT(radius), Int(lmax), _default_rtol(rtol, tol, FT), Int(maxiter))
 end
+
+FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(coords::Tuple, lmax::Integer; kwargs...) =
+    FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(float(eltype(first(coords))), coords, lmax; kwargs...)
 
 function FIT.close!(ws::FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace)
     foreach(NUFSHT.close!, (ws.planp, ws.gridp, ws.grid0))
@@ -445,7 +488,7 @@ function FIT.calculate_energy_transfer(
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     weights::Union{Nothing, AbstractVector} = nothing,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     FIT.Spherical._validate_spherical_backends(transform, execution, :scattered)
     u_θ, u_φ = velocity
@@ -454,8 +497,8 @@ function FIT.calculate_energy_transfer(
         "velocity components and both coordinate vectors must have equal length; got " *
         "$((M, length(u_φ), length(coords[1]), length(coords[2])))."))
     ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
-        coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
-        maxiter = maxiter, T = float(eltype(u_θ)), quadrature_weights = quadrature_weights,
+        float(eltype(u_θ)), coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
+        maxiter = maxiter, quadrature_weights = quadrature_weights,
         weights = weights, nufft = nufft, execution = execution)
     try
         return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)

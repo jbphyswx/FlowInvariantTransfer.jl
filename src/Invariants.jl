@@ -74,7 +74,7 @@ transfer_density!(t, ::Types.PassiveScalar, scalar_hat, N̂, ks) =
 function transfer_density!(t, ::Types.Helicity, velocity_hat, N̂, ks)
     nd = length(ks)
     nd == 3 || throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$nd)."))
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     @inbounds for I in CartesianIndices(ns)
         kx = FTB.derivative_wavenumber(ks[1], I[1])
         ky = FTB.derivative_wavenumber(ks[2], I[2])
@@ -91,7 +91,7 @@ end
 # Enstrophy: ω̂ = i(k_x û_y − k_y û_x) in 2D, ω̂ = i k×û in 3D; N̂_ω = i k×N̂.
 function transfer_density!(t, ::Types.Enstrophy, velocity_hat, N̂, ks)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     if nd == 2
         @inbounds for I in CartesianIndices(ns)
             kx = FTB.derivative_wavenumber(ks[1], I[1])
@@ -136,7 +136,7 @@ per-mode density itself use [`transfer_density!`](@ref).
 function transfer_density_scatter!(T_spec, invariant::Types.AbstractInvariant, carrier_hat, N̂, ks,
                                    shell_idx::AbstractArray{Int})
     nd = length(ks)
-    ms = size(carrier_hat)[1:nd]
+    ms = Base.front(size(carrier_hat))
     M  = size(carrier_hat, nd + 1)
     fill!(T_spec, zero(eltype(T_spec)))
     @inbounds for I in CartesianIndices(ms)
@@ -202,7 +202,7 @@ Allocating version of [`transfer_density!`](@ref): returns a real array of shape
 """
 function transfer_density(invariant::Types.AbstractInvariant, velocity_hat, N̂, ks)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     FT = real(eltype(velocity_hat))
     t  = similar(velocity_hat, FT, ns...)
     return transfer_density!(t, invariant, velocity_hat, N̂, ks)

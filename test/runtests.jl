@@ -138,7 +138,7 @@ Test.@testset "An analytic triad fixes the transfer and the flux sign" begin
     b = FIT.Types.LinearBinning(1.0)
     r = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = b, dealiasing = FIT.Types.NoDealiasing())
     ρ̂ = zeros(ComplexF64, N, N); ρ̂[1, 1] = 1
-    rc = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning = b, decompose = false,
+    rc = FIT.Compressible.calculate_compressible_flux(û, ρ̂, ks; binning = b, decomposition = FIT.Types.NoDecomposition(),
         dealiasing = FIT.Types.NoDealiasing())
     for res in (r, rc)
         # `flux[n]` is the flux through `shell_edges[n+1]`.
@@ -267,7 +267,7 @@ Test.@testset "Dealiasing — exact 3/2 padding (PaddedThreeHalves)" begin
         bq = 0.7
         xs = range(0, 2π; length = n + 1)[1:n]
         uy = [bq * cos(n * x / 2) * cos(y) for x in xs, y in xs]
-        ksq = FIT.Utils.wavenumber_grid((n, n), (2π, 2π); real = real_layout)
+        ksq = FIT.Utils.wavenumber_grid(real_layout ? Float64 : ComplexF64, (n, n), (2π, 2π))
         tr(f) = real_layout ? FFTW.rfft(f) ./ n^2 : FFTW.fft(f) ./ n^2
         ûq = cat(tr(zeros(n, n)), tr(uy); dims = 3)
         N̂q = FIT.NonlinearTerm.compute_nonlinear_term(ûq, ksq; dealiasing = FIT.Types.PaddedThreeHalves(),
@@ -281,7 +281,7 @@ Test.@testset "Dealiasing — exact 3/2 padding (PaddedThreeHalves)" begin
     # A broadband field, Nyquist modes included: the direct-sum padded term equals the FFT one.
     for n in (8, 7), real_layout in (false, true)
         rngd = Random.MersenneTwister(n)
-        ksd = FIT.Utils.wavenumber_grid((n, n), (2π, 2π); real = real_layout)
+        ksd = FIT.Utils.wavenumber_grid(real_layout ? Float64 : ComplexF64, (n, n), (2π, 2π))
         trd(f) = real_layout ? FFTW.rfft(f) ./ n^2 : FFTW.fft(f) ./ n^2
         ûd = cat(trd(randn(rngd, n, n)), trd(randn(rngd, n, n)); dims = 3)
         pad = FIT.Types.PaddedThreeHalves()
@@ -410,9 +410,9 @@ end
 Test.@testset "HelicalDecomposition — reconstruct, orthonormal, helicity split, flux" begin
     M = 16; L = 2π
     ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
-    kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
-    ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
-    kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+    kx = [FTB.derivative_wavenumber(ks[1], i) for i in 1:M, j in 1:M, l in 1:M]
+    ky = [FTB.derivative_wavenumber(ks[2], j) for i in 1:M, j in 1:M, l in 1:M]
+    kz = [FTB.derivative_wavenumber(ks[3], l) for i in 1:M, j in 1:M, l in 1:M]
     Random.seed!(51)
     Â = randn(ComplexF64, M, M, M, 3)
     ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
@@ -474,9 +474,9 @@ end
 Test.@testset "ToroidalPoloidalDecomposition — reconstruct, div-free, toroidal has w=0" begin
     M = 8; L = 2π
     ks = FIT.Utils.wavenumber_grid((M, M, M), (L, L, L))
-    kx = [ks[1][i] for i in 1:M, j in 1:M, l in 1:M]
-    ky = [ks[2][j] for i in 1:M, j in 1:M, l in 1:M]
-    kz = [ks[3][l] for i in 1:M, j in 1:M, l in 1:M]
+    kx = [FTB.derivative_wavenumber(ks[1], i) for i in 1:M, j in 1:M, l in 1:M]
+    ky = [FTB.derivative_wavenumber(ks[2], j) for i in 1:M, j in 1:M, l in 1:M]
+    kz = [FTB.derivative_wavenumber(ks[3], l) for i in 1:M, j in 1:M, l in 1:M]
     Random.seed!(52)
     Â = randn(ComplexF64, M, M, M, 3)
     ûx = im .* (ky .* Â[:, :, :, 3] .- kz .* Â[:, :, :, 2])
@@ -648,21 +648,20 @@ Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" be
     # an `rfftfreq` first axis, reproducing the canonical û = rfft(u)/Nᵈ exactly.
     û_ts, ks_ts = FIT.to_spectral((u, v), (x, y); transform = SpectralBackends.FFTSpectralBackend())
     û_half = cat(FFTW.rfft(u), FFTW.rfft(v); dims = 3) ./ N^2
-    ks_half = FIT.Utils.wavenumber_grid((N, N), (L, L); real = true)
+    ks_half = FIT.Utils.wavenumber_grid(Float64, (N, N), (L, L))
     Test.@test isapprox(û_ts, û_half; atol = 1e-12)
     Test.@test all(isapprox.(ks_ts, ks_half; atol = 1e-12))
 
-    # `real_layout = false` keeps the full complex spectrum, û = fft(u)/Nᵈ on the fftfreq grid.
-    û_full, ks_full = FIT.to_spectral((u, v), (x, y); transform = SpectralBackends.FFTSpectralBackend(),
-                                      real_layout = false)
+    # Complex fields keep the full spectrum, û = fft(u)/Nᵈ.
+    complex_fields = (complex.(u), complex.(v))
+    û_full, ks_full = FIT.to_spectral(complex_fields, (x, y); transform = SpectralBackends.FFTSpectralBackend())
     û_man = cat(FFTW.fft(u), FFTW.fft(v); dims = 3) ./ N^2
     ks_man = FIT.Utils.wavenumber_grid((N, N), (L, L))
     Test.@test isapprox(û_full, û_man; atol = 1e-12)
     Test.@test all(isapprox.(ks_full, ks_man; atol = 1e-12))
 
     # DirectSum reference agrees with FFT, on both layouts.
-    û_ds, _ = FIT.to_spectral((u, v), (x, y); transform = SpectralBackends.DirectSumSpectralBackend(),
-                              real_layout = false)
+    û_ds, _ = FIT.to_spectral(complex_fields, (x, y); transform = SpectralBackends.DirectSumSpectralBackend())
     Test.@test isapprox(û_ds, û_man; atol = 1e-10)
     û_dsh, _ = FIT.to_spectral((u, v), (x, y); transform = SpectralBackends.DirectSumSpectralBackend())
     Test.@test isapprox(û_dsh, û_half; atol = 1e-10)
@@ -677,15 +676,15 @@ Test.@testset "to_spectral — physical-space entry (uniform Cartesian grid)" be
     Test.@test isapprox(ûc, û_man; atol = 1e-12)
 
     # `from_spectral` inverts it on either layout.
-    for rl in (true, false)
-        ûr, ksr = FIT.to_spectral((u, v), (x, y); real_layout = rl)
+    for fields in ((u, v), complex_fields)
+        ûr, ksr = FIT.to_spectral(fields, (x, y))
         back = FIT.from_spectral(ûr, ksr)
         Test.@test maximum(abs, back[1] .- u) < 1e-12 * maximum(abs, u)
         Test.@test maximum(abs, back[2] .- v) < 1e-12 * maximum(abs, v)
     end
     # The `!` form returns the stacked `(ns…, D)` array.
     û_rt, ks_rt = FIT.to_spectral((u, v), (x, y))
-    ws_rt = FIT.ToSpectralWorkspace(û_rt, ks_rt)
+    ws_rt = FIT.ToSpectralWorkspace(û_rt, ks_rt; execution = ComputationalBackends.SerialBackend())
     phys_rt = FIT.from_spectral!(ws_rt, û_rt)
     Test.@test maximum(abs, phys_rt[:, :, 1] .- u) < 1e-12 * maximum(abs, u)
     Test.@test _alloc_from_spectral(ws_rt, û_rt) == 0
@@ -840,7 +839,8 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
     u3 = [cos(xi) * sin(zi) for xi in x3, yi in y3, zi in z3]
     v3 = [sin(yi)           for xi in x3, yi in y3, zi in z3]
     w3 = [cos(zi)           for xi in x3, yi in y3, zi in z3]
-    grid3 = FG.Grids.StructuredGrid(cart, x3, y3, z3; topology = (true, true, true))
+    grid3 = FG.Grids.StructuredGrid(cart, x3, y3, z3;
+                                    topology = (FG.Grids.Periodic(), FG.Grids.Periodic(), FG.Grids.Periodic()))
     hd3 = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), grid3)
     rot3, div3 = hd3.rotational, hd3.divergent
     for (c, f) in enumerate((u3, v3, w3))
@@ -852,7 +852,8 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
     # A conjugate-gradient solve stopped after one iteration reports it: the divergence of this field
     # spans two eigenvalues of the grid Laplacian, which one iteration cannot resolve.
     short = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), grid3;
-                solver = HelmholtzDecomposition.CGSolver(; max_iter = 1, multigrid = false))
+                solver = HelmholtzDecomposition.CGSolver(; max_iter = 1,
+                                                         preconditioner = HelmholtzDecomposition.DiagonalScaling()))
     Test.@test !short.converged
     Test.@test short.iterations <= 1
 end
@@ -914,8 +915,9 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     # serial loop's SVD, and the temporal DFT stays on the master.
     Random.seed!(123)
     Xtod = randn(64, 1, 4)
-    tod_serial = FIT.TriadicOrthogonalDecomposition.triadic_orthogonal_decomposition(Xtod; dt = 0.05, transform = SpectralBackends.DirectSumSpectralBackend(), execution = ComputationalBackends.SerialBackend(), return_coefficients = true, return_auxiliary_modes = true)
-    tod_dist   = FIT.TriadicOrthogonalDecomposition.triadic_orthogonal_decomposition(Xtod; dt = 0.05, transform = SpectralBackends.DirectSumSpectralBackend(), execution = ComputationalBackends.DistributedBackend(), return_coefficients = true, return_auxiliary_modes = true)
+    output = FIT.TriadicOrthogonalDecomposition.WithAuxiliaryModes()
+    tod_serial = FIT.TriadicOrthogonalDecomposition.triadic_orthogonal_decomposition(Xtod; dt = 0.05, transform = SpectralBackends.DirectSumSpectralBackend(), execution = ComputationalBackends.SerialBackend(), output)
+    tod_dist   = FIT.TriadicOrthogonalDecomposition.triadic_orthogonal_decomposition(Xtod; dt = 0.05, transform = SpectralBackends.DirectSumSpectralBackend(), execution = ComputationalBackends.DistributedBackend(), output)
     Test.@test isequal(tod_serial.mode_bispectrum, tod_dist.mode_bispectrum)
     Test.@test isequal(tod_serial.modal_energy_budget, tod_dist.modal_energy_budget)
     let k = first(keys(tod_serial.modes))
@@ -952,9 +954,9 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
 
     ρ̂c = randn(Random.MersenneTwister(7), ComplexF64, N, N)
     p̂c = randn(Random.MersenneTwister(8), ComplexF64, N, N)
-    c_ser = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.SerialBackend(), pressure_hat=p̂c, decompose=true)
-    c_dst = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.DistributedBackend(), pressure_hat=p̂c, decompose=true)
-    c_hyb = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()), pressure_hat=p̂c, decompose=true)
+    c_ser = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.SerialBackend(), pressure_hat=p̂c)
+    c_dst = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.DistributedBackend(), pressure_hat=p̂c)
+    c_hyb = FIT.Compressible.calculate_compressible_flux(û, ρ̂c, ks; transform=spD, execution=ComputationalBackends.DistributedBackend(ComputationalBackends.ThreadedBackend()), pressure_hat=p̂c)
     Test.@test maximum(abs, c_ser.transfer_spectrum) > 1e-8
     Test.@test isapprox(c_ser.transfer_spectrum, c_dst.transfer_spectrum; atol=1e-12)
     Test.@test isapprox(c_ser.flux, c_dst.flux; atol=1e-12)
@@ -994,7 +996,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     filt = FIT.Types.GaussianFilter(); ℓ = 0.5
 
     # --- spectral flux ---
-    sf1 = [FIT.SpectralFlux.calculate_spectral_flux(vh, ks; binning = b, transform = FFT) for vh in vhats]
+    sf1 = [FIT.SpectralFlux.calculate_spectral_flux(vh, ks; binning = b, transform = FFT, execution = Ser) for vh in vhats]
     sfS = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, transform = FFT, execution = Ser)
     sfT = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, transform = FFT, execution = Thr)
     sfD = FIT.SpectralFlux.calculate_spectral_flux_batch(vhats, ks; binning = b, transform = FFT, execution = Dst)
@@ -1011,7 +1013,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, transform = FFT))
 
     # --- shell to shell ---
-    ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, transform = FFT) for vh in vhats]
+    ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, transform = FFT, execution = Ser) for vh in vhats]
     ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, transform = FFT, execution = Ser)
     ssT = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, transform = FFT, execution = Thr)
     ssD = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, transform = FFT, execution = Dst)
@@ -1025,7 +1027,7 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     end
 
     # --- band to band ---
-    bb1 = [FIT.BandTransfer.calculate_band_to_band_transfer(vh, ks; bands = bands, transform = FFT) for vh in vhats]
+    bb1 = [FIT.BandTransfer.calculate_band_to_band_transfer(vh, ks; bands = bands, transform = FFT, execution = Ser) for vh in vhats]
     bbS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, transform = FFT, execution = Ser)
     bbT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, transform = FFT, execution = Thr)
     bbD = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vhats, ks; bands = bands, transform = FFT, execution = Dst)
@@ -1072,8 +1074,9 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     Test.@test isapprox(zG, zS; atol = 1e-12 * maximum(abs, zS))
 
     scales = [1.0, 2.0]
-    bS = FIT.CoarseGrainingFlux.calculate_band_energies(uv, (xs, ys), filt, scales; execution = Ser, maps = true)
-    bG = FIT.CoarseGrainingFlux.calculate_band_energies(uv, (xs, ys), filt, scales; execution = GPU, maps = true)
+    maps = CoarseGrainingEnergyFluxes.Diagnostics.BandMaps()
+    bS = FIT.CoarseGrainingFlux.calculate_band_energies(uv, (xs, ys), filt, scales; execution = Ser, maps)
+    bG = FIT.CoarseGrainingFlux.calculate_band_energies(uv, (xs, ys), filt, scales; execution = GPU, maps)
     Test.@test minimum(bS.bands) > 1e-8
     Test.@test isapprox(bG.bands, bS.bands; rtol = 1e-12)
     Test.@test all(isapprox(bG.band_maps[n], bS.band_maps[n]; atol = 1e-12 * maximum(abs, bS.band_maps[n]))
@@ -1230,21 +1233,24 @@ Test.@testset "device-generic on JLArrays (no scalar indexing)" begin
     Test.@test maximum(abs, Array(ts_d) .- ts_h) == 0
 
     # The compressible truncation, Helmholtz split and shell binning.
-    dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, ks2, (N, N), true)
-    dcd = JLArrays.JLArray(similar(û2)); FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), ks2, (N, N), true)
+    dch = similar(û2); FIT.Compressible._copy_trunc!(dch, û2, ks2, (N, N), true, nothing)
+    dcd = JLArrays.JLArray(similar(û2))
+    keep = FIT.Compressible._keep_table(dcd, ks2, FIT.Types.OrszagTwoThirds())
+    FIT.Compressible._copy_trunc!(dcd, JLArrays.JLArray(û2), ks2, (N, N), true, keep)
     Test.@test maximum(abs, Array(dcd) .- dch) == 0
     kd2 = FTB.wavenumber_arrays(û2, Float64, ks2; derivative = true)
-    rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, kd2, (N, N))
+    rh = similar(û2); ch = similar(û2); FIT.Compressible._helmholtz_split!(rh, ch, û2, kd2, (N, N), nothing)
     rd = JLArrays.JLArray(similar(û2)); cd = JLArrays.JLArray(similar(û2))
-    FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2),
-        FTB.wavenumber_arrays(JLArrays.JLArray(û2), Float64, ks2; derivative = true), (N, N))
+    kdd = FTB.wavenumber_arrays(rd, Float64, ks2; derivative = true)
+    projection = FIT.Compressible._projection_workspace(rd, kdd, (N, N))
+    FIT.Compressible._helmholtz_split!(rd, cd, JLArrays.JLArray(û2), kdd, (N, N), projection)
     Test.@test maximum(abs, Array(rd) .- rh) < 1e-14 * (maximum(abs, rh) + eps())
     Test.@test maximum(abs, Array(cd) .- ch) < 1e-14 * (maximum(abs, ch) + eps())
     kmag = FIT.ShellBinning.shell_coordinate(FIT.Types.IsotropicShells(), ks2); bb = FIT.Types.LinearBinning(2π / L)
     edges = FIT.ShellBinning.shell_edges(bb, maximum(kmag)); sidx = FIT.ShellBinning.assign_shells(kmag, edges)
     Nsh = length(collect(FIT.ShellBinning.shell_centers(bb, maximum(kmag))))
-    Th = FIT.Compressible._bin(td_h, sidx, Nsh, Float64, ks2, (N, N))
-    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), sidx, Nsh, Float64, ks2, (N, N))
+    Th = FIT.Compressible._bin(td_h, _compressible_bins(û2, sidx, Nsh, ks2), Float64, ks2)
+    Td = FIT.Compressible._bin(JLArrays.JLArray(td_h), _compressible_bins(dcd, sidx, Nsh, ks2), Float64, ks2)
     # The device sum is a tree reduction, the host one sequential: equal to round-off in the summands.
     Test.@test maximum(abs, Td .- Th) <= 8eps() * sum(abs, td_h)
 end
@@ -1459,8 +1465,10 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
         # Samples on a uniform grid give û = fft(u)/Nᵈ to the NUFFT tolerance.
         û_sc, ks_sc = FIT.to_spectral((vec(ug), vec(vg)), (vec(Xg), vec(Yg)), (Nn, Nn);
                                         transform = FTB.FINUFFTBackend(), Ls = (Ln, Ln), tol = 1e-13)
-        û_man  = cat(FFTW.fft(ug), FFTW.fft(vg); dims = 3) ./ Nn^2
-        ks_man = FIT.Utils.wavenumber_grid((Nn, Nn), (Ln, Ln))
+        ks_man = FIT.Utils.wavenumber_grid(Float64, (Nn + 1, Nn + 1), (Ln, Ln))
+        coefficients(field) = [sum(field[i, j] * cis(-(kx * xs1[i] + ky * xs1[j]))
+                                   for i in 1:Nn, j in 1:Nn) / Nn^2 for kx in ks_man[1], ky in ks_man[2]]
+        û_man = cat(coefficients(ug), coefficients(vg); dims = 3)
         Test.@test isapprox(û_sc, û_man; atol = 1e-12)
         Test.@test all(isapprox.(ks_sc, ks_man; atol = 1e-10))
 
@@ -1478,7 +1486,8 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
         # The workspace form reconstructs û = fft(u)/Nᵈ on both providers. The FINUFFT plan runs on one
         # thread and a reused workspace allocates nothing.
         for transform in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
-            wsts = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); transform, ncomponents = 2, Ls = (Ln, Ln))
+            wsts = FIT.NUFFTToSpectralWorkspace((vec(Xg), vec(Yg)), (Nn, Nn); transform, ncomponents = 2,
+                                                Ls = (Ln, Ln), execution = ComputationalBackends.SerialBackend())
             û_ip, _ = FIT.to_spectral!(wsts, (vec(ug), vec(vg)))
             Test.@test isapprox(û_ip, û_man; atol = 1e-8)
             if transform isa FTB.FINUFFTBackend
@@ -1628,6 +1637,19 @@ Test.@testset "Spherical transfer equals −dE_l/dt from the closed-form Jacobia
         Test.@test isapprox(res.energy_transfer, TE; atol = 1e-12 * maximum(abs, TE))
         Test.@test isapprox(res.enstrophy_transfer, TZ; atol = 1e-12 * maximum(abs, TZ))
     end
+    glw = zeros(N); lat = zeros(N)
+    FTB.gauss_legendre!(Float64, nothing, glw, lat, N)
+    glθ = π / 2 .- lat
+    coords = (vec([θ for θ in glθ, φ in φs]), vec([φ for θ in glθ, φ in φs]))
+    glpts = [(sin(θ) * cos(φ), sin(θ) * sin(φ), cos(θ)) for θ in glθ, φ in φs]
+    values = vec([sum(z(p) for z in Z) for p in glpts])
+    weights = vec([glw[j] * (2π / M) for j in 1:N, k in 1:M])
+    scattered = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(), values, coords;
+        lmax = lmax,
+        transform = SpectralBackends.NUFSHTSpectralBackend(), quadrature_weights = weights,
+        execution = ComputationalBackends.SerialBackend())
+    Test.@test isapprox(scattered.energy_transfer, TE; atol = 1e-10 * maximum(abs, TE))
+    Test.@test isapprox(scattered.enstrophy_transfer, TZ; atol = 1e-10 * maximum(abs, TZ))
 end
 
 # -----------------------------------------------------------------------

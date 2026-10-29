@@ -34,7 +34,7 @@ Test.@testset "scattered analysis with quadrature weights" begin
     f(a, c) = sin(a) * cos(c) + 0.3 * cos(2a + c) - 0.2 * sin(2c)
     g(a, c) = cos(a) * sin(c) - 0.4 * sin(a - 2c)
     xg = range(0, L; length = 10)[1:9]
-    ref = FFTW.fft([f(a, c) for a in xg, c in xg]) ./ 81
+    ref = FFTW.rfft([f(a, c) for a in xg, c in xg]) ./ 81
     u = f.(x, y); v = g.(x, y)
 
     for lib in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())

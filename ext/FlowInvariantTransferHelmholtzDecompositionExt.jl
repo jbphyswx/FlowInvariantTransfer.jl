@@ -8,20 +8,13 @@ const _HDDecomp = Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDe
 
 # 1. Physical-space decomposition on a FlowGeometries grid.
 #
-# The Poisson solve is left to `HDjl.AutoSolver`, which resolves it from the grid: it walks the
-# geometry's spectral algorithms in preference order (Cartesian: FFT then NUFFT; spherical: FSHT then
-# NUFSHT), each candidate checking the mask, axis uniformity, node layout, boundary and periodicity it
-# needs, and reaches the iterative `CGSolver` when none applies. On a Cartesian geometry that resolves
-# to the FFT solve for a uniform periodic grid, the cosine/sine solve for a uniform bounded one, the
-# NUFFT solve for a node set, and `CGSolver` for a stretched grid. Pass `solver=` to name one.
+# HD selects the solver from the grid, boundary and loaded libraries. Its Cartesian FFT solver uses
+# the spectral decomposition of the cell values. Other structured-grid solvers use HD's face operators;
+# their returned cell values carry the cell-to-face-to-cell averaging.
 #
-# `helmholtz_decompose` covers `StructuredGrid` (spectral or iterative); every other grid goes to
-# `helmholtz_decompose_spectral`, the entry declared on `AbstractGrid`. Both return the 3-way Hodge
-# split `u_rot + u_div + u_harm` as component-last `(ns…, D)`. The harmonic part is both divergence-
-# and curl-free — the mean on a periodic domain, in general a nonconstant field on a bounded one — and it
-# folds into the rotational component, so rotational + divergent == the field and the rotational part
-# stays divergence-free, matching the spectral path. The parts come with the outcome of the potential
-# solves, `converged` only if every solve met its tolerance, `iterations` and `residual` the largest.
+# HD's three component-last parts are `u_rot + u_div + u_harm`. FIT folds the harmonic part into the
+# rotational component and returns component views. The solve outcome reports the least converged
+# potential solve.
 function FIT.Decomposition._decompose_field_physical(
     decomp::_HDDecomp,
     velocity_fields::Tuple,
@@ -32,12 +25,18 @@ function FIT.Decomposition._decompose_field_physical(
     D = length(velocity_fields)
     nd = ndims(velocity_fields[1])
     ustacked = stack(velocity_fields; dims = nd + 1)
-    res = grid isa HDjl.FlowGeometries.Grids.StructuredGrid ?
-          HDjl.helmholtz_decompose(ustacked, grid; solver = solver, boundary = boundary) :
-          HDjl.helmholtz_decompose_spectral(ustacked, grid; solver = solver)
-    colons = ntuple(_ -> Colon(), nd)
-    rot = ntuple(c -> res.u_rot[colons..., c] .+ res.u_harm[colons..., c], D)
-    div = ntuple(c -> res.u_div[colons..., c], D)
+    res = if grid isa HDjl.FlowGeometries.Grids.StructuredGrid
+        concrete = HDjl.select_solver(solver, grid, boundary)
+        concrete isa HDjl.CartesianSpectralSolver ?
+            HDjl.helmholtz_decompose_spectral(ustacked, grid; solver = concrete) :
+            HDjl.helmholtz_decompose(ustacked, grid; solver = concrete, boundary = boundary)
+    else
+        HDjl.helmholtz_decompose_spectral(ustacked, grid; solver = solver)
+    end
+    colons = ntuple(_ -> Colon(), Val(nd))
+    res.u_rot .+= res.u_harm
+    rot = ntuple(c -> view(res.u_rot, colons..., c), Val(D))
+    div = ntuple(c -> view(res.u_div, colons..., c), Val(D))
     parts = decomp isa FIT.Types.HelmholtzDecomposition ? (; rotational = rot, divergent = div) :
             decomp isa FIT.Types.RotationalDecomposition ? (; rotational = rot) : (; divergent = div)
     return merge(parts, _solve_outcome(res))
@@ -64,7 +63,8 @@ function FIT.Decomposition._decompose_field_physical(
         "selected from the domain's topology, mask, axis spacing and geometry, and coordinate vectors " *
         "carry none of them. Build the grid those axes describe — e.g. " *
         "`FlowGeometries.Grids.StructuredGrid(FlowGeometries.Geometry.CartesianGeometry{Float64}(), x, y; " *
-        "topology = (true, true))` for a periodic box — and pass that."))
+        "topology = (FlowGeometries.Grids.Periodic(), FlowGeometries.Grids.Periodic()))` for a periodic box " *
+        "— and pass that."))
 end
 
 # 2. Spectral-space decomposition

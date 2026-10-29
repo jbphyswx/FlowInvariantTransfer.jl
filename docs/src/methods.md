@@ -200,16 +200,16 @@ off-diagonal channels are the **rotational↔divergent cross-flux** (zero for in
 ## Anisotropic geometry, smooth bands, and dealiasing
 
 **Shell geometry** (`geometry=`) sets which wavenumber coordinate the shells partition: isotropic
-``|k|`` ([`IsotropicShells`](@ref)), or the anisotropic ``k_\perp`` / ``k_\parallel``
-([`PerpendicularShells`](@ref) / [`ParallelShells`](@ref)) that give the directional fluxes
+``|k|`` ([`IsotropicShells`](@ref FlowInvariantTransfer.Types.IsotropicShells)), or the anisotropic ``k_\perp`` / ``k_\parallel``
+([`PerpendicularShells`](@ref FlowInvariantTransfer.Types.PerpendicularShells) / [`ParallelShells`](@ref FlowInvariantTransfer.Types.ParallelShells)) that give the directional fluxes
 ``\Pi(k_\perp)``, ``\Pi(k_\parallel)`` for rotating/stratified flows (Alexakis & Biferale 2018, §IV).
 
-**Smooth band-to-band** ``T(K,Q)`` ([`calculate_band_to_band_transfer`](@ref), [`SmoothBands`](@ref))
+**Smooth band-to-band** ``T(K,Q)`` ([`calculate_band_to_band_transfer`](@ref), [`SmoothBands`](@ref FlowInvariantTransfer.Types.SmoothBands))
 replaces the sharp shell indicator with a graded log-Gaussian partition of unity (Eyink & Aluie
 2009); it is antisymmetric, conserves, and reduces to the band-summed transfer spectrum.
 
-**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref) (default; keeps
-``|m_d| \le \lfloor (N_d-1)/3 \rfloor``, exact there), [`NoDealiasing`](@ref), or [`PaddedThreeHalves`](@ref) — exact 3/2 zero-padding
+**Dealiasing** (`dealiasing=`) of the quadratic product: [`OrszagTwoThirds`](@ref FlowInvariantTransfer.Types.OrszagTwoThirds) (default; keeps
+``|m_d| \le \lfloor (N_d-1)/3 \rfloor``, exact there), [`NoDealiasing`](@ref FlowInvariantTransfer.Types.NoDealiasing), or [`PaddedThreeHalves`](@ref FlowInvariantTransfer.Types.PaddedThreeHalves) — exact 3/2 zero-padding
 that is alias-free over every retained mode to Nyquist, on the FFT and the direct-sum transforms.
 
 ---
@@ -308,7 +308,7 @@ where ``W`` is the spatial inner-product weighting matrix.
 A real field's transform is Hermitian, ``\hat{u}(-k) = \overline{\hat{u}(k)}``, so half its coefficients
 are redundant. `to_spectral` therefore returns the **half layout** for real input: axis 1 carries
 ``k_1 \ge 0`` on an `rfftfreq` axis of length ``n_1/2 + 1``, the remaining axes carry the full
-`fftfreq` range, and the conjugate half is implied. Complex input, and `real_layout = false`, give the
+`fftfreq` range, and the conjugate half is implied. Complex input gives the
 full `fftfreq` grid on every axis. Which layout an array is in is carried by `ks`, so every diagnostic
 reads it from there.
 

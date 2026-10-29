@@ -17,6 +17,8 @@ using NUFSHT: NUFSHT
 using FINUFFT: FINUFFT
 using FlowTransformBindings: FlowTransformBindings as FTB
 
+const _ALLOC_EXEC = FIT.ComputationalBackends.SerialBackend()
+
 # --- function barriers: warm up, then measure a second call with concrete-typed backend args ---
 function _alloc_nlt(ws, û, ks, adv, da, sp)
     FIT.NonlinearTerm.compute_nonlinear_term!(ws, û, ks; dealiasing=da, transform=sp, advecting_hat=adv)
@@ -27,44 +29,44 @@ function _alloc_td(t, invariant, û, N̂, ks)
     return @allocated FIT.Invariants.transfer_density!(t, invariant, û, N̂, ks)
 end
 function _alloc_sf!(res, ws, û, ks, sidx, sp)
-    FIT.SpectralFlux.calculate_spectral_flux!(res, ws, û, ks, sidx; transform=sp)
-    return @allocated FIT.SpectralFlux.calculate_spectral_flux!(res, ws, û, ks, sidx; transform=sp)
+    FIT.SpectralFlux.calculate_spectral_flux!(res, ws, û, ks, sidx; transform=sp, execution=_ALLOC_EXEC)
+    return @allocated FIT.SpectralFlux.calculate_spectral_flux!(res, ws, û, ks, sidx; transform=sp, execution=_ALLOC_EXEC)
 end
 function _alloc_s2s!(res, ws, û, ks, sp)
-    FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(res, ws, û, ks; transform=sp)
-    return @allocated FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(res, ws, û, ks; transform=sp)
+    FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(res, ws, û, ks; transform=sp, execution=_ALLOC_EXEC)
+    return @allocated FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer!(res, ws, û, ks; transform=sp, execution=_ALLOC_EXEC)
 end
 function _alloc_m2m!(res, ws, û_p, û, ks)
-    FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks)
-    return @allocated FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks)
+    FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks; execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_mode_to_mode_transfer!(res, ws, û_p, û, ks; execution=_ALLOC_EXEC)
 end
 function _alloc_ss_scalar!(res, ws, û, θ̂, ks)
-    FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks)
-    return @allocated FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks)
+    FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks; execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_scalar_shell_to_shell_transfer!(res, ws, û, θ̂, ks; execution=_ALLOC_EXEC)
 end
 function _alloc_band!(T, net, bws, û, ks)
-    FIT.BandTransfer.calculate_band_to_band_transfer!(T, net, bws, û, ks)
-    return @allocated FIT.BandTransfer.calculate_band_to_band_transfer!(T, net, bws, û, ks)
+    FIT.BandTransfer.calculate_band_to_band_transfer!(T, net, bws, û, ks; execution=_ALLOC_EXEC)
+    return @allocated FIT.BandTransfer.calculate_band_to_band_transfer!(T, net, bws, û, ks; execution=_ALLOC_EXEC)
 end
 function _alloc_comp!(ws, û, ρ̂, ks)
     FIT.Compressible.calculate_compressible_flux!(ws, û, ρ̂, ks)
     return @allocated FIT.Compressible.calculate_compressible_flux!(ws, û, ρ̂, ks)
 end
 function _alloc_scalar_flux!(res, ws, û, θ̂, ks, sidx)
-    FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx)
-    return @allocated FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx)
+    FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx; execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_scalar_flux!(res, ws, û, θ̂, ks, sidx; execution=_ALLOC_EXEC)
 end
 function _alloc_scalar_m2m!(res, ws, ûp, û, θ̂, ks)
-    FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks)
-    return @allocated FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks)
+    FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks; execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_scalar_mode_to_mode_transfer!(res, ws, ûp, û, θ̂, ks; execution=_ALLOC_EXEC)
 end
-function _alloc_partial!(ws, û, ks, b, decomp)
-    FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
-    return @allocated FIT.calculate_partial_fluxes!(ws, û, ks; binning=b, decomposition=decomp)
+function _alloc_partial!(ws, û, ks, decomp)
+    FIT.calculate_partial_fluxes!(ws, û, ks; decomposition=decomp, execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_partial_fluxes!(ws, û, ks; decomposition=decomp, execution=_ALLOC_EXEC)
 end
-function _alloc_helical!(ws, û, ks, b)
-    FIT.calculate_helical_partial_fluxes!(ws, û, ks; binning=b, transform=SpectralBackends.FFTSpectralBackend())
-    return @allocated FIT.calculate_helical_partial_fluxes!(ws, û, ks; binning=b, transform=SpectralBackends.FFTSpectralBackend())
+function _alloc_helical!(ws, û, ks)
+    FIT.calculate_helical_partial_fluxes!(ws, û, ks; transform=SpectralBackends.FFTSpectralBackend(), execution=_ALLOC_EXEC)
+    return @allocated FIT.calculate_helical_partial_fluxes!(ws, û, ks; transform=SpectralBackends.FFTSpectralBackend(), execution=_ALLOC_EXEC)
 end
 
 function _reuse_cgef(ws, u, v)
@@ -175,20 +177,19 @@ Test.@testset "Allocations" begin
     Test.@testset "compressible! — reuses workspace (field intermediates not reallocated)" begin
         fb = sizeof(û2)
         ρ̂  = randn(ComplexF64, N, N)
-        wsc = FIT.Compressible.CompressibleWorkspace(û2, ks2; binning=b2)
+        wsc = FIT.Compressible.CompressibleWorkspace(û2, ks2; binning=b2, execution=_ALLOC_EXEC)
         # Only the per-shell result vectors are allocated.
         Test.@test _alloc_comp!(wsc, û2, ρ̂, ks2) <= fb ÷ 4
     end
 
     Test.@testset "bounded in-place variants — one shared workspace, output-only allocation" begin
-        # One NonlinearTermWorkspace serves every decomposition-channel pair; the channel and total result
-        # vectors and the decomposition components are the output.
+        # The workspace retains its nonlinear buffers and shell table across channel pairs.
         fb = sizeof(û2)
-        wsp = FIT.Workspaces.NonlinearTermWorkspace(û2, ks2)
-        Test.@test _alloc_partial!(wsp, û2, ks2, b2, FIT.Types.HelmholtzDecomposition()) <= 15fb
+        wsp = FIT.Workspaces.SpectralFluxWorkspace(û2, ks2, b2)
+        Test.@test _alloc_partial!(wsp, û2, ks2, FIT.Types.HelmholtzDecomposition()) <= 15fb
 
-        wsh3 = FIT.Workspaces.NonlinearTermWorkspace(û3, ks3)
-        Test.@test _alloc_helical!(wsh3, û3, ks3, b2) <= 15 * sizeof(û3)
+        wsh3 = FIT.Workspaces.SpectralFluxWorkspace(û3, ks3, b2)
+        Test.@test _alloc_helical!(wsh3, û3, ks3) <= 15 * sizeof(û3)
     end
 
     # A workspace holds every plan of the external transforms it runs, so a reused call allocates nothing.
@@ -215,7 +216,7 @@ Test.@testset "Allocations" begin
             ζ = [cos(θ[i]) * sin(φ[i]) for i in 1:M]
             nu = FTB.FINUFFTBackend()
             ws = FIT.Spherical.ScatteredSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12, rtol = 1e-13,
-                                                                   nufft = nu)
+                                                                   nufft = nu, execution = _ALLOC_EXEC)
             Test.@test _reuse_spherical!(ws, ζ) == 0
         end
 
@@ -228,7 +229,7 @@ Test.@testset "Allocations" begin
             uθ = [cos(θ[i]) for i in 1:M]; uφ = [sin(φ[i]) for i in 1:M]
             nu = FTB.FINUFFTBackend()
             ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12,
-                                                                            rtol = 1e-13, nufft = nu)
+                                                                            rtol = 1e-13, nufft = nu, execution = _ALLOC_EXEC)
             Test.@test _reuse_divergent!(ws, uθ, uφ) == 0
         end
     end

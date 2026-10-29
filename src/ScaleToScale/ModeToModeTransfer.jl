@@ -14,7 +14,7 @@ export calculate_scalar_mode_to_mode_transfer, calculate_scalar_mode_to_mode_tra
 
 """
     calculate_mode_to_mode_transfer(velocity_hat, ks; invariant=KineticEnergy(), dealiasing=OrszagTwoThirds(),
-                                    transform=AutoSpectralBackend(), execution=SerialBackend(),
+                                    transform=AutoSpectralBackend(), execution=AutoBackend(),
                                     advecting_hat=velocity_hat)
         -> ModeToModeTriadResult
 
@@ -47,7 +47,7 @@ with `SpectralBackends.FFTSpectralBackend`, and an `O(N_scales²)` result tensor
   `PaddedThreeHalves()` each slot's term is formed on the padded grid.
 - `transform::SpectralBackends.AbstractSpectralBackend`: `AutoSpectralBackend()` (default, the FFT when FFTW is loaded).
 - `execution::ComputationalBackends.AbstractExecutionBackend`: parallelism over the slots `p`
-  (`SerialBackend()` default; threaded, distributed and GPU through their extensions). Under
+  (`AutoBackend()` default; threaded, distributed and GPU through their extensions). Under
   `GPUBackend(dev)` host fields are copied to `dev` once per call, and the result arrays are on `dev`.
 - `advecting_hat=velocity_hat`: the advecting velocity of `(u·∇)u_p`.
 
@@ -61,14 +61,14 @@ function calculate_mode_to_mode_transfer(
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
-    exec = Types.resolve_execution(execution)
+    exec = Types.resolve_execution(execution, velocity_hat)
     velocity_hat, advecting_hat = Types._fields_to_execution(exec, velocity_hat, advecting_hat)
     nd = length(ks)
-    ns = size(velocity_hat)[1:nd]
+    ns = Base.front(size(velocity_hat))
     FT = real(eltype(velocity_hat))
 
     ws     = Workspaces.NonlinearTermWorkspace(velocity_hat, ks; dealiasing = dealiasing)
@@ -86,7 +86,7 @@ end
 
 The fold weight `w(k)` of every stored coefficient of the layout `ks`
 (`FlowTransformBindings.mode_fold`), shape `spectral_size(ks)`, in `proto`'s array type: the
-`weights` of a [`ModeToModeTriadResult`](@ref).
+`weights` of a [`ModeToModeTriadResult`](@ref FlowInvariantTransfer.Types.ModeToModeTriadResult).
 """
 function mode_weights(proto::AbstractArray, ::Type{FT}, ks::Tuple) where {FT}
     ms = FTB.spectral_size(ks)
@@ -111,11 +111,13 @@ function calculate_mode_to_mode_transfer!(
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
 )
+    invariant isa Types.Helicity && length(ks) != 3 &&
+        throw(ArgumentError("Helicity transfer is defined in 3D only (got nd=$(length(ks)))."))
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
-    _mode_to_mode_loop!(Types.resolve_execution(execution), result, ws, û_p, velocity_hat, ks;
+    _mode_to_mode_loop!(Types.resolve_execution(execution, velocity_hat), result, ws, û_p, velocity_hat, ks;
         invariant=invariant, dealiasing=dealiasing, transform=transform, advecting_hat=advecting_hat)
     return result
 end
@@ -188,7 +190,7 @@ function _mode_to_mode_loop!(::ComputationalBackends.SerialBackend, result, ws, 
     S   = result.transfer
     net = result.net_transfer
     fill!(net, zero(eltype(net)))
-    colons = ntuple(_ -> Colon(), nd)
+    colons = ntuple(_ -> Colon(), Val(length(ks)))
     truncate = !(dealiasing isa Types.NoDealiasing)
     NonlinearTerm.synthesize_advecting!(ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
     ph = ws.phase
@@ -216,7 +218,7 @@ function _mode_to_mode_one_hot!(result, ws, û_p, velocity_hat, ks; invariant, d
     net = result.net_transfer
     fill!(net, zero(eltype(net)))
     fill!(û_p, zero(eltype(û_p)))
-    colons = ntuple(_ -> Colon(), nd)
+    colons = ntuple(_ -> Colon(), Val(length(ks)))
     NonlinearTerm.synthesize_advecting!(ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
     @inbounds for p in CartesianIndices(ms)
         for c in 1:M

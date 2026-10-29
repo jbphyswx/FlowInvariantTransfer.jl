@@ -56,11 +56,11 @@ Compute the directed shell-to-shell kinetic energy transfer matrix T(n,m).
 - `transform::SpectralBackends.AbstractSpectralBackend`: `SpectralBackends.AutoSpectralBackend()`
   (default; `FFTSpectralBackend()` when FFTW is loaded), `SpectralBackends.FFTSpectralBackend()`, or
   `SpectralBackends.DirectSumSpectralBackend()`.
-- `execution::ComputationalBackends.AbstractExecutionBackend`: outer (mediator-loop) parallelism — `ComputationalBackends.SerialBackend()` (default),
+- `execution::ComputationalBackends.AbstractExecutionBackend`: outer (mediator-loop) parallelism — `ComputationalBackends.AutoBackend()` (default),
   `ComputationalBackends.ThreadedBackend()` (OhMyThreads), `ComputationalBackends.DistributedBackend()`, or `ComputationalBackends.GPUBackend(dev)`,
   which copies host fields to `dev` once per call.
 - `invariant`, `advecting_hat`, `geometry`: as for
-  [`calculate_spectral_flux`](@ref FlowInvariantTransfer.calculate_spectral_flux).
+  [`calculate_spectral_flux`](@ref FlowInvariantTransfer.SpectralFlux.calculate_spectral_flux).
 
 # Returns
 `ShellToShellResult` with:
@@ -88,12 +88,12 @@ function calculate_shell_to_shell_transfer(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
-    exec    = Types.resolve_execution(execution)
+    exec    = Types.resolve_execution(execution, velocity_hat)
     velocity_hat, advecting_hat = Types._fields_to_execution(exec, velocity_hat, advecting_hat)
     ws      = Workspaces.ShellToShellWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing)
     k_mag   = ShellBinning.shell_coordinate(geometry, ks)
@@ -121,12 +121,12 @@ function calculate_shell_to_shell_transfer!(
     dealiasing::Types.AbstractDealiasing = Types.OrszagTwoThirds(),
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     advecting_hat = velocity_hat,
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     _calculate_shell_to_shell!(result, ws, velocity_hat, ks,
-        Types.resolve_execution(execution), transform; dealiasing=dealiasing,
+        Types.resolve_execution(execution, velocity_hat), transform; dealiasing=dealiasing,
         invariant=invariant, advecting_hat=advecting_hat)
     return result
 end
@@ -150,7 +150,7 @@ function calculate_shell_to_shell_transfer_batch(
     invariant::Types.AbstractInvariant = Types.KineticEnergy(),
     transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
     geometry::Types.AbstractShellGeometry = Types.IsotropicShells(),
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     transform = Types.resolve_transform(Types.require_coefficient_transform(transform))
     n = length(velocity_hats)
@@ -161,7 +161,7 @@ function calculate_shell_to_shell_transfer_batch(
     FT      = real(eltype(eltype(velocity_hats)))
     results = Vector{Types.ShellToShellResult{typeof(centers), Vector{FT}, Matrix{FT}}}(undef, n)
     n == 0 && return results
-    _shell_to_shell_batch!(Types.resolve_execution(execution), results, velocity_hats, ks, centers, edges, N_sh;
+    _shell_to_shell_batch!(Types.resolve_execution(execution, first(velocity_hats)), results, velocity_hats, ks, centers, edges, N_sh;
         binning=binning, dealiasing=dealiasing, invariant=invariant, transform=transform, geometry=geometry)
     return results
 end
@@ -291,7 +291,7 @@ function _calculate_shell_to_shell_direct!(
     advecting_hat = velocity_hat,
 )
     nd    = length(ks)
-    ns    = size(velocity_hat)[1:nd]
+    ns    = Base.front(size(velocity_hat))
     M     = size(velocity_hat, nd+1)   # components of the binned/carried primary field
     FT    = real(eltype(velocity_hat))
     N_sh  = size(result.transfer_matrix, 1)

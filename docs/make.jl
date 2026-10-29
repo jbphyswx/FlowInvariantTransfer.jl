@@ -15,6 +15,7 @@ Documenter.makedocs(;
         FlowInvariantTransfer.Compressible, FlowInvariantTransfer.Spherical],
     sitename = "FlowInvariantTransfer.jl",
     authors  = "Jordan Benjamin",
+    checkdocs = :exports,
     format   = Documenter.HTML(;
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical  = "https://jbphyswx.github.io/FlowInvariantTransfer.jl",
@@ -26,11 +27,9 @@ Documenter.makedocs(;
         "Architecture"         => "architecture.md",
         "Backends & Extensions" => "backends.md",
         "API Reference"        => "api.md",
+        "Types & Workspaces"   => "types.md",
     ],
-    # `:cross_references` is warned (not fatal) because FIT documents symbols from the shared
-    # ComputationalBackends package whose docstrings use bare `@ref`s that cannot resolve under this
-    # page scope (a ComputationalBackends-side doc gap, tracked upstream).
-    warnonly = [:missing_docs, :docs_block, :cross_references],
+    warnonly = false,
 )
 
 Documenter.deploydocs(;

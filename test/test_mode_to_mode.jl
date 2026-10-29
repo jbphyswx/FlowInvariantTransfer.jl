@@ -58,7 +58,7 @@ Test.@testset "mode-to-mode slot transfer" begin
     Test.@testset "w(k)S(k|p) = ⟨u_k·(u·∇)u_p⟩, $(half ? "half" : "full") layout, N = $N" for
             N in (8, 9), half in (true, false)
         u, v = _m2m_field(N)
-        ks = FIT.Utils.wavenumber_grid((N, N), (2π, 2π); real = half)
+        ks = FIT.Utils.wavenumber_grid(half ? Float64 : ComplexF64, (N, N), (2π, 2π))
         tr = half ? FFTW.rfft : FFTW.fft
         û = cat(tr(u), tr(v); dims = 3) ./ N^2
         r = FIT.calculate_mode_to_mode_transfer(û, ks; transform = FFTB)
@@ -89,7 +89,7 @@ Test.@testset "mode-to-mode slot transfer" begin
         N = 8
         rng = Random.MersenneTwister(5)
         u = randn(rng, N, N); v = randn(rng, N, N)              # broadband, Nyquist included
-        ksh = FIT.Utils.wavenumber_grid((N, N), (2π, 2π); real = true)
+        ksh = FIT.Utils.wavenumber_grid(Float64, (N, N), (2π, 2π))
         ûh = cat(FFTW.rfft(u), FFTW.rfft(v); dims = 3) ./ N^2
         pad = FIT.Types.PaddedThreeHalves()
         r = FIT.calculate_mode_to_mode_transfer(ûh, ksh; transform = FFTB, dealiasing = pad, execution = exec)

@@ -82,7 +82,8 @@ end
 
 """
     pencil_spectral_flux(u_phys, plan, ks; comm=MPI.COMM_WORLD, binning, dealiasing, invariant, geometry, execution)
-        -> (centers, shell_edges, transfer_spectrum, flux)
+    pencil_spectral_flux(fields; binning, dealiasing, invariant, geometry, execution)
+        -> SpectralFluxResult
 
 Distributed spectral transfer/flux for a single grid split across MPI ranks along the **pencil
 axis**: `u_phys` is the physical-space velocity as an `NTuple{D, PencilArray}` (one component per
@@ -93,53 +94,57 @@ spectrum is `MPI.Allreduce`d to a global result identical on every rank (matchin
 [`calculate_spectral_flux`](@ref) on the same field). For many independent snapshots, see
 [`mpi_batch_map`](@ref).
 
-Requires `using MPI, PencilFFTs, PencilArrays` to load the extension.
+`fields` may be a tuple of FlowGeometries rank fields on one split grid. Its ownership defines the
+pencil layout. Requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`.
 """
 function pencil_spectral_flux(args...; kwargs...)
-    throw(ArgumentError("pencil_spectral_flux requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+    throw(ArgumentError("pencil_spectral_flux requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`."))
 end
 
 """
-    build_pencil_plan(ns, comm=MPI.COMM_WORLD; T=Float64) -> PencilFFTPlan
+    build_pencil_plan(T, ns, comm=MPI.COMM_WORLD) -> PencilFFTPlan
+    build_pencil_plan(T, split::FlowGeometries.Decomposition.AbstractRankSplit) -> PencilFFTPlan
 
 Convenience constructor for the distributed FFT plan used by
 [`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux), with an auto-balanced MPI
 process grid. The velocity is real, so axis 1 is a real-to-complex transform and each rank's spectral
 pencil holds the non-redundant `k₁ ≥ 0` half: pass the matching wavenumber tuple,
-`Utils.wavenumber_grid(ns, Ls; real = true)`. Requires `using MPI, PencilFFTs, PencilArrays`.
+`Utils.wavenumber_grid(T, ns, Ls)` with the real element type `T` (default `Float64`). A split grid
+supplies its layout and communicator. Requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`.
 """
 function build_pencil_plan(args...; kwargs...)
-    throw(ArgumentError("build_pencil_plan requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+    throw(ArgumentError("build_pencil_plan requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`."))
 end
 
 """
     PencilWorkspace(plan, ks, comm=MPI.COMM_WORLD; binning, dealiasing=OrszagTwoThirds(),
-                    geometry=IsotropicShells(), invariant=KineticEnergy(), execution=SerialBackend())
+                    geometry=IsotropicShells(), invariant=KineticEnergy(), execution=AutoBackend())
+    PencilWorkspace(fields; binning, kwargs...)
         -> PencilWorkspace
 
 Reusable workspace for [`pencil_spectral_flux!`](@ref): the (geometry/dealiasing/binning-fixed)
 wavenumber grids + shell structure and every per-snapshot scratch field, so a repeated distributed
-flux on the same plan allocates ~0 beyond the small per-shell result vectors. Requires
-`using MPI, PencilFFTs, PencilArrays`.
+flux reuses the buffers and result. `fields` is a tuple of FlowGeometries rank fields on one split.
+Requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`.
 
 `execution` composes an inner local backend with the MPI (pencil) axis, e.g.
 `execution=MPIBackend(GPUBackend(dev))` for a per-rank device pencil (multi-GPU) — the local shell
-reduction then runs as an on-device scatter-add. `SerialBackend()` (default) keeps the host scalar path.
+reduction then runs as an on-device scatter-add.
 """
 function PencilWorkspace(args...; kwargs...)
-    throw(ArgumentError("PencilWorkspace requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+    throw(ArgumentError("PencilWorkspace requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`."))
 end
 
 """
     pencil_spectral_flux!(ws::PencilWorkspace, u_phys; invariant=ws.invariant)
-        -> (centers, shell_edges, transfer_spectrum, flux)
+        -> SpectralFluxResult
 
-In-place distributed pencil spectral flux reusing `ws` (0 alloc beyond the small result vectors) — build
-`ws` once and loop over snapshots of the same distributed grid. `invariant` must be the one `ws` was
-built for. Requires `using MPI, PencilFFTs, PencilArrays`.
+In-place distributed pencil spectral flux reusing `ws` and its result arrays. `u_phys` holds pencil
+arrays or FlowGeometries rank fields. `invariant` must match the workspace's. Requires
+`using MPI, PencilFFTs, PencilArrays, FlowGeometries`.
 """
 function pencil_spectral_flux!(args...; kwargs...)
-    throw(ArgumentError("pencil_spectral_flux! requires MPI, PencilFFTs and PencilArrays. Run `using MPI, PencilFFTs, PencilArrays`."))
+    throw(ArgumentError("pencil_spectral_flux! requires `using MPI, PencilFFTs, PencilArrays, FlowGeometries`."))
 end
 
 export mpi_batch_map, pencil_spectral_flux, pencil_spectral_flux!, build_pencil_plan, PencilWorkspace
@@ -188,7 +193,7 @@ function _physical_energy_transfer(spectral::SpectralBackends.AbstractNonUniform
                                    method::_SpectralFamilyMethod, velocity_fields::Tuple, scatter_coords::Tuple, ms::Tuple;
                                    Ls::Tuple, tol::Union{Nothing, Real} = nothing,
                                    weights::Union{Nothing, AbstractVector} = nothing,
-                                   execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+                                   execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
                                    kwargs...)
     velocity_hat, ks = to_spectral(velocity_fields, scatter_coords, ms; transform = spectral, Ls = Ls, tol = tol,
                                    weights = weights, execution = execution)
@@ -319,13 +324,12 @@ entry point for gridded data: the diagnostics operate on coefficients, so a real
 here once with the package's `û = fft(u)/Nᵈ` normalization (so `E(k) = ½|û|²`) and the FFTW `fftfreq`
 wavenumber convention — you do not build `û`/`ks` by hand.
 
-`coords_vecs` are the **1D coordinate vectors** `(x, y[, z])` of the grid, one vector of length `nₐ`
-per axis, each `nₐ` periodic samples `x₁, x₁ + Δ, …, x₁ + (nₐ−1)Δ` of the period `L = nₐΔ` (uniform to
-`√eps` of their float type, `Float32` or `Float64`). A vector that ends at `x₁ + L` repeats its first
-sample; drop that sample, or pass a `FlowGeometries` grid, which carries its period.
+`coords_vecs` are one-dimensional ranges `(x, y[, z])`, each holding `nₐ` periodic samples
+`x₁, x₁ + Δ, …, x₁ + (nₐ−1)Δ` of the period `L = nₐΔ`. Other coordinate arrays need a
+`FlowGeometries` grid with an explicit period.
 Scattered (non-uniform) Cartesian data takes the 3-argument form with a NUFFT library
 (`transform = FlowTransformBindings.NonuniformFFTsBackend()` or `FlowTransformBindings.FINUFFTBackend()`),
-and spherical data [`calculate_spherical_transfer`](@ref); see [`spectral_geometry`](@ref).
+and spherical data [`calculate_spherical_transfer`](@ref).
 
 # Keyword Arguments
 - `transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()`: the analysis transform. `SpectralBackends.FFTSpectralBackend()` needs
@@ -333,8 +337,8 @@ and spherical data [`calculate_spherical_transfer`](@ref); see [`spectral_geomet
   dependency-free `O(N²ᴰ)` reference (tiny grids only).
 
 # Returns
-`(velocity_hat, ks)` — `velocity_hat` is `(nₐ..., D)` complex in the input array's backend (a device
-field yields a device coefficient array); `ks` a tuple of `D` wavenumber vectors.
+`(velocity_hat, ks)` — complex coefficients shaped `(ms..., D)` in the input array's backend and
+their wavenumber axes. Real input takes the packed half; complex input takes the full spectrum.
 
 # Example
 ```julia
@@ -347,9 +351,8 @@ Pass a scalar (density / pressure / passive scalar) as a 1-tuple: `ρ̂, _ = to_
 """
 function to_spectral(velocity_fields::Tuple, coords_vecs::Tuple;
                      transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
-                     real_layout::Bool = eltype(velocity_fields[1]) <: Real, kwargs...)
-    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; transform = transform,
-                             real_layout = real_layout, kwargs...)
+                     kwargs...)
+    ws = ToSpectralWorkspace(velocity_fields, coords_vecs; transform = transform, kwargs...)
     return to_spectral!(ws, velocity_fields)
 end
 
@@ -371,10 +374,10 @@ Base.show(io::IO, ::ToSpectralWorkspace) = print(io, "ToSpectralWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::ToSpectralWorkspace) = show(io, w)
 
 """
-    ToSpectralWorkspace(velocity_fields, coords_vecs; transform, real_layout=true)
+    ToSpectralWorkspace(velocity_fields, coords_vecs; transform)
 
-Build the reusable uniform-grid analysis workspace. `real_layout = true` (the default for real input
-fields) stores the non-redundant half spectrum; see [`to_spectral`](@ref).
+Build the reusable uniform-grid analysis workspace. Real input fields store the non-redundant half
+spectrum; see [`to_spectral`](@ref).
 """
 ToSpectralWorkspace(velocity_fields::Tuple, coords_vecs::Tuple; kwargs...) =
     _to_spectral_workspace_on_axes(velocity_fields, coords_vecs; kwargs...)
@@ -403,7 +406,7 @@ function to_spectral!(ws::ToSpectralWorkspace, velocity_fields::Tuple)
     length(velocity_fields) == D || throw(DimensionMismatch(
         "to_spectral! got $(length(velocity_fields)) fields; workspace was built for $D components"))
     nd = ndims(ws.field_phys) - 1
-    colons = ntuple(_ -> Colon(), nd)
+    colons = ntuple(_ -> Colon(), Val(ndims(ws.field_phys) - 1))
     for c in 1:D
         view(ws.field_phys, colons..., c) .= velocity_fields[c]
     end
@@ -446,8 +449,8 @@ function from_spectral!(ws::ToSpectralWorkspace, velocity_hat::AbstractArray)
     D  = size(ws.field_phys, nd + 1)
     size(velocity_hat, nd + 1) == D || throw(DimensionMismatch(
         "from_spectral! got $(size(velocity_hat, nd + 1)) components; workspace was built for $D"))
-    size(velocity_hat)[1:nd] == size(ws.û)[1:nd] || throw(DimensionMismatch(
-        "coefficient size $(size(velocity_hat)[1:nd]) does not match the workspace grid $(size(ws.û)[1:nd])"))
+    Base.front(size(velocity_hat)) == Base.front(size(ws.û)) || throw(DimensionMismatch(
+        "coefficient size $(Base.front(size(velocity_hat))) does not match the workspace grid $(Base.front(size(ws.û)))"))
     ws.tf.idft!(ws.field_phys, velocity_hat)
     return ws.field_phys
 end
@@ -459,17 +462,15 @@ Synthesise physical-space components from Fourier coefficients on a uniform peri
 the inverse of [`to_spectral`](@ref), and its normalization: `u = Σ û e^{ik·x}`. Accepts either
 spectral layout, reading which from `ks`, and returns real fields.
 
-The components come back as a tuple of views into one backing array, mirroring the tuple
-[`to_spectral`](@ref) takes. Build a [`ToSpectralWorkspace`](@ref) and call [`from_spectral!`](@ref)
-for the stacked array and plan reuse across snapshots.
+The components come back as a vector of views into one backing array. Build a
+[`ToSpectralWorkspace`](@ref) and call [`from_spectral!`](@ref) for the stacked array and plan reuse
+across snapshots.
 """
 function from_spectral(velocity_hat::AbstractArray, ks::Tuple;
                        transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend())
     ws = ToSpectralWorkspace(velocity_hat, ks; transform = transform)
     phys = from_spectral!(ws, velocity_hat)
-    nd = length(ks)
-    colons = ntuple(_ -> Colon(), nd)
-    return ntuple(c -> view(phys, colons..., c), size(phys, nd + 1))
+    return eachslice(phys; dims = ndims(phys))
 end
 
 export from_spectral, from_spectral!

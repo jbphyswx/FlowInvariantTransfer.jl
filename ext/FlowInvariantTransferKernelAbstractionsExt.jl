@@ -5,6 +5,7 @@ using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
+using LinearAlgebra: LinearAlgebra
 
 # Copy a host array to a fresh device array on `dev` (a plain Array on `GPUBackend(KA.CPU())`).
 # `assign_shells` builds a host `Array{Int}`; a shell mask (`shell_idx .== n`) broadcast against a
@@ -25,21 +26,7 @@ FIT._nufft_to_device(gpu::ComputationalBackends.AbstractGPUBackend, x::AbstractA
 
 # An input on the GPUBackend's device: itself when it lives there, a device copy otherwise.
 FIT.Types._to_execution(gpu::ComputationalBackends.GPUBackend, x::AbstractArray) = _on_device(gpu.backend, x)
-
-# Device method of the real-NUFFT Hermitian expansion (the core holds the per-mode rule and the host
-# loop): every output mode is independent, so one kernel over the output grid covers the expansion.
-@kernel function r2c_expand_kernel!(full, @Const(fk_half), @Const(us), gk, ms, novs, normfactor, invN)
-    I = @index(Global, Cartesian)
-    full[I] = FIT._r2c_value(I, fk_half, us, gk, ms, novs, normfactor, invN)
-end
-
-function FIT._r2c_expand!(gpu::ComputationalBackends.AbstractGPUBackend, full, fk_half, us, gk,
-                          ms::NTuple{D, Int}, novs::NTuple{D, Int}, normfactor, invN) where {D}
-    dev = gpu.backend
-    r2c_expand_kernel!(dev)(full, fk_half, us, gk, ms, novs, normfactor, invN; ndrange = ms)
-    KA.synchronize(dev)
-    return full
-end
+FIT.Types._device_execution(x::AbstractArray) = ComputationalBackends.GPUBackend(KA.get_backend(x))
 
 # ---------------------------------------------------------------------------
 # Device kernels (KernelAbstractions ≥ 0.9 API: launch then KA.synchronize).
@@ -138,23 +125,29 @@ end
     end
 end
 
-# The Hermitian weight of every axis-1 index, on `dev`.
-_hermitian_weights_dev(dev, ::Type{FT}, ks) where {FT} =
-    _to_device(dev, FT[FTB.fold_weight(ks[1], i) for i in 1:length(ks[1])])
+@kernel function compressible_shell_kernel!(out, @Const(density), @Const(shell_idx), @Const(fold))
+    I = @index(Global, Cartesian)
+    n = shell_idx[I]
+    if n != 0
+        KA.@atomic out[n] += fold[I[1]] * density[I]
+    end
+end
 
-# The wavenumber components the vorticity kernels multiply by, on `dev`: `derivative_wavenumber`, zero at
-# the Nyquist index of an even axis, as the host densities use.
-_derivative_ks_dev(dev, ::Type{FT}, ks) where {FT} = ntuple(length(ks)) do d
-    _to_device(dev, FT[FTB.derivative_wavenumber(ks[d], i) for i in 1:length(ks[d])])
+function FIT.Compressible._bin_device!(out::AbstractVector, density, shell_idx, fold)
+    dev = KA.get_backend(density)
+    fill!(out, zero(eltype(out)))
+    compressible_shell_kernel!(dev)(out, density, shell_idx, fold; ndrange = size(density))
+    KA.synchronize(dev)
+    return Array(out)
 end
 
 # `GPUBackend` method of `ShellBinning.shell_scatter_add!`, the device shell reduction of the
 # distributed pencil flux: an atomic scatter-add over the local mode grid (`parent` unwraps a PencilArray
 # to its dense local array), copied back into the host `T_spec` so it stays MPI-reducible.
-function FIT.ShellBinning.shell_scatter_add!(T_spec, density, shell_idx, gpu_backend::ComputationalBackends.GPUBackend)
+function FIT.ShellBinning.shell_scatter_add!(T_spec, density, shell_idx,
+                                            gpu_backend::ComputationalBackends.GPUBackend, T_dev)
     dev = gpu_backend.backend
     d   = parent(density)
-    T_dev = KA.allocate(dev, eltype(T_spec), length(T_spec))
     fill!(T_dev, zero(eltype(T_spec)))
     shell_idx_dev = _on_device(dev, parent(shell_idx))
     shell_scatter_add_kernel!(dev)(T_dev, d, shell_idx_dev; ndrange = size(d))
@@ -168,7 +161,6 @@ end
 function _launch_transfer_density!(dev, td, velocity_hat, N̂, ks, invariant, D, ns, ks_dev)
     _check_density(invariant, length(ks))
     transfer_density_kernel!(dev)(td, velocity_hat, N̂, ks_dev, invariant, D; ndrange = ns)
-    KA.synchronize(dev)
     return td
 end
 
@@ -178,7 +170,6 @@ function _launch_shell_transfer!(dev, T_spec, velocity_hat, N̂, shell_idx_dev, 
     _check_density(invariant, length(ks))
     fill!(T_spec, zero(eltype(T_spec)))
     shell_transfer_kernel!(dev)(T_spec, velocity_hat, N̂, shell_idx_dev, w1, ks_dev, invariant, D; ndrange = ns)
-    KA.synchronize(dev)
     return T_spec
 end
 
@@ -200,18 +191,18 @@ function FIT.ShellToShellTransfer._shell_to_shell_gpu!(
     N_sh = size(result.transfer_matrix, 1)
     FT   = real(eltype(velocity_hat))
     nd   = length(ks)
-    ns   = size(velocity_hat)[1:nd]
+    ns   = Base.front(size(velocity_hat))
     D    = size(velocity_hat, nd + 1)      # components of the binned/carried primary field
 
     fill!(result.transfer_matrix, zero(FT))
     fill!(result.net_transfer, zero(FT))
 
-    ks_dev = _derivative_ks_dev(dev, FT, ks)
-    w1 = _hermitian_weights_dev(dev, FT, ks)
+    ks_dev = ws.nonlinear.operators.kd
+    w1 = ws.nonlinear.operators.fold
 
     # Device-resident shell index (see `_to_device`) so shell masks broadcast against device fields.
     shell_idx_dev = _on_device(dev, ws.shell_idx)
-    col_dev = KA.allocate(dev, FT, N_sh)   # per-mediator shell sums (device); scatter-add target
+    col_dev = ws.net_transfer
     FIT.NonlinearTerm.synthesize_advecting!(ws.nonlinear, advecting_hat, ks; dealiasing = dealiasing, transform = spectral)
 
     sidx_c = reshape(shell_idx_dev, ns..., 1)   # broadcasts against the component axis
@@ -227,6 +218,7 @@ function FIT.ShellToShellTransfer._shell_to_shell_gpu!(
         #    device column into the host result matrix.
         _launch_shell_transfer!(dev, col_dev, velocity_hat, ws.nonlinear.N̂, shell_idx_dev, w1, ks, invariant,
                                 D, ns, ks_dev)
+        KA.synchronize(dev)
         copyto!(view(result.transfer_matrix, :, m), col_dev)
     end
 
@@ -262,12 +254,13 @@ function FIT.SpectralFlux._spectral_flux_gpu!(
 )
     dev = gpu_backend.backend
     nd  = length(ks)
-    ns  = size(velocity_hat)[1:nd]
+    ns  = Base.front(size(velocity_hat))
     FT  = real(eltype(velocity_hat))
     D   = size(velocity_hat, nd + 1)
     _launch_shell_transfer!(dev, ws.T_spec, velocity_hat, N̂, _on_device(dev, shell_idx),
-                            _hermitian_weights_dev(dev, FT, ks), ks, invariant, D, ns,
-                            _derivative_ks_dev(dev, FT, ks))
+                            ws.nonlinear.operators.fold, ks, invariant, D, ns,
+                            ws.nonlinear.operators.kd)
+    KA.synchronize(dev)
     return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
@@ -287,14 +280,14 @@ function FIT.BandTransfer._band_to_band_gpu!(
     advecting_hat = velocity_hat,
 )
     dev = gpu_backend.backend
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; D = size(velocity_hat, nd + 1)
+    nd = length(ks); ns = Base.front(size(velocity_hat)); D = size(velocity_hat, nd + 1)
     FT = real(eltype(velocity_hat)); nb = length(bws.centers)
-    ks_dev = _derivative_ks_dev(dev, FT, ks)
+    ks_dev = bws.nlt.operators.kd
     W = bws.W
     idx_dev = _on_device(dev, W.idx)
     table_dev = _on_device(dev, W.table)
-    w1_dev = _to_device(dev, vec(FTB.fold_weights(FT, ks)))
-    Dq_dev = KA.zeros(dev, FT, size(W.table, 2))
+    w1_dev = bws.nlt.operators.fold
+    Dq_dev = bws.Dq
     N = prod(ns)
     FIT.NonlinearTerm.synthesize_advecting!(bws.nlt, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
     for m in 1:nb
@@ -303,7 +296,9 @@ function FIT.BandTransfer._band_to_band_gpu!(
         _launch_transfer_density!(dev, bws.d, velocity_hat, bws.nlt.N̂, ks, invariant, D, ns, ks_dev)
         fill!(Dq_dev, zero(FT))
         _shell_bin_kernel!(dev)(Dq_dev, idx_dev, w1_dev, bws.d, CartesianIndices(ns); ndrange = N)
-        T[:, m] .= W.table * Array(Dq_dev)
+        LinearAlgebra.mul!(bws.column, table_dev, Dq_dev)
+        KA.synchronize(dev)
+        copyto!(view(T, :, m), bws.column)
     end
     return T
 end
@@ -342,11 +337,11 @@ function FIT.ModeToModeTransfer._mode_to_mode_gpu!(
     advecting_hat = velocity_hat,
 )
     dev = gpu_backend.backend
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; M = size(velocity_hat, nd + 1); FT = real(eltype(velocity_hat))
+    nd = length(ks); ns = Base.front(size(velocity_hat)); M = size(velocity_hat, nd + 1); FT = real(eltype(velocity_hat))
     S = result.transfer; net = result.net_transfer
     fill!(net, zero(FT))
-    ks_dev = _derivative_ks_dev(dev, FT, ks)
-    colons = ntuple(_ -> Colon(), nd)
+    ks_dev = ws.operators.kd
+    colons = ntuple(_ -> Colon(), Val(length(ks)))
     discard = dealiasing isa FIT.Types.OrszagTwoThirds
     FIT.NonlinearTerm.synthesize_advecting!(ws, advecting_hat, ks; dealiasing = dealiasing, transform = transform)
     for p in CartesianIndices(ns)
@@ -356,10 +351,8 @@ function FIT.ModeToModeTransfer._mode_to_mode_gpu!(
             continue
         end
         one_hot_kernel!(dev)(û_p, velocity_hat, p, M; ndrange = ns)   # isolate slot p
-        KA.synchronize(dev)
         FIT.NonlinearTerm.compute_advection!(ws, û_p, ks; dealiasing = dealiasing, transform = transform)
         _launch_transfer_density!(dev, Sp, velocity_hat, ws.N̂, ks, invariant, M, ns, ks_dev)
-        KA.synchronize(dev)
         net .+= Sp
     end
     return result
@@ -379,18 +372,19 @@ function FIT.SpectralFlux._partial_fluxes_gpu!(
     decomposition::FIT.Types.AbstractFieldDecomposition,
 )
     dev = gpu_backend.backend
-    nd = length(ks); ns = size(velocity_hat)[1:nd]; FT = real(eltype(velocity_hat))
+    nd = length(ks); ns = Base.front(size(velocity_hat))
     D = size(velocity_hat, nd + 1)
-    ks_dev = _derivative_ks_dev(dev, FT, ks)
-    w1 = _hermitian_weights_dev(dev, FT, ks)
-    sidx_dev = _on_device(dev, shells.sidx)
-    Tspec = KA.allocate(dev, FT, shells.Nsh)     # shell sums (device), reused per channel
+    ks_dev = ws.operators.kd
+    w1 = ws.operators.fold
+    sidx_dev = shells.sidx
+    Tspec = shells.sums
     for sp in names, sq in names
         FIT.SpectralFlux._channel_term!(ws, decomposition, comps[sp], comps[sq], ks;
                                        dealiasing = dealiasing, transform = transform)
         for sk in names
             _launch_shell_transfer!(dev, Tspec, comps[sk], ws.N̂, sidx_dev, w1, ks, FIT.Types.KineticEnergy(),
                                     D, ns, ks_dev)
+            KA.synchronize(dev)
             T = Array(Tspec)                     # small per-shell vector to the host
             channels[(sk, sp, sq)] = FIT.Types.SpectralFluxResult(shells.centers, shells.edges, T, cumsum(T))
         end

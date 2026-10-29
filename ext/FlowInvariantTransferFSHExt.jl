@@ -68,10 +68,9 @@ end
 # the work-grid size (2·lmax vs lmax), so it is a workspace-level choice, and `execution` the
 # transforms' thread count. The FSH transforms (spinsph_transform/eth/evaluate) allocate internally on
 # every call, having no in-place API; the workspace reuses the embed, Jacobian and reduction buffers.
-function FIT.Spherical.SphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true,
-                                                  T::Type{<:AbstractFloat} = Float64,
+function FIT.Spherical.SphericalTransferWorkspace(::Type{T}, lmax::Integer; radius::Real = 1.0, dealias::Bool = true,
                                                   execution::ComputationalBackends.AbstractExecutionBackend =
-                                                      ComputationalBackends.SerialBackend())
+                                                      ComputationalBackends.AutoBackend()) where {T<:AbstractFloat}
     nthreads = _fsh_threads(execution)
     lwork = dealias ? 2 * lmax : lmax
     Nwork = lwork + 1
@@ -92,6 +91,9 @@ function FIT.Spherical.SphericalTransferWorkspace(lmax::Integer; radius::Real = 
         Cζ, Cψ, Gψ, Gζ, J, degs, ψv, ζv, Av, _warmed_plans((lmax + 1, Nwork), nthreads), result,
         Float64(radius), Int(lmax), dealias, nthreads)
 end
+
+FIT.Spherical.SphericalTransferWorkspace(lmax::Integer; kwargs...) =
+    FIT.Spherical.SphericalTransferWorkspace(Float64, lmax; kwargs...)
 
 function FIT.Spherical.calculate_spherical_transfer!(
     ws::FIT.Spherical.SphericalTransferWorkspace,
@@ -140,7 +142,7 @@ end
 
 """
     calculate_energy_transfer(method::SphericalTransferMethod, vorticity::AbstractMatrix;
-                              dealias=true, transform=nothing, execution=SerialBackend())
+                              dealias=true, transform=nothing, execution=AutoBackend())
 
 Spherical spectral energy/enstrophy transfer `T_E(l)`, `T_Z(l)` (and fluxes) for 2D non-divergent
 flow on the sphere, from the **vorticity field** `ζ` sampled on the FastSphericalHarmonics
@@ -165,14 +167,15 @@ function FIT.calculate_energy_transfer(
     vorticity::AbstractMatrix{<:Real};
     dealias::Bool = true,
     transform = nothing,
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     FIT.Spherical._validate_spherical_backends(transform, execution, :regular)
     Nθ, Nφ = size(vorticity)
     Nφ == 2Nθ - 1 || throw(ArgumentError(
         "vorticity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
-    ws = FIT.Spherical.SphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias,
-                                                  T = float(eltype(vorticity)), execution = execution)
+    ws = FIT.Spherical.SphericalTransferWorkspace(float(eltype(vorticity)), Nθ - 1;
+                                                  radius = float(method.radius), dealias = dealias,
+                                                  execution = execution)
     return FIT.Spherical.calculate_spherical_transfer!(ws, vorticity)
 end
 
@@ -226,7 +229,7 @@ function _fsh_embed!(Cbig::AbstractMatrix, Csmall::AbstractMatrix, s::Integer, l
 end
 
 """
-    DivergentSphericalTransferWorkspace(lmax; radius=1.0, dealias=true, T=Float64, execution=SerialBackend())
+    DivergentSphericalTransferWorkspace(T, lmax; radius=1.0, dealias=true, execution=AutoBackend())
 
 Reusable buffers for the regular-grid `calculate_divergent_spherical_transfer!`: the work-grid
 velocity, vorticity, divergence, kinetic energy and advection fields, the two coefficient embed
@@ -237,10 +240,9 @@ allocates its own output. Every work buffer is `Float64`: FSH's spin transforms 
 input element type; the result vectors are in `T`. `execution = ThreadedBackend()` runs the transforms
 on `Threads.nthreads()` threads. Requires `using FastSphericalHarmonics`.
 """
-function FIT.Spherical.DivergentSphericalTransferWorkspace(lmax::Integer; radius::Real = 1.0, dealias::Bool = true,
-                                                           T::Type{<:AbstractFloat} = Float64,
+function FIT.Spherical.DivergentSphericalTransferWorkspace(::Type{T}, lmax::Integer; radius::Real = 1.0, dealias::Bool = true,
                                                            execution::ComputationalBackends.AbstractExecutionBackend =
-                                                               ComputationalBackends.SerialBackend())
+                                                               ComputationalBackends.AutoBackend()) where {T<:AbstractFloat}
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     nthreads = _fsh_threads(execution)
     lwork = dealias ? 2 * lmax : lmax
@@ -256,6 +258,9 @@ function FIT.Spherical.DivergentSphericalTransferWorkspace(lmax::Integer; radius
         _warmed_plans((lmax + 1, Nw), nthreads),
         result, Float64(radius), Int(lmax), Int(lwork), dealias, nthreads)
 end
+
+FIT.Spherical.DivergentSphericalTransferWorkspace(lmax::Integer; kwargs...) =
+    FIT.Spherical.DivergentSphericalTransferWorkspace(Float64, lmax; kwargs...)
 
 function FIT.calculate_divergent_spherical_transfer!(
     ws::FIT.Spherical.DivergentSphericalTransferWorkspace,
@@ -312,7 +317,7 @@ end
 """
     calculate_energy_transfer(method::DivergentSphericalTransferMethod,
                               velocity::Tuple{<:AbstractMatrix,<:AbstractMatrix};
-                              dealias=true, transform=nothing, execution=SerialBackend())
+                              dealias=true, transform=nothing, execution=AutoBackend())
 
 Divergent horizontal-KE spectral transfer for the full (rotational + divergent) flow on a regular
 colatitude–longitude grid, from the horizontal velocity `(u_θ, u_φ)` on the FastSphericalHarmonics
@@ -326,7 +331,7 @@ function FIT.calculate_energy_transfer(
     velocity::Tuple{<:AbstractMatrix, <:AbstractMatrix};
     dealias::Bool = true,
     transform = nothing,
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 )
     FIT.Spherical._validate_spherical_backends(transform, execution, :regular)
     u_θ, u_φ = velocity
@@ -335,8 +340,8 @@ function FIT.calculate_energy_transfer(
     Nθ, Nφ = size(u_θ)
     Nφ == 2Nθ - 1 || throw(ArgumentError(
         "velocity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
-    ws = FIT.Spherical.DivergentSphericalTransferWorkspace(Nθ - 1; radius = float(method.radius), dealias = dealias,
-                                                           T = float(promote_type(eltype(u_θ), eltype(u_φ))),
+    ws = FIT.Spherical.DivergentSphericalTransferWorkspace(float(promote_type(eltype(u_θ), eltype(u_φ))), Nθ - 1;
+                                                           radius = float(method.radius), dealias = dealias,
                                                            execution = execution)
     return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
 end

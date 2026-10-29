@@ -14,7 +14,7 @@ using SpectralBackends: SpectralBackends
 Test.@testset "single precision" begin
     Test.@testset "Float32 coordinates on the uniform-grid front door" begin
         N = 16
-        x = Float32.(collect(range(0, 2π; length = N + 1)[1:N]))
+        x = range(0f0; step = Float32(2π) / N, length = N)
         rng = Random.MersenneTwister(2)
         u = randn(rng, Float32, N, N); v = randn(rng, Float32, N, N)
         û, ks = FIT.to_spectral((u, v), (x, x))

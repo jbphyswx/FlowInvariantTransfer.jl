@@ -30,7 +30,7 @@ Test.@testset "spectral layout" begin
     Test.@testset "wavenumber_grid builds the layout's axes" begin
         for n in (8, 9), L in (2π, 3.5)
             ks_f = FIT.Utils.wavenumber_grid((n, 6), (L, 2L))
-            ks_h = FIT.Utils.wavenumber_grid((n, 6), (L, 2L); real = true)
+            ks_h = FIT.Utils.wavenumber_grid(Float64, (n, 6), (L, 2L))
             Test.@test collect(ks_f[1]) ≈ FFTW.fftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[1]) ≈ FFTW.rfftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[2]) ≈ FFTW.fftfreq(6, 6 * 2π / (2L))
@@ -44,7 +44,7 @@ Test.@testset "spectral layout" begin
             Np = prod(ns)
             Ls = ntuple(d -> 2π * (1 + 0.25d), nd)
             ks_f = FIT.Utils.wavenumber_grid(ns, Ls)
-            ks_h = FIT.Utils.wavenumber_grid(ns, Ls; real = true)
+            ks_h = FIT.Utils.wavenumber_grid(Float64, ns, Ls)
 
             u = randn(ns...)
             N = u .^ 2 .- sum(u .^ 2) / Np          # any real nonlinear function of u
