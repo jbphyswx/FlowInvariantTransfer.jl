@@ -835,12 +835,11 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
 
     # 3. The physical-space Helmholtz split on a periodic 3D grid reconstructs the field.
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    M = 8; x3 = range(0, L; length=M+1)[1:M]; y3 = copy(x3); z3 = copy(x3)
+    M = 8; x3 = FG.Axes.PeriodicUniformAxis(0.0, L, M); y3 = copy(x3); z3 = copy(x3)
     u3 = [cos(xi) * sin(zi) for xi in x3, yi in y3, zi in z3]
     v3 = [sin(yi)           for xi in x3, yi in y3, zi in z3]
     w3 = [cos(zi)           for xi in x3, yi in y3, zi in z3]
-    grid3 = FG.Grids.StructuredGrid(cart, x3, y3, z3;
-                                    topology = (FG.Grids.Periodic(), FG.Grids.Periodic(), FG.Grids.Periodic()))
+    grid3 = FG.Grids.StructuredGrid(cart, x3, y3, z3)
     hd3 = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), grid3)
     rot3, div3 = hd3.rotational, hd3.divergent
     for (c, f) in enumerate((u3, v3, w3))
@@ -848,14 +847,19 @@ Test.@testset "Field Decomposition (Helmholtz / Partial Flux)" begin
     end
     # The divergent part of this field is nonzero, so the split is doing work.
     Test.@test maximum(abs, div3[1]) > 1e-8
-    Test.@test hd3.converged
+    # The periodic grid's solve is the FFT, which reports nothing.
+    Test.@test hd3.solve === nothing
+    # Ranges are the periodic box of period `N·Δ`, so they split the field as the grid of those axes does.
+    xr3 = range(0.0; step = L / M, length = M)
+    hr3 = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), (xr3, xr3, xr3))
+    Test.@test all(c -> isapprox(hr3.rotational[c], rot3[c]; rtol = 1e-12) &&
+                        isapprox(hr3.divergent[c], div3[c]; rtol = 1e-12), 1:3)
     # A conjugate-gradient solve stopped after one iteration reports it: the divergence of this field
     # spans two eigenvalues of the grid Laplacian, which one iteration cannot resolve.
     short = FIT.Decomposition.decompose_field(FIT.Types.HelmholtzDecomposition(), (u3, v3, w3), grid3;
                 solver = HelmholtzDecomposition.CGSolver(; max_iter = 1,
                                                          preconditioner = HelmholtzDecomposition.DiagonalScaling()))
-    Test.@test !short.converged
-    Test.@test short.iterations <= 1
+    Test.@test !short.solve.converged && short.solve.iterations <= 1
 end
 
 # -----------------------------------------------------------------------
@@ -964,6 +968,20 @@ Test.@testset "Parallel Backends Parity (Threaded / Distributed)" begin
     Test.@test isapprox(c_ser.channels.compressive, c_dst.channels.compressive; atol=1e-12)
     Test.@test isapprox(c_ser.pressure_dilatation.compressive, c_dst.pressure_dilatation.compressive; atol=1e-12)
     Test.@test isapprox(c_ser.transfer_spectrum, c_hyb.transfer_spectrum; atol=1e-12)
+
+    # 4. A velocity split over the workers: the spectral flux of its blocks is the serial flux of the whole field.
+    Distributed.@everywhere using FlowFieldSpectra
+    Nw = 16
+    xw = FG.Axes.PeriodicUniformAxis(0.0, L, Nw)
+    gw = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), xw, copy(xw))
+    uw = (randn(rngp, Nw, Nw), randn(rngp, Nw, Nw))
+    sw = FG.Decomposition.split_grid(gw, ComputationalBackends.DistributedBackend(); dims = (2,))
+    bw = FIT.Types.LinearBinning(2π / L)
+    sf_split = FIT.calculate_energy_transfer(FIT.Types.SpectralFluxMethod(bw), map(f -> FG.Decomposition.distribute(sw, f), uw))
+    ûw, ksw = FIT.to_spectral(uw, gw)
+    sf_whole = FIT.SpectralFlux.calculate_spectral_flux(ûw, ksw; binning = bw, transform = SpectralBackends.FFTSpectralBackend())
+    Test.@test maximum(abs, sf_split.transfer_spectrum .- sf_whole.transfer_spectrum) <
+               1e-12 * maximum(abs, sf_whole.transfer_spectrum)
 end
 
 # -----------------------------------------------------------------------
@@ -1012,6 +1030,31 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     end
     Test.@test isempty(FIT.SpectralFlux.calculate_spectral_flux_batch(typeof(vhats[1])[], ks; binning = b, transform = FFT))
 
+    # Threaded batches under PaddedThreeHalves, on the full and the half layout: each chunk's worker copy shares the
+    # padded plans and gather tables and writes its own padded buffers.
+    P32 = FIT.Types.PaddedThreeHalves()
+    ksh = FIT.Utils.wavenumber_grid(Float64, (N, N), (L, L))
+    kxh = [ksh[1][i] for i in 1:length(ksh[1]), j in 1:N]; kyh = [ksh[2][j] for i in 1:length(ksh[1]), j in 1:N]
+    vhalf = map(1:nsnap) do _
+        ψh = FFTW.rfft(randn(N, N)) ./ N^2
+        cat(im .* kyh .* ψh, -im .* kxh .* ψh; dims = 3)
+    end
+    for (vs, kk) in ((vhats, ks), (vhalf, ksh))
+        pS = FIT.SpectralFlux.calculate_spectral_flux_batch(vs, kk; binning = b, transform = FFT, dealiasing = P32,
+                                                            execution = Ser)
+        pT = FIT.SpectralFlux.calculate_spectral_flux_batch(vs, kk; binning = b, transform = FFT, dealiasing = P32,
+                                                            execution = Thr)
+        qS = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vs, kk; bands = bands, transform = FFT,
+                                                                    dealiasing = P32, execution = Ser)
+        qT = FIT.BandTransfer.calculate_band_to_band_transfer_batch(vs, kk; bands = bands, transform = FFT,
+                                                                    dealiasing = P32, execution = Thr)
+        Test.@test maximum(abs, pS[1].transfer_spectrum) > 0
+        for i in 1:nsnap
+            Test.@test isapprox(pT[i].transfer_spectrum, pS[i].transfer_spectrum; atol = 1e-12)
+            Test.@test isapprox(qT[i].transfer_matrix, qS[i].transfer_matrix; atol = 1e-12)
+        end
+    end
+
     # --- shell to shell ---
     ss1 = [FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer(vh, ks; binning = b, transform = FFT, execution = Ser) for vh in vhats]
     ssS = FIT.ShellToShellTransfer.calculate_shell_to_shell_transfer_batch(vhats, ks; binning = b, transform = FFT, execution = Ser)
@@ -1058,9 +1101,9 @@ Test.@testset "Batch axis — spectral / shell / band / coarse-graining over sna
     # band energies, each against serial. The scales span a few grid cells.
     uv = ufields[1]; ℓg = 1.5
     rS = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux(uv, (xs, ys), ℓg, filt; execution = Ser,
-                                                               return_diagnostics = true)
+                                                               diagnostics = FIT.Types.StressStrain())
     rG = FIT.CoarseGrainingFlux.calculate_coarse_graining_flux(uv, (xs, ys), ℓg, filt; execution = GPU,
-                                                               return_diagnostics = true)
+                                                               diagnostics = FIT.Types.StressStrain())
     sΠ = maximum(abs, rS.flux_field)
     Test.@test sΠ > 1e-8
     Test.@test isapprox(rG.flux_field, rS.flux_field; atol = 1e-12 * sΠ)
@@ -1392,8 +1435,8 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
     end
 
     Test.@testset "NUFFT scattered coarse-graining — both providers vs exact NDFT" begin
-        # Flux, stress τ̄ and strain S̄ against a brute-force NDFT for both NUFFT providers. τ̄ depends on
-        # |k| alone, so the S̄ comparison is the one that fixes the sign of the Nyquist mode.
+        # Flux, stress τ̄ and strain S̄ against a brute-force NDFT for both NUFFT providers. An even count `m`
+        # holds the modes |n| ≤ m/2, the two at ±m/2 at half weight, so a 2-D box's four corners weigh ¼ each.
         Random.seed!(3)
         Np = 2000; ms = (20, 20)
         X = 2π .* rand(Np); Y = 2π .* rand(Np)
@@ -1402,11 +1445,12 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
 
         Lx = 2π; Ly = 2π                       # the periodic domain, X, Y ∈ [0, 2π)
         xt = (X .- minimum(X)) ./ Lx .* 2π; yt = (Y .- minimum(Y)) ./ Ly .* 2π
-        modeof(a, n) = 2a < n ? a : a - n
-        m1 = [modeof(a, ms[1]) for a in 0:ms[1]-1]; m2 = [modeof(b, ms[2]) for b in 0:ms[2]-1]
+        edge(a, n) = iseven(n) && abs(a) == n ÷ 2 ? 0.5 : 1.0
+        m1 = collect(-(ms[1] ÷ 2):(ms[1] ÷ 2)); m2 = collect(-(ms[2] ÷ 2):(ms[2] ÷ 2))
         kpx = m1 .* (2π / Lx); kpy = m2 .* (2π / Ly)
         A = eachindex(m1); Bx = eachindex(m2)
-        Gh = [FIT.Filters.filter_response(filt, sqrt(kpx[a]^2 + kpy[b]^2), ℓ) for a in A, b in Bx]
+        Gh = [edge(m1[a], ms[1]) * edge(m2[b], ms[2]) * FIT.Filters.filter_response(filt, sqrt(kpx[a]^2 + kpy[b]^2), ℓ)
+              for a in A, b in Bx]
         t1(w) = [sum(w[j] * cis(-(m1[a] * xt[j] + m2[b] * yt[j])) for j in 1:Np) for a in A, b in Bx]
         t2(S) = [real(sum(S[a, b] * cis(+(m1[a] * xt[l] + m2[b] * yt[l])) for a in A, b in Bx)) for l in 1:Np]
         invN = 1 / Np
@@ -1422,17 +1466,17 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
         relq(a, b) = sqrt(sum(abs2, a .- b) / sum(abs2, a))
 
         for transform in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
-            r = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; transform, Ls = (Lx, Ly), return_diagnostics = true)
+            r = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, ms; transform, Ls = (Lx, Ly),
+                                               diagnostics = FIT.Types.StressStrain())
             Test.@test relq(τxx, r.stress_tensor[:, 1, 1]) < 1e-6
             Test.@test relq(τyy, r.stress_tensor[:, 2, 2]) < 1e-6
             Test.@test relq(Sxx, r.strain_rate[:, 1, 1]) < 1e-6
             Test.@test relq(Sxy, r.strain_rate[:, 1, 2]) < 1e-6
             Test.@test relq(Πref, r.flux_field) < 1e-6
         end
-        # Odd mode counts exercise the other branch of the real-input (r2c) analysis: an odd axis has no
-        # Nyquist mode, an even one needs the oversampled-spectrum read. Both must hit the same reference.
+        # An odd count holds the modes |n| ≤ (m − 1)/2 at full weight, with no edge mode.
         let mso = (21, 21)
-            m1o = [modeof(a, mso[1]) for a in 0:mso[1]-1]; m2o = [modeof(b, mso[2]) for b in 0:mso[2]-1]
+            m1o = collect(-(mso[1] ÷ 2):(mso[1] ÷ 2)); m2o = collect(-(mso[2] ÷ 2):(mso[2] ÷ 2))
             kxo = m1o .* (2π / Lx); kyo = m2o .* (2π / Ly)
             Ao = eachindex(m1o); Bo = eachindex(m2o)
             Go = [FIT.Filters.filter_response(filt, sqrt(kxo[a]^2 + kyo[b]^2), ℓ) for a in Ao, b in Bo]
@@ -1448,7 +1492,8 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
             Sxyo = 0.5 .* (t2o([im * kyo[b] * ūso[a, b] for a in Ao, b in Bo]) .+ t2o([im * kxo[a] * v̄so[a, b] for a in Ao, b in Bo]))
             Πo = -(τxxo .* Sxxo .+ τyyo .* Syyo .+ 2 .* τxyo .* Sxyo)
             for transform in (FTB.FINUFFTBackend(), FTB.NonuniformFFTsBackend())
-                ro = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, mso; transform, Ls = (Lx, Ly), return_diagnostics = true)
+                ro = FIT.nufft_coarse_graining_flux((U, V), (X, Y), ℓ, filt, mso; transform, Ls = (Lx, Ly),
+                                                    diagnostics = FIT.Types.StressStrain())
                 Test.@test relq(Sxxo, ro.strain_rate[:, 1, 1]) < 1e-6
                 Test.@test relq(Πo, ro.flux_field) < 1e-6
             end
@@ -1554,7 +1599,7 @@ Test.@testset "Optional-package entries (CairoMakie / NUFFT / FlowFieldSpectra)"
             (abs(kx[i, j]) <= 3 && abs(ky[i, j]) <= 3) || (ψbl[i, j] = 0)
         end
         ûbl = cat(im .* ky .* ψbl, -im .* kx .* ψbl; dims = 3)
-        xs = range(0, 2π; length=N+1)[1:N]   # uniform axis as a range → FlowGeometries infers its period
+        xs = range(0, 2π; length=N+1)[1:N]   # a uniform range: the entry closes its period at N·Δ
         # The physical field of the fft/N² coefficients is bfft(û) = Σ_k û e^{ik·x}.
         uxp = real.(FFTW.bfft(ûbl[:, :, 1]))
         uyp = real.(FFTW.bfft(ûbl[:, :, 2]))
@@ -1676,18 +1721,18 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
 
     res = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), ζscat, (θs, φs);
                                         lmax = lmax, tol = 1e-12, rtol = 1e-13)
-    Test.@test res.converged
+    Test.@test res.fit.converged
 
     # A fit stopped at `maxiter` is marked unconverged.
     short = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), ζscat, (θs, φs);
                                           lmax = lmax, tol = 1e-12, rtol = 1e-13, maxiter = 2)
-    Test.@test !short.converged
-    Test.@test short.iterations == 2
+    Test.@test !short.fit.converged
+    Test.@test short.fit.iterations == 2
 
     # The default rtol is reachable in Float32.
     r32 = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), Float32.(ζscat),
                                         (Float32.(θs), Float32.(φs)); lmax = lmax)
-    Test.@test r32.converged
+    Test.@test r32.fit.converged
     Test.@test maximum(abs, r32.energy_transfer .- res.energy_transfer) < 1e-3 * maximum(abs, res.energy_transfer)
 
     scaleE = maximum(abs, resF.energy_transfer) + eps()
@@ -1720,7 +1765,7 @@ Test.@testset "Scattered spherical transfer (NUFSHT, 2D barotropic)" begin
     rg = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(radius = a), ζscat, (θs, φs);
                                        lmax = lmax, tol = 1e-12, rtol = 1e-13,
                                        execution = ComputationalBackends.GPUBackend(KA.CPU()))
-    Test.@test rg.converged
+    Test.@test rg.fit.converged
     Test.@test maximum(abs.(rg.energy_transfer .- res.energy_transfer)) < 1e-10 * scaleE
     Test.@test maximum(abs.(rg.enstrophy_transfer .- res.enstrophy_transfer)) < 1e-10 * scaleZ
 end
@@ -1728,10 +1773,18 @@ end
 # -----------------------------------------------------------------------
 # Divergent horizontal-KE spectral transfer for the full (rotational + divergent) flow, on the regular
 # grid (FastSphericalHarmonics) and scattered points (NUFSHT): total-KE conservation Σ_l T ≈ 0 from the
-# skew-symmetric advection, the reduction to the barotropic energy transfer for non-divergent flow
-# (radius 1 and 2) with T_div ≈ 0 there, and FSH↔NUFSHT parity on one field.
+# skew-symmetric advection, the reduction to the barotropic energy and enstrophy transfers for
+# non-divergent flow (radius 1 and 2) with T_div ≈ 0 there, the enstrophy source Σ_l T_Z = ½∫ζ²δ dΩ of a
+# divergent flow, its split under EnstrophySplit() into the rotational transport (the barotropic T_Z of the
+# flow's ζ), the divergent transport (Σ_l = 0) and the source (ζ paired with ½ζδ), the default EnstrophyTotal()
+# returning the same transfers with no split, and FSH↔NUFSHT parity on one field.
 Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
     lmax = 10; N = lmax + 1
+    Split = FIT.Types.DivergentSphericalTransferMethod(; enstrophy = FIT.Types.EnstrophySplit())
+    Total = FIT.Types.DivergentSphericalTransferMethod()
+    nosplit(r) = all(f -> getfield(r, f) === nothing, (:rotational_enstrophy_transfer, :divergent_enstrophy_transfer,
+                                                       :rotational_enstrophy_flux, :divergent_enstrophy_flux,
+                                                       :enstrophy_source))
     rng = Random.MersenneTwister(11)
     _nabla(freal) = (ð = FSH.spinsph_eth(FSH.spinsph_transform(Matrix{Float64}(freal), 0), 0);
         G = FSH.spinsph_evaluate(ð, 1); -[complex(G[i, j][1], G[i, j][2]) for i in axes(G, 1), j in axes(G, 2)])
@@ -1745,20 +1798,54 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
     ζr = _lapf(ψf)
 
     Test.@testset "FSH regular-grid" begin
-        r = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ))
+        r = FIT.calculate_energy_transfer(Split, (uθ, uφ))
+        rt = FIT.calculate_energy_transfer(Total, (uθ, uφ))
+        Test.@test nosplit(rt)
+        Test.@test isapprox(rt.enstrophy_transfer, r.enstrophy_transfer; rtol = 1e-12)
+        Test.@test isapprox(rt.energy_transfer, r.energy_transfer; rtol = 1e-12)
         Test.@test abs(sum(r.energy_transfer)) / maximum(abs, r.energy_transfer) < 1e-8
         Test.@test maximum(abs, r.divergent_transfer) > 1e-3
-        TE = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(), ζr).energy_transfer
+        # ½∫ζ²δ dΩ on the grid of degree 3lmax, exact for the product: its (0, 0) coefficient times √(4π).
+        Nf = 3lmax + 1
+        _fine(f) = (C = FSH.spinsph_transform(Matrix{Float64}(f), 0); F = zeros(Nf, 2Nf - 1);
+            for l in 0:lmax, m in -l:l; i = FSH.spinsph_mode(0, l, m); F[i] = C[i]; end; FSH.spinsph_evaluate(F, 0))
+        ζf, δf = _fine(ζr), _fine(_lapf(χf))
+        source = sqrt(4π) * FSH.spinsph_transform(ζf .^ 2 .* δf ./ 2, 0)[FSH.spinsph_mode(0, 0, 0)]
+        scaleZ = maximum(abs, r.enstrophy_transfer)
+        Test.@test abs(source) > 1e-3 * scaleZ
+        Test.@test abs(sum(r.enstrophy_transfer) - source) < 1e-8 * scaleZ
+        Test.@test r.enstrophy_flux ≈ cumsum(r.enstrophy_transfer)
+        rb = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(), ζr)
+        TE, TZ = rb.energy_transfer, rb.enstrophy_transfer
+        Test.@test maximum(abs, r.rotational_enstrophy_transfer .- TZ) < 1e-8 * scaleZ
+        Test.@test abs(sum(r.divergent_enstrophy_transfer)) < 1e-8 * scaleZ
+        Test.@test maximum(abs, r.divergent_enstrophy_transfer) > 1e-3 * scaleZ
+        Cζ = FSH.spinsph_transform(Matrix{Float64}(ζr), 0)
+        Cs = FSH.spinsph_transform(ζf .* δf ./ 2, 0)
+        SZ = [sum(Cζ[FSH.spinsph_mode(0, l, m)] * Cs[FSH.spinsph_mode(0, l, m)] for m in -l:l) for l in 0:lmax]
+        Test.@test maximum(abs, r.enstrophy_source .- SZ) < 1e-8 * scaleZ
+        Test.@test abs(sum(r.enstrophy_source) - source) < 1e-8 * scaleZ
+        Test.@test r.rotational_enstrophy_transfer .+ r.divergent_enstrophy_transfer .+ r.enstrophy_source ≈
+                   r.enstrophy_transfer
+        Test.@test r.rotational_enstrophy_flux ≈ cumsum(r.rotational_enstrophy_transfer)
+        Test.@test r.divergent_enstrophy_flux ≈ cumsum(r.divergent_enstrophy_transfer)
         for execution in (ComputationalBackends.SerialBackend(), ComputationalBackends.ThreadedBackend())
-            rr = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθr, uφr);
-                                               execution = execution)
+            rr = FIT.calculate_energy_transfer(Split, (uθr, uφr); execution = execution)
             Test.@test maximum(abs, rr.energy_transfer .- TE) / maximum(abs, TE) < 1e-8
             Test.@test maximum(abs, rr.divergent_transfer) < 1e-9
+            Test.@test maximum(abs, rr.enstrophy_transfer .- TZ) / maximum(abs, TZ) < 1e-8
+            Test.@test maximum(abs, rr.rotational_enstrophy_transfer .- TZ) / maximum(abs, TZ) < 1e-8
+            Test.@test maximum(abs, rr.divergent_enstrophy_transfer) / maximum(abs, TZ) < 1e-9
+            Test.@test maximum(abs, rr.enstrophy_source) / maximum(abs, TZ) < 1e-9
         end
         a = 2.0
-        ra = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(; radius = a), (uθr ./ a, uφr ./ a))
-        TEa = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(; radius = a), ζr ./ a^2).energy_transfer
-        Test.@test maximum(abs, ra.energy_transfer .- TEa) / maximum(abs, TEa) < 1e-8
+        ra = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(; radius = a,
+                                               enstrophy = FIT.Types.EnstrophySplit()), (uθr ./ a, uφr ./ a))
+        rba = FIT.calculate_energy_transfer(FIT.Types.SphericalTransferMethod(; radius = a), ζr ./ a^2)
+        Test.@test maximum(abs, ra.energy_transfer .- rba.energy_transfer) / maximum(abs, rba.energy_transfer) < 1e-8
+        Test.@test maximum(abs, ra.enstrophy_transfer .- rba.enstrophy_transfer) / maximum(abs, rba.enstrophy_transfer) < 1e-8
+        Test.@test maximum(abs, ra.rotational_enstrophy_transfer .- rba.enstrophy_transfer) /
+                   maximum(abs, rba.enstrophy_transfer) < 1e-8
     end
 
     Test.@testset "NUFSHT scattered + FSH↔NUFSHT parity" begin
@@ -1767,15 +1854,22 @@ Test.@testset "Divergent spherical transfer (rotational + divergent)" begin
         for j in 1:2N-1, i in 1:N
             k = i + (j - 1) * N; θv[k] = Θ[i]; φv[k] = Φ[j]
         end
-        rn = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
-                                            (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+        rn = FIT.calculate_energy_transfer(Split, (vec(uθ), vec(uφ)), (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13)
         Test.@test abs(sum(rn.energy_transfer)) / maximum(abs, rn.energy_transfer) < 1e-8
-        rf = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (uθ, uφ))
+        rnt = FIT.calculate_energy_transfer(Total, (vec(uθ), vec(uφ)), (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13)
+        Test.@test nosplit(rnt)
+        Test.@test isapprox(rnt.enstrophy_transfer, rn.enstrophy_transfer; rtol = 1e-12)
+        Test.@test isapprox(rnt.energy_transfer, rn.energy_transfer; rtol = 1e-12)
+        rf = FIT.calculate_energy_transfer(Split, (uθ, uφ))
         Test.@test maximum(abs, rf.energy_transfer .- rn.energy_transfer) / maximum(abs, rf.energy_transfer) < 1e-8
-        rg = FIT.calculate_energy_transfer(FIT.Types.DivergentSphericalTransferMethod(), (vec(uθ), vec(uφ)),
-                                           (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13,
+        rg = FIT.calculate_energy_transfer(Split, (vec(uθ), vec(uφ)), (θv, φv); lmax = lmax, tol = 1e-12, rtol = 1e-13,
                                            execution = ComputationalBackends.GPUBackend(KA.CPU()))
         Test.@test maximum(abs, rg.energy_transfer .- rn.energy_transfer) / maximum(abs, rn.energy_transfer) < 1e-8
+        sZ = maximum(abs, rf.enstrophy_transfer)
+        for f in (:enstrophy_transfer, :rotational_enstrophy_transfer, :divergent_enstrophy_transfer, :enstrophy_source)
+            Test.@test maximum(abs, getfield(rf, f) .- getfield(rn, f)) / sZ < 1e-8
+            Test.@test maximum(abs, getfield(rg, f) .- getfield(rn, f)) / sZ < 1e-8
+        end
     end
 end
 

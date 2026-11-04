@@ -310,7 +310,9 @@ incompressible transfer spectrum.
 This allocates a [`CompressibleWorkspace`](@ref) and delegates to [`calculate_compressible_flux!`](@ref);
 build the workspace once and use the in-place form to loop over snapshots allocation-free. Under
 `execution = GPUBackend(dev)` the transfer runs in `dev`'s memory, host inputs copied there once per
-call, and the per-shell results come back as host vectors.
+call, and the per-shell results come back as host vectors. Under `execution = DistributedBackend(inner)`
+the field is computed on the calling process under `inner`; [`calculate_compressible_flux_batch`](@ref)
+divides snapshots among the workers.
 """
 function calculate_compressible_flux(
     velocity_hat,
@@ -325,14 +327,10 @@ function calculate_compressible_flux(
     nd = length(ks)
     size(velocity_hat, nd + 1) == nd ||
         throw(ArgumentError("compressible transfer needs D = nd velocity components (got $(size(velocity_hat, nd+1)) for nd=$nd)."))
-    exec = Types.resolve_execution(execution, velocity_hat)
+    exec = _caller_backend(Types.resolve_execution(execution, velocity_hat))
     pressure_hat = get(kwargs, :pressure_hat, nothing)
     decomposition = get(kwargs, :decomposition, Types.HelmholtzDecomposition())
     dealiasing = get(kwargs, :dealiasing, Types.OrszagTwoThirds())
-    if exec isa ComputationalBackends.DistributedBackend
-        return _compressible_distributed(velocity_hat, density_hat, ks, exec;
-            transform=transform, binning=binning, geometry=geometry, kwargs...)
-    end
     # The workspace lives in `exec`'s memory, the device of a `GPUBackend`, and stages host inputs there.
     ws = CompressibleWorkspace(velocity_hat, ks; transform=transform, binning=binning, geometry=geometry,
                                execution=exec, dealiasing=dealiasing, decomposition=decomposition,
@@ -340,10 +338,9 @@ function calculate_compressible_flux(
     return calculate_compressible_flux!(ws, velocity_hat, density_hat, ks; kwargs...)
 end
 
-# Overridden by the Distributed extension (requires `using Distributed`).
-_compressible_distributed(args...; kwargs...) = throw(ArgumentError(
-    "Distributed compressible transfer requires Distributed. " *
-    "Run `using Distributed` to load the extension."))
+# The backend a field held on the calling process is computed on: a Distributed backend's local one.
+_caller_backend(exec) = exec
+_caller_backend(exec::ComputationalBackends.DistributedBackend) = ComputationalBackends.local_backend(exec)
 
 """
     calculate_compressible_flux_batch(velocity_hats, density_hats, ks; pressure_hats=nothing,

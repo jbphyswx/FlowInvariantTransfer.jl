@@ -123,7 +123,7 @@ function _barotropic_workspace(plan0, ::Type{FT}, M, lmax, exec;
     Tcol = similar(mem, FT, lmax + 1, 1)           # real per-degree column-sum scratch
     result = FIT.Types.SphericalTransferResult(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
-        zeros(FT, lmax + 1), zeros(FT, lmax + 1), true, 0, zero(FT))
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1), nothing)
 
     qw = quadrature_weights === nothing ? nothing : copyto!(similar(mem, FT, M), FT.(quadrature_weights))
     fit0 = _fit_operator(plan0, weights, FT)
@@ -135,6 +135,31 @@ end
 
 FIT.Spherical.ScatteredSphericalTransferWorkspace(coords::Tuple, lmax::Integer; kwargs...) =
     FIT.Spherical.ScatteredSphericalTransferWorkspace(float(eltype(first(coords))), coords, lmax; kwargs...)
+
+# On a tensor-product grid the fit or projection runs on NUFSHT's plan over the grid's axes: latitude degree sums
+# and longitude FFTs. The products' Gauss–Legendre grid is the scattered workspaces'.
+function FIT.Spherical._tensor_transfer_workspace(
+    ::Val{S}, ::Type{FT}, θ::AbstractVector, φ::AbstractRange, lmax::Integer;
+    radius::Real = 1.0, dealias::Bool = true, tol::Real = 1e-10, rtol::Union{Nothing, Real} = nothing,
+    maxiter::Integer = 4000, quadrature_weights::Union{Nothing, AbstractVector} = nothing,
+    weights::Union{Nothing, AbstractVector} = nothing,
+    enstrophy::FIT.Types.AbstractEnstrophyOutput = FIT.Types.EnstrophyTotal(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+) where {S, FT<:AbstractFloat}
+    M = length(θ) * length(φ)
+    lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
+    _check_analysis(M, lmax, quadrature_weights, weights)
+    exec = FIT.Types.resolve_execution(execution, θ)
+    return _tensor_workspace(Val(S), FT, θ, φ, M, Int(lmax), exec, enstrophy;
+                             radius, dealias, tol, rtol, maxiter, quadrature_weights, weights)
+end
+
+_tensor_workspace(::Val{0}, ::Type{FT}, θ, φ, M, lmax, exec, _enstrophy; kw...) where {FT} =
+    _barotropic_workspace(NUFSHT.make_spin_plan(FT, θ, φ, lmax, 0, NUFSHT.TensorProduct(); execution = exec),
+                          FT, M, lmax, exec; kw...)
+_tensor_workspace(::Val{1}, ::Type{FT}, θ, φ, M, lmax, exec, enstrophy; kw...) where {FT} =
+    _divergent_workspace(NUFSHT.make_spin_plan(Complex{FT}, θ, φ, lmax, 1, NUFSHT.TensorProduct(); execution = exec),
+                         FT, M, lmax, exec, enstrophy; kw...)
 
 function FIT.close!(ws::FIT.Spherical.ScatteredSphericalTransferWorkspace)
     foreach(NUFSHT.close!, (ws.plan0, ws.grid1, ws.grid0))
@@ -199,8 +224,7 @@ function FIT.Spherical.active_fit!(ws::FIT.Spherical.ActiveSphericalFit, values:
     r = NUFSHT.nusht_analyze!(ws.coefficients, ws.values, ws.active_plan;
                               ws = ws.lsmr, rtol = ws.rtol, maxiter = ws.maxiter)
     NUFSHT.nusht_type2_spin!(ws.output, ws.coefficients, ws.full_plan)
-    fit = (; converged = r.converged, iterations = r.iterations, residual = oftype(ws.rtol, r.residual))
-    return ws.output, fit
+    return ws.output, _fit_outcome(r, ws.rtol)
 end
 
 function FIT.close!(ws::FIT.Spherical.ActiveSphericalFit)
@@ -220,19 +244,20 @@ function FIT.Spherical.active_fit(values::AbstractVector, s::Integer, coords::Tu
     end
 end
 
-# The spin-weighted coefficients of `f` at the plan's nodes, into `C`, by `NUFSHT.nusht_analyze!`: the
-# quadrature `Σⱼ wⱼ fⱼ conj(ₛYℓm(xⱼ))` with the weights `qw`, else the least-squares fit in the LSMR
-# workspace `lsmr`; on a `RangeWeighted` operator the weighted fit. Returns the outcome as
-# `Spherical.merge_fits` reads it, the residual in `rtol`'s float type.
-function _analyze!(C, f, plan, qw, lsmr; rtol, maxiter)
-    r = NUFSHT.nusht_analyze!(C, f, plan; weights = qw, ws = lsmr, rtol = rtol, maxiter = maxiter)
-    return (; converged = r.converged, iterations = r.iterations, residual = oftype(rtol, r.residual))
+# The spin-weighted coefficients of `f` at the plan's nodes, into `C`: the quadrature `Σⱼ wⱼ fⱼ conj(ₛYℓm(xⱼ))`
+# with the weights `qw`, which fits nothing and returns `nothing`; else the least-squares fit in the LSMR
+# workspace `lsmr`, on a `RangeWeighted` operator the weighted fit, returning its outcome with the residual in
+# `rtol`'s float type.
+function _analyze!(C, f, plan, qw::AbstractVector, _lsmr; rtol, maxiter)
+    NUFSHT.nusht_analyze!(C, f, plan; weights = qw)
+    return nothing
 end
+_analyze!(C, f, plan, ::Nothing, lsmr; rtol, maxiter) =
+    _fit_outcome(NUFSHT.nusht_analyze!(C, f, plan; ws = lsmr, rtol = rtol, maxiter = maxiter), rtol)
+_analyze!(C, f, op::FTB.RangeWeighted, ::Nothing, lsmr; rtol, maxiter) =
+    _fit_outcome(NUFSHT.nusht_solve_spin!(C, f, op; ws = lsmr, rtol = rtol, maxiter = maxiter), rtol)
 
-function _analyze!(C, f, op::FTB.RangeWeighted, ::Nothing, lsmr; rtol, maxiter)
-    r = NUFSHT.nusht_solve_spin!(C, f, op; ws = lsmr, rtol = rtol, maxiter = maxiter)
-    return (; converged = r.converged, iterations = r.iterations, residual = oftype(rtol, r.residual))
-end
+_fit_outcome(r, ::T) where {T<:AbstractFloat} = FTB.SolverResult{T}(r.converged, r.iterations, T(r.residual))
 
 function FIT.Spherical.calculate_spherical_transfer!(
     ws::FIT.Spherical.ScatteredSphericalTransferWorkspace,
@@ -299,8 +324,8 @@ The Jacobian of the fitted fields, of degree `2·lmax`, is formed on a Gauss–L
 onto degree `≤ lmax` by its quadrature, exact for that product (dealiased). `dealias=false` takes the
 grid exact only for products of degree `≤ lmax` (aliased). `tol` is the NUFFT tolerance and
 `nufft` the NUFFT library NUFSHT runs (a FlowTransformBindings tag; `AutoSpectralBackend()` lets NUFSHT
-choose); `rtol`/`maxiter` control the fit (`T` the field's element type), and the result's
-`converged`, `iterations` and `residual` report how they ended. `transform`, when given, must be
+choose); `rtol`/`maxiter` control the fit (`T` the field's element type), and the result's `fit`
+reports how it ended (`nothing` under `quadrature_weights`, which fit nothing). `transform`, when given, must be
 `SpectralBackends.NUFSHTSpectralBackend()`. Requires `using NUFSHT`.
 """
 function FIT.calculate_energy_transfer(
@@ -336,24 +361,25 @@ end
 # ---------------------------------------------------------------------------
 # Divergent horizontal-KE spectral transfer at scattered points (full rotational + divergent flow), in
 # the formulation of FlowInvariantTransfer.Spherical (skew-symmetric ½δu conservation term, single 1/a
-# radius factor). Input is the horizontal velocity (u_θ, u_φ) at the scattered points; the transfer
-# conserves total KE (Σ_l T ≈ 0) and reduces to the barotropic `SphericalTransferMethod` energy
-# transfer when δ = 0.
+# radius factor), and the enstrophy transfer of the vorticity's advection ∇·(ζu). Input is the horizontal
+# velocity (u_θ, u_φ) at the scattered points; the KE transfer conserves total KE (Σ_l T ≈ 0), and both
+# reduce to the barotropic `SphericalTransferMethod` transfers when δ = 0.
 # ---------------------------------------------------------------------------
 
 """
     ScatteredDivergentSphericalTransferWorkspace(T, coords, lmax; radius=1.0, dealias=true,
                                                  tol=1e-10, rtol=max(tol, 100eps(T)), maxiter=4000,
                                                  quadrature_weights=nothing, weights=nothing,
-                                                 nufft=AutoSpectralBackend(),
+                                                 nufft=AutoSpectralBackend(), enstrophy=EnstrophyTotal(),
                                                  execution=ComputationalBackends.AutoBackend())
 
-Reusable buffers and NUFSHT spin plans (points preset) for the scattered divergent KE transfer.
+Reusable buffers and NUFSHT spin plans (points preset) for the scattered divergent KE and enstrophy
+transfer.
 `coords = (θ, φ)` are the `M` colatitudes/longitudes. Without `quadrature_weights` the fit needs
 `M ≥ (lmax+1)²` **equidistributed** points (e.g. spherical-Fibonacci) for well-conditioned coefficient
 recovery, and `weights` make it the weighted fit as in the barotropic workspace; the advection of the
 fitted velocity is projected on a Gauss–Legendre grid as there. `nufft` is the NUFFT library NUFSHT
-runs. Requires `using NUFSHT`.
+runs; `enstrophy` the enstrophy outputs, as for `DivergentSphericalTransferMethod`. Requires `using NUFSHT`.
 """
 function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     ::Type{FT},
@@ -367,6 +393,7 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     quadrature_weights::Union{Nothing, AbstractVector} = nothing,
     weights::Union{Nothing, AbstractVector} = nothing,
     nufft::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend(),
+    enstrophy::FIT.Types.AbstractEnstrophyOutput = FIT.Types.EnstrophyTotal(),
     execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
 ) where {FT<:AbstractFloat}
     θ, φ = coords
@@ -377,11 +404,11 @@ function FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
     # `execution` sets where the plans run, as in the barotropic workspace above.
     exec = FIT.Types.resolve_execution(execution, θ)
     planp = NUFSHT.make_spin_plan(Complex{FT}, θ, φ, lmax, 1; tol, execution = exec, nufft)
-    return _divergent_workspace(planp, FT, M, lmax, exec;
+    return _divergent_workspace(planp, FT, M, lmax, exec, enstrophy;
         radius, dealias, tol, rtol, maxiter, quadrature_weights, weights)
 end
 
-function _divergent_workspace(planp, ::Type{FT}, M, lmax, exec;
+function _divergent_workspace(planp, ::Type{FT}, M, lmax, exec, enstrophy;
                                radius, dealias, tol, rtol, maxiter, quadrature_weights, weights) where {FT}
     CT = Complex{FT}
     θg, φg, wq = _gauss_grid(_grid_degree(lmax, dealias), FT)
@@ -395,6 +422,7 @@ function _divergent_workspace(planp, ::Type{FT}, M, lmax, exec;
     ap = _z(CT, lmax + 1, 2lmax + 1); am = _z(CT, lmax + 1, 2lmax + 1)
     sym = _z(CT, lmax + 1, 2lmax + 1); anti = _z(CT, lmax + 1, 2lmax + 1)
     wc = _z(CT, lmax + 1, 2lmax + 1); Khat = _z(CT, lmax + 1, 2lmax + 1); Ahat = _z(CT, lmax + 1, 2lmax + 1)
+    Zhat = _z(CT, lmax + 1, 2lmax + 1)
     Up = _z(CT, M)
     uθ = similar(mem, FT, M); uφ = similar(mem, FT, M)
     Ug = _z(CT, Mg); wg = _z(CT, Mg); Bg = _z(CT, Mg); Kg = _z(FT, Mg)
@@ -406,16 +434,14 @@ function _divergent_workspace(planp, ::Type{FT}, M, lmax, exec;
     copyto!(msign, FT[isodd(m) ? 1 : -1 for m in -lmax:lmax])
     Pr = similar(mem, FT, lmax + 1, 2lmax + 1)
     Tcol = similar(mem, FT, lmax + 1, 1)
-    result = FIT.Types.DivergentSphericalTransferResult(
-        collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
-        zeros(FT, lmax + 1), zeros(FT, lmax + 1), zeros(FT, lmax + 1), true, 0, zero(FT))
+    result = FIT.Spherical._divergent_result(FT, lmax, enstrophy)
 
     qw = quadrature_weights === nothing ? nothing : copyto!(similar(mem, FT, M), FT.(quadrature_weights))
     fitp = _fit_operator(planp, weights, FT)
 
     return FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         planp, fitp, gridp, grid0, _fit_workspace(qw, fitp),
-        ap, am, sym, anti, wc, Khat, Ahat, Up, uθ, uφ, Ug, wg, Bg, Kg, gw, ladl, msign, Pr, Tcol, qw, result,
+        ap, am, sym, anti, wc, Khat, Ahat, Zhat, Up, uθ, uφ, Ug, wg, Bg, Kg, gw, ladl, msign, Pr, Tcol, qw, result,
         FT(radius), Int(lmax), _default_rtol(rtol, tol, FT), Int(maxiter))
 end
 
@@ -472,7 +498,49 @@ function FIT.calculate_divergent_spherical_transfer!(
     @. ws.Pr = real(conj(ws.anti) * ws.Ahat)
     sum!(ws.Tcol, ws.Pr)
     copyto!(ws.result.divergent_transfer, ws.Tcol); ws.result.divergent_transfer ./= a
+
+    # Enstrophy: ζ = Im(iζ + ½δ) on the grid and the vorticity flux ζU₊, projected as the advection is.
+    @. ws.Bg = imag(ws.wg) * ws.Ug
+    NUFSHT.nusht_analyze!(ws.Zhat, ws.Bg, ws.gridp; weights = ws.gw)
+    _divergence_paired!(ws.result.enstrophy_transfer, ws, ws.Zhat)
+    _enstrophy_split!(ws, ws.result.rotational_enstrophy_transfer)
     return FIT.Spherical.with_fit(FIT.Spherical.divergent_transfer_finalize!(ws.result), fit)
+end
+
+# The split: ζU₊^ψ by the rotational velocity, whose spin+1 coefficients are `sym`, projected as ζU₊ is, and
+# ½ζδ = Im(iζ + ½δ)·Re(iζ + ½δ) onto spin 0.
+_enstrophy_split!(_, ::Nothing) = nothing
+function _enstrophy_split!(ws, TZψ::AbstractVector)
+    NUFSHT.nusht_type2_spin!(ws.Bg, ws.sym, ws.gridp)
+    @. ws.Bg = imag(ws.wg) * ws.Bg
+    NUFSHT.nusht_analyze!(ws.Zhat, ws.Bg, ws.gridp; weights = ws.gw)
+    _divergence_paired!(TZψ, ws, ws.Zhat)
+    @. ws.Kg = imag(ws.wg) * real(ws.wg)
+    NUFSHT.nusht_analyze!(ws.Khat, ws.Kg, ws.grid0; weights = ws.gw)
+    _vorticity_paired!(ws.result.enstrophy_source, ws, ws.Khat)
+    return nothing
+end
+
+# `Σ_m Re{ζ*_lm X_lm}/a³` per degree into `out`, with `ζ_lm = i√(ℓ(ℓ+1)) sym_lm`, for the spin-0 coefficients
+# `X` of a unit-sphere field; the unit-sphere `ζ` and `X` carry `a` and `a²`.
+function _vorticity_paired!(out, ws, X)
+    @. ws.Pr = real(conj(im * ws.ladl * ws.sym) * X)
+    return _degree_sum!(out, ws)
+end
+
+# As `_vorticity_paired!` for `X = ∇·F`, from the spin+1 coefficients `F̂` of a real vector field `F`: the ladder
+# `−√(ℓ(ℓ+1))` of the antisymmetric part of `F̂` and its spin−1 partner `(−1)^(m+1) conj(F̂[ℓ,−m])`.
+function _divergence_paired!(out, ws, F̂)
+    @views @. ws.Pr = real(conj(im * ws.ladl * ws.sym) *
+                           (-ws.ladl * (F̂ - ws.msign * conj(F̂[:, end:-1:1])) / 2))
+    return _degree_sum!(out, ws)
+end
+
+function _degree_sum!(out, ws)
+    sum!(ws.Tcol, ws.Pr)
+    copyto!(out, ws.Tcol)
+    out ./= ws.radius^3
+    return out
 end
 
 function FIT.calculate_energy_transfer(
@@ -499,7 +567,7 @@ function FIT.calculate_energy_transfer(
     ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace(
         float(eltype(u_θ)), coords, lmax; radius = float(method.radius), dealias = dealias, tol = tol, rtol = rtol,
         maxiter = maxiter, quadrature_weights = quadrature_weights,
-        weights = weights, nufft = nufft, execution = execution)
+        weights = weights, nufft = nufft, enstrophy = method.enstrophy, execution = execution)
     try
         return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
     finally

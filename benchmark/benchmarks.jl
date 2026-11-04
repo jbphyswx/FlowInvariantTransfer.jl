@@ -242,7 +242,7 @@ function add_sphere!(lmax::Int)
         BenchmarkTools.@benchmarkable FIT.calculate_energy_transfer(
             FIT.Types.SphericalTransferMethod(), $ζ, ($θ, $φ); lmax = $lmax) evals = 1
     push!(MEMROWS, ("ScatteredSphericalTransferWorkspace $tag", ws, (M,)))
-    push!(NOTES, "sphere_scattered $tag: the fit takes $(FIT.Spherical.calculate_spherical_transfer!(ws, ζ).iterations) iterations")
+    push!(NOTES, "sphere_scattered $tag: the fit takes $(FIT.Spherical.calculate_spherical_transfer!(ws, ζ).fit.iterations) iterations")
     p = NUFSHT.make_spin_plan(Float64, θ, φ, lmax, 0; execution = SER)
     C = NUFSHT.allocate_coefficients(p)
     f = zeros(M)

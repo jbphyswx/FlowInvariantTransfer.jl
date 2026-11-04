@@ -2,6 +2,7 @@ module Types
 
 using SpectralBackends: SpectralBackends
 using ComputationalBackends: ComputationalBackends
+using FlowTransformBindings: FlowTransformBindings
 
 export AbstractEnergyTransferMethod, SpectralFluxMethod, CoarseGrainingFluxMethod, ShellToShellTransferMethod, ModeToModeTransferMethod, TriadicOrthogonalDecompositionMethod, SphericalTransferMethod, DivergentSphericalTransferMethod
 export AbstractInvariant, KineticEnergy, Helicity, Enstrophy, PassiveScalar
@@ -13,6 +14,8 @@ export AbstractShellGeometry, ShellMagnitude, IsotropicShells, PerpendicularShel
 export SmoothBands
 export AbstractDealiasing, NoDealiasing, OrszagTwoThirds, PaddedThreeHalves
 export AbstractNonlinearForm, Advective, Rotational
+export AbstractEnstrophyOutput, EnstrophyTotal, EnstrophySplit
+export StressStrain
 export SpectralFluxResult, CompressibleFluxResult, CoarseGrainingFluxResult, CoarseGrainingFluxResultWithDiagnostics, ShellToShellResult, ModeToModeTriadResult, TriadicOrthogonalDecompositionResult, SphericalTransferResult, DivergentSphericalTransferResult
 
 # ---------------------------------------------------------------------------
@@ -465,7 +468,31 @@ end
 SphericalTransferMethod(; radius=1.0) = SphericalTransferMethod(radius)
 
 """
-    DivergentSphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+    AbstractEnstrophyOutput
+
+The enstrophy transfer a [`DivergentSphericalTransferMethod`](@ref) computes, passed as `enstrophy`:
+[`EnstrophyTotal`](@ref) or [`EnstrophySplit`](@ref).
+"""
+abstract type AbstractEnstrophyOutput end
+
+"""
+    EnstrophyTotal <: AbstractEnstrophyOutput
+
+The enstrophy transfer `T_Z` and its flux alone; the result's split fields are `nothing`. The default.
+"""
+struct EnstrophyTotal <: AbstractEnstrophyOutput end
+
+"""
+    EnstrophySplit <: AbstractEnstrophyOutput
+
+`T_Z` with its transport by the rotational velocity `T_Z^ψ`, its transport by the divergent velocity
+`T_Z^χ` and its production by the divergence `S_Z`, each with its flux where it has one. One spherical
+synthesis and two analyses more per call than [`EnstrophyTotal`](@ref).
+"""
+struct EnstrophySplit <: AbstractEnstrophyOutput end
+
+"""
+    DivergentSphericalTransferMethod{T<:Real, E<:AbstractEnstrophyOutput} <: AbstractEnergyTransferMethod
 
 Spectral kinetic-energy transfer for the full **horizontal** flow on the sphere — rotational *and*
 divergent — in the spherical-harmonic degree spectrum `l`. Generalises
@@ -486,17 +513,28 @@ split by the toroidal (rotational) / spheroidal (divergent) parts of `û` into `
 energy and are not conserved one by one. References: Augier & Lindborg (2013); Burgess, Erler &
 Shepherd (2013).
 
+The enstrophy transfer comes with it: the curl of the advection `(u·∇)u` is `∇·(ζu) = u·∇ζ + ζδ`, and
+`T_Z(l) = Σ_m Re{ζ*_lm [∇·(ζu)]_lm}` sums to `½∫ζ²δ dΩ`, conserved for non-divergent flow alone. Point by
+point `ζ ∇·(ζu) = ∇·(½ζ²u_ψ) + ∇·(½ζ²u_χ) + ½ζ²δ`, with `u_ψ = k̂×∇ψ` and `u_χ = ∇χ`: the transport of
+enstrophy by the rotational and by the divergent velocity, each integrating to zero, and its production by
+the divergence. `T_Z` splits alike into `T_Z^ψ + T_Z^χ + S_Z`, pairing `ζ` with `u_ψ·∇ζ`, with
+`u_χ·∇ζ + ½ζδ` and with `½ζδ`; `enstrophy = EnstrophySplit()` computes the three.
+
 Dispatched through [`calculate_energy_transfer`](@ref FlowInvariantTransfer.calculate_energy_transfer): a regular colatitude–longitude grid (two
 `AbstractMatrix` velocity components) routes to the FastSphericalHarmonics extension; scattered
 points (velocity-component vectors + `(θ, φ)` coordinates) route to the NUFSHT extension.
 
 # Fields
 - `radius::T`: sphere radius `a` (default `1.0`).
+- `enstrophy::E`: [`EnstrophyTotal`](@ref) (default) or [`EnstrophySplit`](@ref).
 """
-struct DivergentSphericalTransferMethod{T<:Real} <: AbstractEnergyTransferMethod
+struct DivergentSphericalTransferMethod{T<:Real, E<:AbstractEnstrophyOutput} <: AbstractEnergyTransferMethod
     radius::T
+    enstrophy::E
 end
-DivergentSphericalTransferMethod(; radius=1.0) = DivergentSphericalTransferMethod(radius)
+DivergentSphericalTransferMethod(radius::Real) = DivergentSphericalTransferMethod(radius, EnstrophyTotal())
+DivergentSphericalTransferMethod(; radius = 1.0, enstrophy::AbstractEnstrophyOutput = EnstrophyTotal()) =
+    DivergentSphericalTransferMethod(radius, enstrophy)
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +835,7 @@ end
 SpectralFluxResult(k, e, T, f) = SpectralFluxResult{typeof(k), typeof(e), typeof(T)}(k, e, T, f)
 
 """
-    SphericalTransferResult{V<:AbstractVector, T<:Real}
+    SphericalTransferResult{V<:AbstractVector, F}
 
 Result of a spherical spectral energy/enstrophy transfer ([`SphericalTransferMethod`](@ref)),
 indexed by spherical-harmonic degree `l = 0…lmax`.
@@ -808,27 +846,27 @@ indexed by spherical-harmonic degree `l = 0…lmax`.
 - `enstrophy_transfer::V`: `T_Z(l) = −dZ_l/dt` from the advection; `Σ_l T_Z ≈ 0`.
 - `energy_flux::V`: `Π_E(L) = Σ_{l≤L} T_E(l)` — cumulative energy flux, positive toward higher degree.
 - `enstrophy_flux::V`: `Π_Z(L) = Σ_{l≤L} T_Z(l)`.
-- `converged::Bool`, `iterations::Int`, `residual::T`: at scattered points the coefficients come from
-  least-squares fits; `converged` is whether every fit reached `rtol`, and `iterations` and `residual`
-  (the relative normal-equation residual `‖A†r‖/‖A†f‖`) are the largest over the fits. A transform
-  exact on the nodes (a regular grid, or quadrature weights) runs no fit: `true`, `0`, `0`.
+- `fit::F`: at scattered points the coefficients come from least-squares fits, whose outcome this is, a
+  `FlowTransformBindings.SolverResult`: `converged` whether every fit reached `rtol`, `iterations` and
+  `residual` (the relative normal-equation residual `‖A†r‖/‖A†f‖`) the largest over the fits. `nothing`
+  where the analysis is a transform exact on the nodes (a regular grid, or quadrature weights).
 """
-struct SphericalTransferResult{V<:AbstractVector, T<:Real}
+struct SphericalTransferResult{V<:AbstractVector, F<:Union{Nothing,FlowTransformBindings.SolverResult}}
     degrees::V
     energy_transfer::V
     enstrophy_transfer::V
     energy_flux::V
     enstrophy_flux::V
-    converged::Bool
-    iterations::Int
-    residual::T
+    fit::F
 end
 
 """
-    DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
+    DivergentSphericalTransferResult{V<:AbstractVector, S<:Union{Nothing,AbstractVector}, F}
 
 Result of the divergent horizontal kinetic-energy spectral transfer
-([`DivergentSphericalTransferMethod`](@ref)), indexed by spherical-harmonic degree `l = 0…lmax`.
+([`DivergentSphericalTransferMethod`](@ref)), indexed by spherical-harmonic degree `l = 0…lmax`. The five
+enstrophy-split fields are `S`: vectors under [`EnstrophySplit`](@ref), `nothing` under
+[`EnstrophyTotal`](@ref).
 
 # Fields
 - `degrees::V`: the degrees `l`.
@@ -840,13 +878,27 @@ Result of the divergent horizontal kinetic-energy spectral transfer
 - `divergent_transfer::V`: divergent-channel transfer `T_div(l)` — projection onto the spheroidal
   (velocity-potential `χ`) part.
 - `rotational_flux::V`, `divergent_flux::V`: cumulative fluxes `Σ_{l≤L} T_rot`, `Σ_{l≤L} T_div`.
-- `converged::Bool`, `iterations::Int`, `residual::T`: the least-squares fits at scattered points, as
-  in [`SphericalTransferResult`](@ref).
+- `enstrophy_transfer::V`: `T_Z(l) = Σ_m Re{ζ*_lm [∇·(ζu)]_lm} = −dZ_l/dt` of the enstrophy
+  `Z_l = ½Σ_m |ζ_lm|²` from the advection, `∇·(ζu) = k̂·∇×((u·∇)u)` the vorticity's advection by the
+  full velocity; `Σ_l T_Z = ½∫ζ²δ dΩ`, zero for non-divergent flow, where `T_Z` is the barotropic
+  [`SphericalTransferResult`](@ref)'s.
+- `enstrophy_flux::V`: `Π_Z(L) = Σ_{l≤L} T_Z(l)`.
+- `rotational_enstrophy_transfer::S`: `T_Z^ψ(l) = Σ_m Re{ζ*_lm [u_ψ·∇ζ]_lm}`, the enstrophy transfer by the
+  rotational velocity `u_ψ = k̂×∇ψ`: the barotropic [`SphericalTransferResult`](@ref)'s `T_Z` of the flow's
+  `ζ`; `Σ_l T_Z^ψ = 0`.
+- `divergent_enstrophy_transfer::S`: `T_Z^χ(l) = Σ_m Re{ζ*_lm [u_χ·∇ζ + ½ζδ]_lm}`, the enstrophy transfer by
+  the divergent velocity `u_χ = ∇χ`; `Σ_l T_Z^χ = 0`.
+- `rotational_enstrophy_flux::S`, `divergent_enstrophy_flux::S`: `Σ_{l≤L} T_Z^ψ`, `Σ_{l≤L} T_Z^χ`.
+- `enstrophy_source::S`: `S_Z(l) = Σ_m Re{ζ*_lm [½ζδ]_lm}`, the enstrophy the divergence takes from degree
+  `l` (convergence, `δ < 0`, makes it negative); `Σ_l S_Z = ½∫ζ²δ dΩ` and `T_Z = T_Z^ψ + T_Z^χ + S_Z`.
+- `fit::F`: the outcome of the least-squares fits at scattered points, `nothing` where none runs, as in
+  [`SphericalTransferResult`](@ref).
 
 Only the total is conserved (`Σ_l T ≈ 0`); the two channels exchange energy, so `Σ_l T_rot` and
 `Σ_l T_div` are individually nonzero (equal and opposite up to the total).
 """
-struct DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
+struct DivergentSphericalTransferResult{V<:AbstractVector, S<:Union{Nothing,AbstractVector},
+                                        F<:Union{Nothing,FlowTransformBindings.SolverResult}}
     degrees::V
     energy_transfer::V
     energy_flux::V
@@ -854,10 +906,28 @@ struct DivergentSphericalTransferResult{V<:AbstractVector, T<:Real}
     divergent_transfer::V
     rotational_flux::V
     divergent_flux::V
-    converged::Bool
-    iterations::Int
-    residual::T
+    enstrophy_transfer::V
+    enstrophy_flux::V
+    rotational_enstrophy_transfer::S
+    divergent_enstrophy_transfer::S
+    rotational_enstrophy_flux::S
+    divergent_enstrophy_flux::S
+    enstrophy_source::S
+    fit::F
 end
+
+"""
+    merge_outcomes(a, b) -> FlowTransformBindings.SolverResult or nothing
+
+The outcome of two solves or fits of one call: converged if both are, the larger iteration count and
+residual; the one there is where the other is `nothing`, an exact transform's.
+"""
+merge_outcomes(::Nothing, ::Nothing) = nothing
+merge_outcomes(a::FlowTransformBindings.SolverResult, ::Nothing) = a
+merge_outcomes(::Nothing, b::FlowTransformBindings.SolverResult) = b
+merge_outcomes(a::FlowTransformBindings.SolverResult{T}, b::FlowTransformBindings.SolverResult{T}) where {T} =
+    FlowTransformBindings.SolverResult{T}(a.converged & b.converged, max(a.iterations, b.iterations),
+                                          max(a.residual, b.residual))
 
 """
     CompressibleFluxResult{KS, ES, TS, FL, CH, PD}
@@ -909,10 +979,19 @@ end
 CoarseGrainingFluxResult(s, a, m) = CoarseGrainingFluxResult{typeof(s), typeof(a)}(s, a, m)
 
 """
+    StressStrain()
+
+The coarse-graining flux's `diagnostics`: its filtered stress `τ̄ᵢⱼ` and strain rate `S̄ᵢⱼ` beside `Π_ℓ`, in a
+[`CoarseGrainingFluxResultWithDiagnostics`](@ref). `diagnostics = nothing`, the default, returns the
+flux alone.
+"""
+struct StressStrain end
+
+"""
     CoarseGrainingFluxResultWithDiagnostics{S, A, T}
 
 Result of a coarse-graining energy flux computation including stress/strain diagnostics, returned
-when `return_diagnostics=true`.
+under `diagnostics = StressStrain()`.
 
 # Fields
 - `filter_scale::S`: Filter scale ℓ used.

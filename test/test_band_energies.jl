@@ -17,12 +17,11 @@ using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 
 Test.@testset "band energies — invariant content per band" begin
     N = 32; L = 2π
-    x = range(0, L; length = N + 1)[1:N]
+    x = FG.Axes.PeriodicUniformAxis(0.0, L, N)
     Random.seed!(17)
     u = randn(N, N); v = randn(N, N)
     u .-= Statistics.mean(u); v .-= Statistics.mean(v)      # zero mean: the DC mode carries nothing
-    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x;
-                                   topology = (FG.Grids.Periodic(), FG.Grids.Periodic()))
+    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x)
     total = 0.5 * (Statistics.mean(u .^ 2) + Statistics.mean(v .^ 2))
     Test.@test total > 1e-3                                  # the field carries energy
 

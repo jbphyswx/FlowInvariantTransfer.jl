@@ -81,7 +81,7 @@ AbstractEnergyTransferMethod (abstract)
 ├── CoarseGrainingFluxMethod{F, S}
 ├── TriadicOrthogonalDecompositionMethod{N, O, M}
 ├── SphericalTransferMethod{T}
-└── DivergentSphericalTransferMethod{T}
+└── DivergentSphericalTransferMethod{T, E}     # E: EnstrophyTotal or EnstrophySplit
 ```
 
 ### Invariant Traits
@@ -158,8 +158,8 @@ CompressibleFluxResult{KS, ES, TS, FL, CH, PD}  # T_u(k), Π, channels, pressure
 CoarseGrainingFluxResult{S, A}                  # Π_ℓ(x) field
 CoarseGrainingFluxResultWithDiagnostics{S, A, T}  # + stress/strain tensors
 TriadicOrthogonalDecompositionResult{V, A3, PM, EC, XM}  # mode bispectrum, modes, energy budget
-SphericalTransferResult{V, T}                   # T_E(l), T_Z(l) and fluxes
-DivergentSphericalTransferResult{V, T}          # T(l), rotational/divergent channels and fluxes
+SphericalTransferResult{V, F}                   # T_E(l), T_Z(l) and fluxes; F: the fit's outcome or nothing
+DivergentSphericalTransferResult{V, S, F}       # T(l), rotational/divergent channels, T_Z(l), fluxes; S: the split or nothing
 ```
 
 The result types are parametric on their array and scalar types, so they hold `Float32` and device

@@ -16,12 +16,14 @@ using OhMyThreads: OhMyThreads
 using Distributed: Distributed
 using KernelAbstractions: KernelAbstractions as KA
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 using ComputationalBackends: ComputationalBackends
 
 Distributed.nprocs() == 1 && Distributed.addprocs(2)
 Distributed.@everywhere using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 Distributed.@everywhere using FFTW: FFTW
 Distributed.@everywhere using NonuniformFFTs: NonuniformFFTs
+Distributed.@everywhere using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes
 
 const _HOST_EXECS = (("serial", ComputationalBackends.SerialBackend()),
                      ("threaded", ComputationalBackends.ThreadedBackend()),
@@ -61,13 +63,14 @@ Test.@testset "batch entries reproduce the per-snapshot calls" begin
         Test.@test all(_same(nm, got[i].total.flux, ref[i].total.flux) for i in eachindex(u3))
     end
 
-    Test.@testset "scattered coarse-graining — $nm" for (nm, exec) in _HOST_EXECS
+    Test.@testset "scattered coarse-graining — $nm" for (nm, exec) in _BATCH_EXECS
         Ln = 2π; M = 600; ms = (12, 12); ℓ = 0.8
         Random.seed!(12)
         cx = Ln .* rand(M); cy = Ln .* rand(M)
         vf = [(sin.(cx .+ 0.1k) .* cos.(cy), cos.(cx) .* sin.(cy .+ 0.1k)) for k in 1:4]
         sp = FTB.NonuniformFFTsBackend(); filt = FIT.Types.GaussianFilter()
-        ref = [FIT.nufft_coarse_graining_flux(v, (cx, cy), ℓ, filt, ms; transform = sp, Ls = (Ln, Ln))
+        ref = [FIT.nufft_coarse_graining_flux(v, (cx, cy), ℓ, filt, ms; transform = sp, Ls = (Ln, Ln),
+                                              execution = ComputationalBackends.SerialBackend())
                for v in vf]
         got = FIT.nufft_coarse_graining_flux_batch(vf, (cx, cy), ℓ, filt, ms;
                                                    transform = sp, Ls = (Ln, Ln), execution = exec)

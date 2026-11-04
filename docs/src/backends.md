@@ -10,7 +10,7 @@ assume these names are in scope:
 
 ```julia
 using FlowInvariantTransfer
-using FlowInvariantTransfer.Types: LinearBinning, OrszagTwoThirds, PaddedThreeHalves, SphericalTransferMethod
+using FlowInvariantTransfer.Types: LinearBinning, OrszagTwoThirds, PaddedThreeHalves, SphericalTransferMethod, SpectralFluxMethod
 using FlowInvariantTransfer.SpectralBackends: DirectSumSpectralBackend, FFTSpectralBackend
 using FlowInvariantTransfer.ComputationalBackends: ThreadedBackend, DistributedBackend, GPUBackend
 ```
@@ -109,6 +109,24 @@ calculate_spectral_flux(û, ks; binning = LinearBinning(1.0), transform = FFTSpe
 
 **When to use:** standard production runs on regular periodic grids (N ≥ 32).
 
+### Cartesian transforms on split fields
+
+With `FlowFieldSpectra` and an FFT provider loaded, `ToSpectralWorkspace(fields)` accepts a tuple of
+FlowGeometries split fields on one uniform periodic Cartesian grid. Their split supplies the Julia
+workers or MPI communicator and each process's local execution backend. MPI transposes also require
+`PencilArrays`.
+
+```julia
+workspace = ToSpectralWorkspace(fields)
+û, ks = to_spectral!(workspace, fields)
+physical = from_spectral!(workspace, û)
+```
+
+Both outputs are FlowGeometries split fields with a trailing component axis. The forward uses
+`fft(u)/prod(size(grid))`, packed for real input and full for complex input. Synthesis reconstructs the
+components on the input split and preserves the coefficient output. The workspace holds its buffers
+and local FFT plans across calls.
+
 ### NUFFT libraries / FSHTSpectralBackend / NUFSHTSpectralBackend
 
 Front-ends for non-uniform Cartesian (FlowTransformBindings' NUFFT plans, on NonuniformFFTs or
@@ -153,16 +171,27 @@ calculate_shell_to_shell_transfer(û, ks; binning = LinearBinning(1.0),
 ### DistributedBackend
 
 Multi-process via `Distributed`: the outer loop (mediator shells, slots, bands, channel pairs,
-triads, or the mode→shell scatter of the spectral flux) is partitioned across worker processes and
-reduced on the caller. Spectral flux retains each worker's shell tables and sends that worker its
-density slice. Compressible transfer runs its complete pipeline on one worker. Every worker needs
-`using FlowInvariantTransfer`.
+triads) is partitioned across worker processes and reduced on the caller, and every `*_batch` entry
+divides its snapshots among the workers. The spectral flux and the compressible transfer of one field
+have no outer loop: a field held on the caller is computed there under the inner backend. Every worker
+needs `using FlowInvariantTransfer`.
 
 ```julia
 using Distributed: Distributed
 Distributed.addprocs(4); Distributed.@everywhere using FlowInvariantTransfer
 calculate_shell_to_shell_transfer(û, ks;
     binning = LinearBinning(1.0), execution = DistributedBackend())
+```
+
+A velocity held on the workers, its components FlowGeometries split fields on a uniform periodic Cartesian grid,
+takes the spectral flux where it lies: each worker transforms and multiplies its own blocks on FlowFieldSpectra's
+split FFT, and the per-shell sums are added on the caller. Every worker needs FlowFieldSpectra and an FFT provider.
+
+```julia
+Distributed.@everywhere using FlowFieldSpectra, FFTW
+split  = FlowGeometries.Decomposition.split_grid(grid, DistributedBackend(); dims = (2,))
+fields = map(u -> FlowGeometries.Decomposition.distribute(split, u), (u, v))
+result = calculate_energy_transfer(SpectralFluxMethod(LinearBinning(1.0)), fields)
 ```
 
 ### GPUBackend
@@ -289,12 +318,12 @@ an outer loop over shells/triads expose it (the rest run serially over the singl
 
 | Diagnostic | DirectSum | FFT | Serial | Threaded | Distributed | GPU |
 |-----------|:---------:|:---:|:------:|:--------:|:-----------:|:---:|
-| Spectral flux Π(K) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Spectral flux Π(K) | ✓ | ✓ | ✓ | ✓ | ✓† | ✓ |
 | Shell-to-shell T(n,m) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Mode-to-mode S(k\|p) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Smooth band-to-band T(K,Q) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Partial / decomposed fluxes | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Compressible T_u(k) | ✓ | ✓ | ✓ | ✓* | ✓* | ✓ |
+| Compressible T_u(k) | ✓ | ✓ | ✓ | ✓* | ✓† | ✓ |
 | TOD | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 `✓` verified (serial parity to machine precision). Coarse-graining, spherical, and the MPI
@@ -305,15 +334,15 @@ Notes:
   mode-to-mode, band-to-band, partial) thread the outer shell/slot/band/pair loop and on a GPU run
   their per-mode transfer density through a KernelAbstractions device kernel; spectral flux threads or
   runs on the device the mode→shell reduction, and copies the per-shell spectrum to the host for the
-  cumulative sum. `✓*` compressible is a single FFT pipeline: its `Threaded` path threads the FFTs, and
-  its `Distributed` path runs the same complete pipeline on a worker. Its GPU path uses broadcasts and
-  one device scatter into the shell sums. TOD's GPU
+  cumulative sum. `✓*` compressible is a single FFT pipeline: its `Threaded` path threads the FFTs. Its
+  GPU path uses broadcasts and one device scatter into the shell sums. TOD's GPU
   path is the serial triad loop on device arrays (`GPUArraysCore` methods; the small per-triad
   eigenproblem runs on the host). GPU verified on `GPUBackend(KA.CPU())` and on JLArrays device-generic
   building blocks (cuFFT rides `AbstractFFTs` on a `CuArray` by construction).
-- **Distributed** partitions the outer loop of every diagnostic across worker processes (the
-  mode→shell scatter for spectral flux), with `DistributedBackend(ThreadedBackend())` threading each
-  worker. For a grid too large for one node, use the **MPI pencil axis** (below).
+- **Distributed** partitions the outer loop of the loop diagnostics across worker processes, with
+  `DistributedBackend(ThreadedBackend())` threading each worker. `✓†` one field's spectral flux or
+  compressible transfer runs on the caller under the inner backend; their batches divide snapshots among
+  the workers. For a grid too large for one node, use the **MPI pencil axis** (below).
 - The fully mode-resolved `S(k|p)` tensor is the only query needing the `O(N^{2D})` brute loop;
   `T(k)`/`T(K,Q)`/`Π(K)` use the fast FFT paths.
 - `execution = AutoBackend()` resolves to threaded when the OhMyThreads extension is loaded and Julia

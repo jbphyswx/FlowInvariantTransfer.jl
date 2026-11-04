@@ -48,9 +48,8 @@ function FIT.build_pencil_plan(::Type{T}, split::FG.Decomposition.AbstractRankSp
     grid = FG.Decomposition.global_grid(split)
     FG.Grids.grid_geometry(grid) isa FG.Geometry.AbstractCartesianGeometry ||
         throw(ArgumentError("pencil transforms require a Cartesian grid"))
-    all(FG.Axes.isuniform, FG.Grids.coordinates(grid)) &&
-        all(d -> FG.Grids.isperiodic(grid, d), 1:D) ||
-        throw(ArgumentError("pencil transforms require uniform periodic axes"))
+    FG.Grids.isuniform(grid) && all(d -> FG.Grids.isperiodic(grid, d), 1:D) ||
+        throw(ArgumentError("pencil transforms require a `FlowGeometries.Axes.PeriodicUniformAxis` in every direction"))
     pen = FG.Decomposition.pencil(split)
     return PencilFFTs.PencilFFTPlan(pen, _pencil_transforms(T, Val(D)), real(T))
 end
@@ -483,9 +482,9 @@ function FIT.pencil_spectral_flux(fields::NTuple{D,<:FG.Decomposition.AbstractRa
     return FIT.pencil_spectral_flux!(ws, fields)
 end
 
-FIT.calculate_energy_transfer(::FIT.Types.SpectralFluxMethod,
+FIT.calculate_energy_transfer(method::FIT.Types.SpectralFluxMethod,
     fields::NTuple{D,<:FG.Decomposition.AbstractRankField}; kwargs...) where {D} =
-    FIT.pencil_spectral_flux(fields; kwargs...)
+    FIT.pencil_spectral_flux(fields; binning = method.binning, kwargs...)
 
 # Allocating convenience: build a one-shot workspace and delegate to the in-place form.
 function FIT.pencil_spectral_flux(

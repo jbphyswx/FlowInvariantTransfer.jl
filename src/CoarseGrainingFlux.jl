@@ -37,6 +37,10 @@ function _cg_flux_workspace(args...; kwargs...)
         "Run `using CoarseGrainingEnergyFluxes` to load the extension."))
 end
 
+# A threaded batch's first workspace, applied serially with its tables built on the threads; a method of the
+# extension.
+function _cg_batch_base end
+
 """
     _cg_flux_cgef!(ws, velocity_fields; kwargs...)
 
@@ -55,13 +59,13 @@ end
 
 """
     CoarseGrainingFluxWorkspace(velocity_fields, coords_vecs, ℓ, filter;
-                                mask=nothing, return_diagnostics=false, mask_strategy=…, vector_filter=nothing,
+                                mask=nothing, diagnostics=nothing, mask_strategy=…, vector_filter=nothing,
                                 execution=…)
 
 Preallocated, reusable resources for [`calculate_coarse_graining_flux!`](@ref), built for a **fixed**
 `(filter, scale ℓ, mask, execution)` configuration: the grid, its CGEF `ΠWorkspace` (filtered fields and
 stress/strain scratch), the `Π_ℓ(x)` output buffer, the derivative plan, the filter plan, and — when
-`return_diagnostics=true` — the `τ̄`/`S̄` diagnostic buffers. Build once, then apply to snapshots on the
+`diagnostics = StressStrain()` — the `τ̄`/`S̄` diagnostic buffers. Build once, then apply to snapshots on the
 same grid with `calculate_coarse_graining_flux!(ws, velocity_fields)`. A different scale, filter, mask
 or execution backend needs a new workspace.
 
@@ -96,7 +100,7 @@ end
 
 """
     calculate_coarse_graining_flux(velocity_fields, coords_vecs, ℓ, filter;
-                                   decomposition=NoDecomposition(), return_diagnostics=false, kwargs...)
+                                   decomposition=NoDecomposition(), diagnostics=nothing, kwargs...)
                                    -> CoarseGrainingFluxResult
 
 Compute the pointwise cross-scale kinetic energy flux Π_ℓ(x) = −τ̄ᵢⱼ S̄ᵢⱼ at filter
@@ -119,7 +123,8 @@ result = calculate_coarse_graining_flux((u, v), (x, y), ℓ, FlowInvariantTransf
 - `decomposition::AbstractFieldDecomposition`: `NoDecomposition()` (default), `HelmholtzDecomposition()`, `RotationalDecomposition()`, or `DivergentDecomposition()`.
 - `decomposition_kwargs::NamedTuple = (;)`: keywords of the decomposition (for the Helmholtz family
   `solver` and `boundary`; for the helical and toroidal/poloidal splits `transform` and `execution`).
-- `return_diagnostics::Bool=false`: Also return τ̄ᵢⱼ and S̄ᵢⱼ fields.
+- `diagnostics = nothing`: [`Types.StressStrain()`](@ref FlowInvariantTransfer.Types.StressStrain) also returns
+  the τ̄ᵢⱼ and S̄ᵢⱼ fields.
 - `mask::Union{Nothing,AbstractMatrix{Bool}}=nothing`: boolean point mask (`true` = point included in
   the computation, `false` = excluded). If `nothing`, all points are included.
 - `execution::AbstractExecutionBackend = AutoBackend()`: the backend the filter runs on, passed to
@@ -140,7 +145,7 @@ declares its periodic directions (`topology`, or a `PeriodicUniformAxis` longitu
 
 # Returns
 `CoarseGrainingFluxResult`; with a decomposition a NamedTuple of them, one per component, alongside the
-decomposition's `converged`, `iterations` and `residual` when it reports them.
+Helmholtz family's `solve`.
 """
 function calculate_coarse_graining_flux(
     velocity_fields::Tuple,
@@ -172,8 +177,8 @@ function _calculate_coarse_graining_flux_decomposed(
     return _cg_flux_cgef(decomp_fields, geometry, ℓ, filter; kwargs...)
 end
 
-# The entries a physical decomposition reports its solves under, beside its components.
-const _SOLVE_KEYS = (:converged, :iterations, :residual)
+# The entry a physical decomposition reports its solves under, beside its components.
+const _SOLVE = NamedTuple{(:solve,)}
 
 function _calculate_coarse_graining_flux_decomposed(
     decomposed::NamedTuple,
@@ -183,7 +188,7 @@ function _calculate_coarse_graining_flux_decomposed(
     filter::Types.AbstractFilter;
     kwargs...,
 )
-    parts = Base.structdiff(decomposed, NamedTuple{_SOLVE_KEYS})
+    parts = Base.structdiff(decomposed, _SOLVE)
     fluxes = map(fields -> _cg_flux_cgef(fields, geometry, ℓ, filter; kwargs...), parts)
     return merge(fluxes, Base.structdiff(decomposed, parts))
 end
@@ -193,7 +198,7 @@ end
         -> CoarseGrainingFluxResult
 
 In-place coarse-graining flux reusing the preallocated `ws`, allocation-free. The filter, scale, mask,
-execution backend and `return_diagnostics` are fixed by [`CoarseGrainingFluxWorkspace`](@ref); call
+execution backend and `diagnostics` are fixed by [`CoarseGrainingFluxWorkspace`](@ref); call
 this per snapshot on the same grid.
 
 The returned result wraps the reused `ws.Π_out` buffer (a subsequent call overwrites it); copy
@@ -215,14 +220,15 @@ end
 
 Coarse-graining flux Π_ℓ(x) for a batch of snapshots on the same grid (`velocity_fields_batch` an
 iterable of velocity-component tuples `(u, v[, w])`). One `CoarseGrainingFluxWorkspace` (grid + CGEF
-plans, fixed for `(ℓ, filter)`) is built per worker and reused across its snapshots.
+plans, fixed for `(ℓ, filter)`) is built per process and reused across its snapshots; each further thread of a
+threaded batch runs on a copy sharing its grid and CGEF tables, with buffers of its own.
 
 `execution` runs the batch axis, and each snapshot's filter runs on the backend it implies: on
 `SerialBackend()`, `ThreadedBackend()` (requires `using OhMyThreads`, threads over snapshots),
 `DistributedBackend(inner)` and `MPIBackend(inner)` every snapshot is filtered serially (or on the
 device of an `inner = GPUBackend(dev)`), and on `GPUBackend(dev)` every snapshot is filtered on `dev`.
 Each result owns an independent copy of its flux field. Only `NoDecomposition` is supported; `kwargs`
-(`mask`, `return_diagnostics`, `radius`, …) are forwarded to the workspace. Requires
+(`mask`, `diagnostics`, `radius`, …) are forwarded to the workspace. Requires
 `CoarseGrainingEnergyFluxes` to be loaded.
 """
 function calculate_coarse_graining_flux_batch(
@@ -230,24 +236,27 @@ function calculate_coarse_graining_flux_batch(
     geometry,
     ℓ::Real,
     filter::Types.AbstractFilter;
-    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
+    execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
     kwargs...,
 )
     length(velocity_fields_batch) == 0 &&
-        return _cg_result_type(eltype(velocity_fields_batch), get(kwargs, :return_diagnostics, false))[]
+        return _cg_result_type(eltype(velocity_fields_batch), get(kwargs, :diagnostics, nothing))[]
     return _cg_flux_batch!(Types.resolve_execution(execution), velocity_fields_batch, geometry, ℓ, filter; kwargs...)
 end
 
-# The result type of fields of type `F` (a tuple of component arrays): the flux is an `Array` shaped
-# like a component, the diagnostics two component axes more.
-function _cg_result_type(::Type{F}, diagnostics::Bool) where {F <: Tuple}
+# The result type of fields of type `F` (a tuple of component arrays) under `diagnostics`: the flux is an
+# `Array` shaped like a component, the diagnostics two component axes more.
+function _cg_result_type(::Type{F}, ::Nothing) where {F <: Tuple}
+    A = fieldtype(F, 1)
+    return Types.CoarseGrainingFluxResult{eltype(A), Array{eltype(A), ndims(A)}}
+end
+function _cg_result_type(::Type{F}, ::Types.StressStrain) where {F <: Tuple}
     A = fieldtype(F, 1)
     FT = eltype(A); nd = ndims(A)
-    return diagnostics ? Types.CoarseGrainingFluxResultWithDiagnostics{FT, Array{FT, nd}, Array{FT, nd + 2}} :
-                         Types.CoarseGrainingFluxResult{FT, Array{FT, nd}}
+    return Types.CoarseGrainingFluxResultWithDiagnostics{FT, Array{FT, nd}, Array{FT, nd + 2}}
 end
-_cg_result_type(::Type, diagnostics::Bool) =
-    diagnostics ? Types.CoarseGrainingFluxResultWithDiagnostics : Types.CoarseGrainingFluxResult
+_cg_result_type(::Type, ::Nothing) = Types.CoarseGrainingFluxResult
+_cg_result_type(::Type, ::Types.StressStrain) = Types.CoarseGrainingFluxResultWithDiagnostics
 
 # One workspace filtering every snapshot on `snapshot_execution`, reused across the batch; each result
 # gets an independent copy (the workspace overwrites its output buffer on every snapshot, so the

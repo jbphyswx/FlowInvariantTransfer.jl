@@ -29,9 +29,8 @@ end
 
 Test.@testset "physical decomposition — one-shot resynthesis" begin
     N = 16; L = 2π
-    x = range(0, L; length = N + 1)[1:N]
-    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x, x;
-                                   topology = (FG.Grids.Periodic(), FG.Grids.Periodic(), FG.Grids.Periodic()))
+    x = FG.Axes.PeriodicUniformAxis(0.0, L, N)
+    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, x, x)
     cases = (("helical", FIT.Types.HelicalDecomposition(), (:positive, :negative)),
              ("toroidal/poloidal", FIT.Types.ToroidalPoloidalDecomposition(), (:toroidal, :poloidal)))
 

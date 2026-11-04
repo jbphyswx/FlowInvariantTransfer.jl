@@ -2,60 +2,8 @@ module FlowInvariantTransferDistributedExt
 
 using Distributed: Distributed
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
-using FlowTransformBindings: FlowTransformBindings as FTB
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
-
-struct _ShellPart{C, R}
-    channel::C
-    rows::R
-    worker::Int
-end
-
-FIT.Workspaces._process_slots(proto::AbstractArray{<:Complex}) =
-    _ShellPart{Distributed.RemoteChannel{Channel{Any}},UnitRange{Int}}[]
-
-function _shell_parts!(ws, ks, shell_idx)
-    parts = ws.processes
-    isempty(parts) || return parts
-    n = length(shell_idx)
-    workers = Distributed.workers()
-    count = min(length(workers), n)
-    cart = CartesianIndices(size(shell_idx))
-    for i in 1:count
-        rows = (fld((i - 1) * n, count) + 1):fld(i * n, count)
-        indices = collect(view(vec(shell_idx), rows))
-        T = eltype(ws.T_spec)
-        fold = T[FTB.mode_fold(ks, cart[j]) for j in rows]
-        channel = Distributed.RemoteChannel(() -> Channel{Any}(1), workers[i])
-        state = (; indices, fold, sums = zeros(T, length(ws.T_spec)))
-        put!(channel, state)
-        push!(parts, _ShellPart(channel, rows, workers[i]))
-    end
-    return parts
-end
-
-function _shell_part!(channel, density)
-    return _shell_part!(fetch(channel), density)
-end
-function _shell_part!(state::NamedTuple, density)
-    fill!(state.sums, zero(eltype(state.sums)))
-    @inbounds for i in eachindex(density)
-        shell = state.indices[i]
-        shell == 0 && continue
-        state.sums[shell] += state.fold[i] * density[i]
-    end
-    return state.sums
-end
-
-function FIT.Workspaces.release!(ws::FIT.Workspaces.SpectralFluxWorkspace)
-    ws.processes === nothing && return nothing
-    for part in ws.processes
-        close(part.channel)
-    end
-    empty!(ws.processes)
-    return nothing
-end
 
 # The closures shipped to workers capture plain arrays, never a workspace: a workspace's FFTW plan
 # bundle does not deserialize on a worker without the FFTW extension. Worker processes must have
@@ -103,42 +51,6 @@ function FIT.ShellToShellTransfer._shell_to_shell_distributed!(
     end
 
     return result
-end
-
-# ---------------------------------------------------------------------------
-# Distributed spectral flux Π(K) reduction
-# ---------------------------------------------------------------------------
-# Overrides the core `_spectral_flux_distributed!` stub dispatched by `ComputationalBackends.DistributedBackend`. The
-# transfer density is computed on the caller, then the mode→shell scatter is partitioned across
-# workers (strided over the linear mode index) and `+`-reduced into the shell spectrum. The
-# nonlinear-term FFTs stay on the caller and the density array is shipped to the workers; a grid too
-# large for one node takes `pencil_spectral_flux` (PencilFFTs), which splits the FFT itself.
-function FIT.SpectralFlux._spectral_flux_distributed!(
-    result,
-    ws,
-    velocity_hat,
-    N̂,
-    ks,
-    shell_idx;
-    invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
-)
-    nd   = length(ks)
-    ns   = Base.front(size(velocity_hat))
-    FT   = real(eltype(velocity_hat))
-    N_sh = length(ws.T_spec)
-    Np   = prod(ns)
-
-    td = FIT.Workspaces.density_buffer(ws.nonlinear, ks)
-    FIT.Invariants.transfer_density!(td, invariant, velocity_hat, N̂, ks)
-    parts = _shell_parts!(ws, ks, shell_idx)
-    pending = map(parts) do part
-        Distributed.remotecall(_shell_part!, part.worker, part.channel, collect(view(vec(td), part.rows)))
-    end
-    fill!(ws.T_spec, zero(FT))
-    for future in pending
-        ws.T_spec .+= fetch(future)
-    end
-    return FIT.SpectralFlux._finalize_spectral_flux!(result, ws)
 end
 
 # One worker's chunk of mediator shells → `[(m, column), …]`, with one workspace and band-field scratch
@@ -404,30 +316,6 @@ function _partial_fluxes_worker(pis, prs, comps, names, velocity_hat, ks, ns, FT
     else
         return build(pis)
     end
-end
-
-# ---------------------------------------------------------------------------
-# Distributed compressible transfer  (overrides the core `_compressible_distributed` stub)
-# ---------------------------------------------------------------------------
-# The independent work units of the compressible pipeline are the momentum-weighted transfer +
-# Helmholtz channel set (group A) and the KE↔IE pressure-dilatation (group B). Each group runs on its
-# own worker, building its own `CompressibleWorkspace` from the raw inputs, and the master assembles the
-# result. Each worker runs the inner backend (`ComputationalBackends.local_backend`), so
-# `DistributedBackend(ThreadedBackend())` threads each worker's FFTs. Without a pressure field the one
-# work unit runs on one worker. Bit-identical to the serial pipeline.
-function FIT.Compressible._compressible_distributed(
-    velocity_hat, density_hat, ks, execution::ComputationalBackends.DistributedBackend;
-    transform, binning, geometry,
-    pressure_hat = nothing,
-    dealiasing = FIT.Types.OrszagTwoThirds(),
-    decomposition::Union{FIT.Types.NoDecomposition,FIT.Types.HelmholtzDecomposition} = FIT.Types.HelmholtzDecomposition(),
-)
-    inner = ComputationalBackends.local_backend(execution)
-    return fetch(Distributed.@spawnat :any begin
-        FIT.calculate_compressible_flux(velocity_hat, density_hat, ks;
-            transform, binning, geometry, execution = inner, pressure_hat, dealiasing, decomposition)
-    end
-    )
 end
 
 # ---------------------------------------------------------------------------

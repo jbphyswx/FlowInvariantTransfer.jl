@@ -81,8 +81,8 @@ _nufft_to_device(::ComputationalBackends.AbstractExecutionBackend, x) = x
 
 """
     nufft_coarse_graining_flux(velocity_fields, scatter_coords, ℓ, filter, ms; transform, Ls,
-                               tol = nothing, weights = nothing, return_diagnostics = false,
-                               execution = SerialBackend())
+                               tol = nothing, weights = nothing, diagnostics = nothing,
+                               execution = AutoBackend())
         -> CoarseGrainingFluxResult
 
 Coarse-graining energy flux `Π_ℓ(x)` at scattered Cartesian points, by CoarseGrainingEnergyFluxes'
@@ -105,18 +105,17 @@ per dimension. It sets the wavenumber grid `k = 2πn/L`, and hence the filter's 
 strain: points in `[xₘᵢₙ, xₘᵢₙ+Lₐ)` under-span the period, so `L` is never inferred from them.
 
 `tol` is the transforms' relative accuracy (`nothing`: `FlowTransformBindings.default_tolerance` of the
-coordinates' float type); `return_diagnostics = true` also returns `τ̄ᵢⱼ` and `S̄ᵢⱼ` at the points, each
-`(N, D, D)`; `execution = ThreadedBackend()` threads each transform. For a filter-scale sweep or a time
+coordinates' float type); `diagnostics = Types.StressStrain()` also returns `τ̄ᵢⱼ` and `S̄ᵢⱼ` at the points,
+each `(N, D, D)`. `execution` places the workspace: `AutoBackend()` threads each transform where OhMyThreads is
+loaded and Julia has more than one thread, and `GPUBackend(dev)` holds it on `dev`. For a filter-scale sweep or a time
 series on one point set, build an [`NUFFTCoarseGrainingWorkspace`](@ref) and call
 [`nufft_coarse_graining_flux!`](@ref).
 """
 function nufft_coarse_graining_flux(velocity_fields::Tuple, scatter_coords::Tuple, ℓ::Real,
-                                    filter::Types.AbstractFilter, ms::Tuple;
-                                    return_diagnostics::Bool = false, kwargs...)
-    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; return_diagnostics = return_diagnostics, kwargs...)
+                                    filter::Types.AbstractFilter, ms::Tuple; kwargs...)
+    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; kwargs...)
     try
-        return nufft_coarse_graining_flux!(ws, velocity_fields, ℓ, filter, ms;
-                                           return_diagnostics = return_diagnostics)
+        return nufft_coarse_graining_flux!(ws, velocity_fields, ℓ, filter, ms)
     finally
         close!(ws)
     end
@@ -127,37 +126,35 @@ end
                                      transform, Ls, execution, kwargs...) -> Vector
 
 Scattered coarse-graining flux for a batch of snapshots on **one** point set. The NUFFT plans and every
-buffer are built once for the whole batch. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads over snapshots with one
-workspace per chunk. Results are in input order and each owns its flux field.
+buffer are built once for the whole batch. `execution = ThreadedBackend()` (requires `using OhMyThreads`) threads
+over snapshots, each further chunk on a copy of the workspace sharing its point set and weights, with library plans
+and buffers of its own; `GPUBackend(dev)` runs every snapshot on one workspace on `dev`. Results are in input order
+and each owns its flux field.
 """
 function nufft_coarse_graining_flux_batch(velocity_fields_batch, scatter_coords, ℓ, filter, ms;
                                           transform::SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
                                           Ls::Tuple,
-                                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.SerialBackend(),
-                                          return_diagnostics::Bool = false,
+                                          execution::ComputationalBackends.AbstractExecutionBackend = ComputationalBackends.AutoBackend(),
+                                          diagnostics::Union{Nothing,Types.StressStrain} = nothing,
                                           kwargs...)
     n = length(velocity_fields_batch)
-    if n == 0
-        FT = float(eltype(scatter_coords[1]))
-        R = return_diagnostics ?
-            Types.CoarseGrainingFluxResultWithDiagnostics{FT, Vector{FT}, Array{FT, 3}} :
-            Types.CoarseGrainingFluxResult{FT, Vector{FT}}
-        return R[]
-    end
+    n == 0 && return _nufft_result_type(float(eltype(scatter_coords[1])), diagnostics)[]
     return _nufft_cg_batch!(Types.resolve_execution(execution), velocity_fields_batch, scatter_coords,
-                            ℓ, filter, ms; transform = transform, Ls = Ls, kwargs...)
+                            ℓ, filter, ms; transform = transform, Ls = Ls, diagnostics = diagnostics, kwargs...)
 end
 
-# Serial reference: one workspace (plans + buffers) reused across the batch. `nufft_coarse_graining_flux!`
+# The result type of a scattered flux under `diagnostics`.
+_nufft_result_type(::Type{FT}, ::Nothing) where {FT} = Types.CoarseGrainingFluxResult{FT, Vector{FT}}
+_nufft_result_type(::Type{FT}, ::Types.StressStrain) where {FT} =
+    Types.CoarseGrainingFluxResultWithDiagnostics{FT, Vector{FT}, Array{FT, 3}}
+
+# Serial and device: one workspace (plans + buffers) on `be`, reused across the batch. `nufft_coarse_graining_flux!`
 # wraps `ws.Π`, overwritten on the next snapshot, so each result is copied out.
-function _nufft_cg_batch!(::ComputationalBackends.AbstractSerialBackend, batch, scatter_coords, ℓ, filter, ms;
-                          transform, Ls, return_diagnostics::Bool = false, kwargs...)
-    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform = transform, Ls = Ls,
-                                      return_diagnostics = return_diagnostics, kwargs...)
+function _nufft_cg_batch!(be::Union{ComputationalBackends.AbstractSerialBackend, ComputationalBackends.AbstractGPUBackend},
+                          batch, scatter_coords, ℓ, filter, ms; transform, Ls, kwargs...)
+    ws = NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform = transform, Ls = Ls, kwargs..., execution = be)
     try
-        return [deepcopy(nufft_coarse_graining_flux!(ws, vf, ℓ, filter, ms;
-                                                     return_diagnostics = return_diagnostics))
-                for vf in batch]
+        return [deepcopy(nufft_coarse_graining_flux!(ws, vf, ℓ, filter, ms)) for vf in batch]
     finally
         close!(ws)
     end
@@ -172,10 +169,6 @@ _nufft_cg_batch!(::ComputationalBackends.AbstractThreadedBackend, batch, scatter
 
 _nufft_cg_batch!(be::ComputationalBackends.AbstractExecutionBackend, batch, scatter_coords, ℓ, filter, ms; kwargs...) =
     Types.batch_unavailable("nufft_coarse_graining_flux_batch", be)
-
-_nufft_cg_batch!(::ComputationalBackends.AbstractGPUBackend, batch, scatter_coords, ℓ, filter, ms; kwargs...) =
-    throw(ArgumentError("nufft_coarse_graining_flux_batch keeps its workspace in host memory. On a GPUBackend, " *
-                        "filter on the points as an FG UnstructuredGrid with CoarseGrainingEnergyFluxes' NUFFT engine."))
 
 """
     NUFFTCoarseGrainingWorkspace
@@ -206,12 +199,11 @@ Base.show(io::IO, ::MIME"text/plain", w::NUFFTCoarseGrainingWorkspace) = show(io
 
 """
     NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform, Ls, tol = nothing, weights = nothing,
-                                 return_diagnostics = false, execution = SerialBackend())
+                                 diagnostics = nothing, execution = AutoBackend())
 
 Build the reusable coarse-graining workspace over `scatter_coords` for the NUFFT library `transform`
-names, with the periodic domain size `Ls` and the samples' quadrature `weights`; see
-[`nufft_coarse_graining_flux`](@ref). `execution = ThreadedBackend()` threads each transform. Requires
-`using CoarseGrainingEnergyFluxes`.
+names, with the periodic domain size `Ls` and the samples' quadrature `weights`, placed by `execution`; see
+[`nufft_coarse_graining_flux`](@ref). Requires `using CoarseGrainingEnergyFluxes`.
 """
 NUFFTCoarseGrainingWorkspace(scatter_coords::Tuple, ms::Tuple; kwargs...) =
     _nufft_cg_workspace(scatter_coords, ms; kwargs...)
@@ -224,15 +216,16 @@ _nufft_cg_workspace(args...; kwargs...) = throw(ArgumentError(
 function _nufft_cg_flux! end
 
 """
-    nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields, ℓ, filter, ms;
-                                return_diagnostics = false) -> CoarseGrainingFluxResult
+    nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields, ℓ, filter, ms)
+        -> CoarseGrainingFluxResult or CoarseGrainingFluxResultWithDiagnostics
 
 In-place scattered coarse-graining flux reusing `ws`: every transform runs through its plan and every
-intermediate is a workspace buffer. The result wraps `ws.Π_out`, and a later call overwrites it.
+intermediate is a workspace buffer. The workspace's `diagnostics` fixes the result type. The result wraps
+`ws.Π_out`, and a later call overwrites it.
 """
 nufft_coarse_graining_flux!(ws::NUFFTCoarseGrainingWorkspace, velocity_fields::Tuple, ℓ::Real,
-                            filter::Types.AbstractFilter, ms::Tuple; return_diagnostics::Bool = false) =
-    _nufft_cg_flux!(ws, velocity_fields, ℓ, filter, ms, return_diagnostics)
+                            filter::Types.AbstractFilter, ms::Tuple) =
+    _nufft_cg_flux!(ws, velocity_fields, ℓ, filter, ms)
 
 # ---------------------------------------------------------------------------
 # Scattered → uniform Fourier coefficients

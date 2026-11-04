@@ -183,7 +183,8 @@ FlowInvariantTransfer.Invariants.transfer_density_scatter!
 `decompose_field` splits a field on either side of the transform. Given coefficients it returns
 coefficients; given physical fields and a `FlowGeometries` grid it returns physical fields — the
 Helmholtz family by solving on the grid, and the per-mode splits (helical, toroidal/poloidal) by
-analysing, projecting and synthesising each component back.
+analysing, projecting and synthesising each component back. The Helmholtz family also takes coordinate
+ranges, the periodic box of period `N·Δ` along each.
 
 ```@docs
 FlowInvariantTransfer.Decomposition.decompose_field

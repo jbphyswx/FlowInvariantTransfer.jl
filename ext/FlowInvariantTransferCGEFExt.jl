@@ -2,6 +2,7 @@ module FlowInvariantTransferCGEFExt
 
 using CoarseGrainingEnergyFluxes: CoarseGrainingEnergyFluxes as CGEF
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 # ---------------------------------------------------------------------------
 # Filter type mapping: FIT.AbstractFilter → CGEF.AbstractFilterKernel
@@ -43,12 +44,12 @@ end
 _weighted_sum(Π::AbstractArray{FT}, w::AbstractArray) where {FT} = mapreduce(*, +, Π, w; init = zero(FT))
 
 """
-    _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; mask=nothing, return_diagnostics=false,
+    _cg_flux_workspace(velocity_fields, coords_vecs, ℓ, filter; mask=nothing, diagnostics=nothing,
                        mask_strategy=ZeroFill(), vector_filter=nothing, execution=AutoBackend(), radius=nothing)
 
 Build the reusable CGEF `StructuredGrid`, its `ΠWorkspace`, the derivative + filter plans (fixed for
-the given `(filter, scale ℓ, mask_strategy, execution)`), the `Π_ℓ(x)` output buffer, and (when
-`return_diagnostics`) the `τ̄`/`S̄` diagnostic buffers, wrapped in a `CoarseGrainingFluxWorkspace`.
+the given `(filter, scale ℓ, mask_strategy, execution)`), the `Π_ℓ(x)` output buffer, and (under
+`diagnostics = StressStrain()`) the `τ̄`/`S̄` diagnostic buffers, wrapped in a `CoarseGrainingFluxWorkspace`.
 Supports 2D/3D Cartesian grids (or a lon–lat sphere with `radius`) from tuple inputs. `vector_filter` is
 CGEF's filter of vectors and tensors, `nothing` for the one `CGEF.Filtering.resolve_vector_filter`
 resolves for the grid and `mask_strategy`.
@@ -58,7 +59,7 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
     coords_vecs::Tuple,
     ℓ::Real,
     filter::FIT.Types.AbstractFilter;
-    return_diagnostics::Bool = false,
+    diagnostics::Union{Nothing, FIT.Types.StressStrain} = nothing,
     mask::Union{Nothing, AbstractArray{Bool}} = nothing,
     radius::Union{Nothing, Real} = nothing,
     execution::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
@@ -91,7 +92,7 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
         geom = CGEF.FlowGeometries.Geometry.SphericalGeometry(FT(radius))
         CGEF.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs[1], coords_vecs[2]; mask = mask)
     end
-    return _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagnostics, execution, mask_strategy,
+    return _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, diagnostics, execution, mask_strategy,
                                  vector_filter)
 end
 
@@ -109,18 +110,32 @@ function FIT.CoarseGrainingFlux._cg_flux_workspace(
     grid::CGEF.FlowGeometries.Grids.AbstractGrid,
     ℓ::Real,
     filter::FIT.Types.AbstractFilter;
-    return_diagnostics::Bool = false,
+    diagnostics::Union{Nothing, FIT.Types.StressStrain} = nothing,
     execution::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
     mask_strategy::CGEF.Filtering.AbstractMaskStrategy = CGEF.Filtering.ZeroFill(),
     vector_filter::Union{Nothing, CGEF.Filtering.AbstractVectorFilter} = nothing,
 )
-    return _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagnostics, execution, mask_strategy,
+    return _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, diagnostics, execution, mask_strategy,
                                  vector_filter)
 end
 
+# A threaded batch's first workspace: applied serially, its filter's tables built on the threads CGEF's batch builds
+# lend (`Filtering._BATCH_BUILD`).
+FIT.CoarseGrainingFlux._cg_batch_base(velocity_fields::Tuple, geometry, ℓ::Real, filter::FIT.Types.AbstractFilter;
+                                      kwargs...) =
+    Base.ScopedValues.with(CGEF.Filtering._BATCH_BUILD => CGEF.ComputationalBackends.ThreadedBackend()) do
+        FIT.CoarseGrainingFlux._cg_flux_workspace(velocity_fields, geometry, ℓ, filter; kwargs...,
+                                                  execution = CGEF.ComputationalBackends.SerialBackend())
+    end
+
+# The `(ns…, D, D)` stress and strain buffers `diagnostics` asks for, `nothing` for none.
+_diagnostic_buffers(::Nothing, _zeros, _ns, _D) = nothing
+_diagnostic_buffers(::FIT.Types.StressStrain, zeros_at::F, ns::Tuple, D::Int) where {F} =
+    (zeros_at(ns..., D, D), zeros_at(ns..., D, D))
+
 # Shared tail of both workspace builders: everything downstream of having a grid. The stress/strain rank
 # is the number of velocity components, which a flat unstructured field does not carry in its own shape.
-function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagnostics, backend, mask_strategy,
+function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, diagnostics_kind, backend, mask_strategy,
                                vector_filter)
     FT = eltype(velocity_fields[1])
     D  = length(velocity_fields)
@@ -142,14 +157,27 @@ function _cg_workspace_on_grid(velocity_fields, grid, ℓ, filter, return_diagno
     loops = workspace.at.execution
     zeros_at(dims...) = fill!(CGEF.FlowGeometries.Execution.allocate(loops, FT, dims...), zero(FT))
     Π_out = zeros_at(ns...)
-    diagnostics = return_diagnostics ? (zeros_at(ns..., D, D), zeros_at(ns..., D, D)) : nothing
-    deriv_plan = CGEF.Derivatives.derivative_plan(CGEF.Diagnostics.output_grid(grid, filter_plan); execution = loops)
+    diagnostics = _diagnostic_buffers(diagnostics_kind, zeros_at, ns, D)
+    deriv_plan =CGEF.Derivatives.derivative_plan(CGEF.Diagnostics.output_grid(grid, filter_plan); execution = loops)
     weights = CGEF.FlowGeometries.Execution.on_backend(loops, _mean_weights(grid, filter_plan, FT, ns))
     stage = map(f -> FIT.Types._staging_buffer(loops, f), velocity_fields)
 
     return FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
         grid, workspace, Π_out, diagnostics, deriv_plan, filter_plan, kernel, FT(ℓ), weights, stage)
 end
+
+# The grid, the derivative plan and the mean's weights shared; CGEF's worker copies of the filter plan and the flux
+# workspace, which share their tables; the output, diagnostics and staging buffers the copy's own.
+FIT.Workspaces._worker_copy(ws::FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace) =
+    FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(
+        ws.grid, CGEF.Filtering.worker_copy(ws.cgef_workspace), zero(ws.Π_out), _fresh_pair(ws.diagnostics),
+        ws.deriv_plan, CGEF.Filtering.worker_copy(ws.filter_plan), ws.kernel, ws.scale, ws.weights,
+        map(_fresh_stage, ws.stage))
+
+_fresh_pair(::Nothing) = nothing
+_fresh_pair(d::Tuple) = map(zero, d)
+_fresh_stage(::Nothing) = nothing
+_fresh_stage(a::AbstractArray) = similar(a)
 
 # Scatter the CGEF workspace's symmetric stress/strain components into the (ns..., nd, nd) buffers.
 function _fill_diagnostics!(τ_arr, S_arr, w, ::Val{2})
@@ -268,6 +296,99 @@ function FIT.CoarseGrainingFlux.calculate_band_energies(
     return CGEF.Diagnostics.band_energies(velocity_fields[1], velocity_fields[2], _vertical(velocity_fields), grid,
                                           _to_cgef_kernel(filter), collect(FT, scales);
                                           vector_filter = vector_filter, kwargs...)
+end
+
+# ---------------------------------------------------------------------------
+# The scattered coarse-graining flux: the samples as a periodic node set of the box `Ls`, each sample
+# standing for its weight's volume, filtered by CGEF's nonuniform-FFT plan on the box's `ms` modes. The
+# plan's transfer is refilled per call (`rescale!`); the strain is the derivative of the filtered series.
+# ---------------------------------------------------------------------------
+
+# The vertical-velocity template of a workspace for `D` components.
+_vertical_template(::Val{2}, ::Type, _) = nothing
+_vertical_template(::Val{3}, ::Type{FT}, N) where {FT} = zeros(FT, N)
+
+# The samples' volumes: `weights`, or `∏L/N` each.
+_sample_volumes(::Nothing, ::Type{FT}, N, Ls) where {FT} = fill(FT(prod(Ls)) / N, N)
+function _sample_volumes(w::AbstractVector, ::Type{FT}, N, _) where {FT}
+    length(w) == N || throw(DimensionMismatch("weights has length $(length(w)) for $N samples"))
+    all(isfinite, w) || throw(ArgumentError("weights must be finite"))
+    return collect(FT, w)
+end
+
+function FIT._nufft_cg_workspace(
+    scatter_coords::Tuple, ms::Tuple;
+    transform::CGEF.SpectralBackends.AbstractNonUniformFastFourierTransformSpectralBackend,
+    Ls::Tuple,
+    tol::Union{Nothing,Real} = nothing,
+    weights::Union{Nothing,AbstractVector} = nothing,
+    diagnostics::Union{Nothing, FIT.Types.StressStrain} = nothing,
+    execution::CGEF.ComputationalBackends.AbstractExecutionBackend = CGEF.ComputationalBackends.AutoBackend(),
+)
+    N = FIT._scattered_npoints(scatter_coords, ms, Ls)
+    D = length(scatter_coords)
+    D in (2, 3) || throw(ArgumentError("the scattered coarse-graining flux takes 2 or 3 dimensions; got $D"))
+    FT = float(eltype(first(scatter_coords)))
+    volumes = _sample_volumes(weights, FT, N, Ls)
+    grid = CGEF.FlowGeometries.Grids.UnstructuredGrid(
+        CGEF.FlowGeometries.Geometry.CartesianGeometry{FT}(), map(c -> collect(FT, c), scatter_coords), volumes;
+        topology = map(_ -> CGEF.FlowGeometries.Grids.Periodic(), scatter_coords), period = map(FT, Ls))
+    # Built at the box's smallest period; every call refills the transfer for its own kernel and scale.
+    filter_plan = CGEF.Filtering.plan_filter(grid, CGEF.Kernels.GaussianKernel(), FT(minimum(Ls));
+                                             method = CGEF.Filtering.Spectral(), transform = FIT._nufft_library(transform),
+                                             modes = map(Int, ms), tol = tol, execution = execution)
+    loops = CGEF.Filtering.plan_execution(filter_plan)
+    workspace = CGEF.Diagnostics.ΠWorkspace(grid, (), _vertical_template(Val(D), FT, N); execution = loops)
+    zeros_at(dims...) = fill!(CGEF.FlowGeometries.Execution.allocate(loops, FT, dims...), zero(FT))
+    route = CGEF.Diagnostics.derivative_route(grid, filter_plan, zeros_at(N))
+    Π_out = zeros_at(N)
+    buffers = _diagnostic_buffers(diagnostics, zeros_at, (N,), D)
+    mean_weights = CGEF.FlowGeometries.Execution.on_backend(loops, volumes ./ sum(volumes))
+    stage = map(_ -> FIT.Types._staging_buffer(loops, zeros(FT, N)), scatter_coords)
+    return FIT.NUFFTCoarseGrainingWorkspace(grid, filter_plan, workspace, route, Π_out, buffers, mean_weights, stage,
+                                            map(Int, ms))
+end
+
+function FIT._nufft_cg_flux!(ws::FIT.NUFFTCoarseGrainingWorkspace, velocity_fields::Tuple, ℓ::Real,
+                             filter::FIT.Types.AbstractFilter, ms::Tuple)
+    Π_out = ws.Π_out
+    FT = eltype(Π_out)
+    map(Int, ms) == ws.modes || throw(DimensionMismatch("this workspace holds the modes $(ws.modes); got $ms"))
+    length(velocity_fields) == length(ws.stage) || throw(ArgumentError(
+        "this workspace was built for $(length(ws.stage)) velocity components; got $(length(velocity_fields))"))
+    all(f -> length(f) == length(Π_out), velocity_fields) || throw(DimensionMismatch(
+        "velocity components of lengths $(map(length, velocity_fields)) for $(length(Π_out)) samples"))
+    kernel = _to_cgef_kernel(filter)
+    CGEF.Filtering.rescale!(ws.filter_plan, kernel, FT(ℓ))
+    fields = map(FIT.Types._staged!, ws.stage, velocity_fields)
+    CGEF.Diagnostics.compute_Π!(Π_out, fields[1], fields[2], _vertical(fields), ws.grid, kernel, FT(ℓ);
+                                workspace = ws.cgef_workspace, filter_plan = ws.filter_plan, deriv_plan = ws.analysis)
+    return _nufft_cg_result(ws.diagnostics, ws, FT(ℓ), FT(_weighted_sum(Π_out, ws.weights)), Val(length(velocity_fields)))
+end
+
+_nufft_cg_result(::Nothing, ws, ℓ, mean_Π, _) = FIT.Types.CoarseGrainingFluxResult(ℓ, ws.Π_out, mean_Π)
+function _nufft_cg_result(diagnostics::Tuple, ws, ℓ, mean_Π, d::Val)
+    τ_arr, S_arr = diagnostics
+    _fill_diagnostics!(τ_arr, S_arr, ws.cgef_workspace, d)
+    return FIT.Types.CoarseGrainingFluxResultWithDiagnostics(ℓ, ws.Π_out, mean_Π, τ_arr, S_arr)
+end
+
+# As the gridded workspace's copy. Each call refills its plan's transfer (`rescale!`), so the copy's plan holds a
+# transfer of its own, and the route, which holds the spectra a call writes, is built on that plan.
+function FIT.Workspaces._worker_copy(ws::FIT.NUFFTCoarseGrainingWorkspace)
+    p = CGEF.Filtering.worker_copy(ws.filter_plan)
+    plan = CGEF.Filtering.NUFFTFilterPlan(p.grid_plan, copy(p.transfer), p.invrenorm, p.dmass, p.strategy, p.scratch)
+    route = CGEF.Diagnostics.derivative_route(ws.grid, plan, zero(ws.Π_out))
+    return FIT.NUFFTCoarseGrainingWorkspace(ws.grid, plan, CGEF.Filtering.worker_copy(ws.cgef_workspace), route,
+                                            zero(ws.Π_out), _fresh_pair(ws.diagnostics), ws.weights,
+                                            map(_fresh_stage, ws.stage), ws.modes)
+end
+
+function FIT.close!(ws::FIT.NUFFTCoarseGrainingWorkspace)
+    gp = ws.filter_plan.grid_plan
+    FTB.close!(gp.plan)
+    gp.batched === nothing || FTB.close!(gp.batched)
+    return ws
 end
 
 function FIT.CoarseGrainingFlux.calculate_enstrophy_flux(

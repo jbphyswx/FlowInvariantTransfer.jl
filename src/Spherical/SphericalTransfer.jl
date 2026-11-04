@@ -3,6 +3,7 @@ module Spherical
 using ..Types: Types
 using ComputationalBackends: ComputationalBackends
 using SpectralBackends: SpectralBackends
+using FlowTransformBindings: FlowTransformBindings as FTB
 
 export calculate_spherical_transfer, calculate_spherical_transfer!,
        SphericalTransferWorkspace, ScatteredSphericalTransferWorkspace,
@@ -146,6 +147,11 @@ function ScatteredSphericalTransferWorkspace(args...; kwargs...)
     throw(ArgumentError("ScatteredSphericalTransferWorkspace requires `using NUFSHT` (scattered points)."))
 end
 
+# The barotropic (`Val(0)`) or divergent (`Val(1)`) workspace on a tensor-product grid's axes, colatitudes `θ` by a
+# full circle of equally spaced longitudes `φ`, its fields `(length(θ), length(φ))` in column-major order, with the
+# scattered workspaces' keywords; a method of the NUFSHT extension.
+function _tensor_transfer_workspace end
+
 """
     spherical_transfer_reduce(degree_of_mode, ψ_lm, ζ_lm, A_lm, lmax) -> SphericalTransferResult
 
@@ -169,51 +175,41 @@ function spherical_transfer_reduce(
     FT = real(eltype(A_lm))
     result = Types.SphericalTransferResult(
         collect(FT, 0:lmax), zeros(FT, lmax + 1), zeros(FT, lmax + 1),
-        zeros(FT, lmax + 1), zeros(FT, lmax + 1), true, 0, zero(FT))
+        zeros(FT, lmax + 1), zeros(FT, lmax + 1), nothing)
     return spherical_transfer_reduce!(result, degree_of_mode, ψ_lm, ζ_lm, A_lm)
 end
 
 """
     with_fit(result, fit) -> result′
 
-`result` with its vectors shared and `fit = (; converged, iterations, residual)`, the outcome of this
-call's fits, in place of its own.
+`result` with its vectors shared and `fit`, the outcome of this call's fits (`nothing` where none ran), in
+place of its own.
 """
-with_fit(r::Types.SphericalTransferResult, fit::NamedTuple) = Types.SphericalTransferResult(
-    r.degrees, r.energy_transfer, r.enstrophy_transfer, r.energy_flux, r.enstrophy_flux,
-    fit.converged, fit.iterations, fit.residual)
+with_fit(r::Types.SphericalTransferResult, fit) = Types.SphericalTransferResult(
+    r.degrees, r.energy_transfer, r.enstrophy_transfer, r.energy_flux, r.enstrophy_flux, fit)
 
-with_fit(r::Types.DivergentSphericalTransferResult, fit::NamedTuple) = Types.DivergentSphericalTransferResult(
+with_fit(r::Types.DivergentSphericalTransferResult, fit) = Types.DivergentSphericalTransferResult(
     r.degrees, r.energy_transfer, r.energy_flux, r.rotational_transfer, r.divergent_transfer,
-    r.rotational_flux, r.divergent_flux, fit.converged, fit.iterations, fit.residual)
-
-"""
-    merge_fits(a, b) -> (; converged, iterations, residual)
-
-The outcome of two fits of one call: converged if both are, the larger iteration count and residual.
-"""
-merge_fits(a::NamedTuple, b::NamedTuple) = (; converged = a.converged & b.converged,
-    iterations = max(a.iterations, b.iterations), residual = max(a.residual, b.residual))
+    r.rotational_flux, r.divergent_flux, r.enstrophy_transfer, r.enstrophy_flux, r.rotational_enstrophy_transfer,
+    r.divergent_enstrophy_transfer, r.rotational_enstrophy_flux, r.divergent_enstrophy_flux, r.enstrophy_source, fit)
 
 """
     with_merged_fit(result, fit) -> result′
 
-`result` with the outcome `fit` merged into its own by [`merge_fits`](@ref); `result` itself when `fit`
+`result` with the outcome `fit` merged into its own by `Types.merge_outcomes`; `result` itself when `fit`
 is `nothing`.
 """
 with_merged_fit(r, ::Nothing) = r
-with_merged_fit(r, fit::NamedTuple) = with_fit(r, merge_fits(
-    (; converged = r.converged, iterations = r.iterations, residual = r.residual),
-    (; converged = fit.converged, iterations = fit.iterations, residual = oftype(r.residual, fit.residual))))
+with_merged_fit(r, fit::FTB.SolverResult) = with_fit(r, Types.merge_outcomes(r.fit, fit))
 
 """
     active_fit(values, s, (θ, φ), active, lmax; tol, rtol, maxiter, nufft, execution) -> (field, fit)
 
 The spin-`s`, degree-`lmax` least-squares fit to `values` at the nodes `active` (linear indices into the
 colatitudes `θ` and longitudes `φ`), evaluated at every node. `values` is read at `active` alone; `field`
-is real for real `values` at `s = 0` and complex otherwise, `u_θ + i u_φ` for `s = 1`, and
-`fit = (; converged, iterations, residual)` is the fit's
-outcome. The keywords are those of the scattered transfer's fits. The NUFSHT extension provides it.
+is real for real `values` at `s = 0` and complex otherwise, `u_θ + i u_φ` for `s = 1`, and `fit` the fit's
+outcome, a `FlowTransformBindings.SolverResult`. The keywords are those of the scattered transfer's fits.
+The NUFSHT extension provides it.
 """
 active_fit(args...; kwargs...) = throw(ArgumentError(
     "the fit over a grid's active cells (`inactive = Types.Exclude()`) runs NUFSHT; " *
@@ -296,8 +292,9 @@ Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = 
 # (Σ|a₊|² = ∫|u|² dΩ, orthonormal). With the spin-(−1) coefficients a₋ of u_θ − i u_φ the field
 # splits into rotational (toroidal) sym = (a₊+a₋)/2 and divergent (spheroidal) anti = (a₊−a₋)/2.
 #
-# Vorticity ζ = k̂·∇×u and divergence δ = ∇·u come from the eth ladder:
-#     ζ_lm = −i √(l(l+1)) sym_lm,   δ_lm = +√(l(l+1)) anti_lm.
+# Vorticity ζ = k̂·∇×u and divergence δ = ∇·u come from the eth ladder, with signs from the extension's
+# spin-harmonic convention; NUFSHT's:
+#     ζ_lm = i √(l(l+1)) sym_lm,   δ_lm = −√(l(l+1)) anti_lm.
 # The advection is taken in the energy-conserving skew-symmetric form of Augier & Lindborg (2013,
 # Appendix A; Eq. 35 of arXiv:1211.0607, with the topography factor β = 1), in Lamb form
 #     A = (u·∇)u + ½ u (∇·u) = ∇(½|u|²) + ζ (k̂×u) + ½ δ u = ∇K + (i ζ + ½ δ) U₊,
@@ -306,7 +303,16 @@ Base.show(io::IO, ::MIME"text/plain", w::ScatteredSphericalTransferWorkspace) = 
 #     T_rot(l) = Σ_m Re{ sym*_lm Â_lm},   T_div(l) = Σ_m Re{ anti*_lm Â_lm},   T = T_rot + T_div,
 # and Π(L) = Σ_{l≤L} T(l). The skew-symmetric ½ δ u term makes Σ_l T = 0 for divergent flow; in the
 # non-divergent limit (δ = 0) T reduces to the barotropic `SphericalTransferMethod` energy transfer.
-# Products are quadratic, of degree up to 2·lmax, so the advection is formed where they are resolved and
+#
+# The enstrophy transfer takes the curl of the advection itself, k̂·∇×((u·∇)u) = k̂·∇×(ζ k̂×u) = ∇·(ζu):
+#     T_Z(l) = Σ_m Re{ ζ*_lm [∇·(ζu)]_lm },   Σ_l T_Z = ∫ζ ∇·(ζu) dΩ = ½∫ζ²δ dΩ,
+# the vorticity's advection by the full velocity, which reduces to the barotropic T_Z when δ = 0. Point by
+# point ζ ∇·(ζu) = ∇·(½ζ²u_ψ) + ∇·(½ζ²u_χ) + ½ζ²δ (u_ψ = k̂×∇ψ, u_χ = ∇χ), and T_Z splits alike:
+#     T_Z^ψ(l) = Σ_m Re{ ζ*_lm [u_ψ·∇ζ]_lm },   T_Z^χ(l) = Σ_m Re{ ζ*_lm [u_χ·∇ζ + ½ζδ]_lm },
+#     S_Z(l) = Σ_m Re{ ζ*_lm [½ζδ]_lm },
+# the transport by the rotational and by the divergent velocity, Σ_l T_Z^ψ = Σ_l T_Z^χ = 0, and the
+# production by the divergence, Σ_l S_Z = ½∫ζ²δ dΩ. The extensions write T_Z, and under `EnstrophySplit()`
+# T_Z^ψ and S_Z, T_Z^χ being the remainder. Products are quadratic, of degree up to 2·lmax, so the advection is formed where they are resolved and
 # projected onto l ≤ lmax. (Augier–Lindborg 2013; Burgess–Erler–Shepherd 2013.)
 #
 # The transform machinery lives in the extensions (FastSphericalHarmonics regular grid; NUFSHT
@@ -345,7 +351,7 @@ struct DivergentSphericalTransferWorkspace{RES, R, RW, CW, RC, PC}
     uφw::RW
     ζw::RW           # (lwork) vorticity / divergence on the work grid
     δw::RW
-    K::RW            # (lwork) kinetic energy ½|u|²
+    K::RW            # (lwork) kinetic energy ½|u|², then ∇·(ζu), u_ψ·∇ζ and ½ζδ in turn
     Adv::CW          # (lwork) complex spin+1 advection A = ∇K + (iζ + ½δ)U₊
     Cw1::CW          # (lwork) spin+1 embed target
     Cw0::RW          # (lwork) spin-0 embed target
@@ -382,12 +388,14 @@ struct ScatteredDivergentSphericalTransferWorkspace{PP, FP, GP, G0, LP, CM, CV, 
     lsmrp::LP        # LSMR workspace of the fit; `nothing` when `qw` makes analysis a projection
     ap::CM; am::CM; sym::CM; anti::CM       # (lmax+1, 2lmax+1) spin±1 coefficients and their split
     wc::CM                                  # spin-0 coefficients of iζ + ½δ
-    Khat::CM                                # spin-0 coefficients of ½|u|²
+    Khat::CM                                # spin-0 coefficients of ½|u|², then of ½ζδ
     Ahat::CM                                # spin+1 advection coefficients
+    Zhat::CM                                # spin+1 coefficients of the vorticity flux ζU₊, then of ζU₊^ψ
     Up::CV                                  # (M,) U₊ at the points
     uθ::RF; uφ::RF                          # (M,) the caller's velocity, copied into the plans' memory
-    Ug::CG; wg::CG; Bg::CG                  # (Mg,) U₊, iζ + ½δ and (iζ + ½δ)U₊ on the grid
-    Kg::RG                                  # (Mg,) ½|u|² on the grid
+    Ug::CG; wg::CG                          # (Mg,) U₊ and iζ + ½δ on the grid
+    Bg::CG                                  # (Mg,) (iζ + ½δ)U₊ on the grid, then ζU₊, then ζU₊^ψ
+    Kg::RG                                  # (Mg,) ½|u|² on the grid, then ½ζδ
     gw::RG                                  # (Mg,) the grid's quadrature weights, `Σ = 4π`
     ladl::DC                                # (lmax+1, 1) ladder √(l(l+1))
     msign::MS                               # (1, 2lmax+1) (−1)^(m+1) per order column
@@ -412,8 +420,11 @@ end
     divergent_transfer_finalize!(result) -> result
 
 Shared finalisation (extension-agnostic): given the per-degree rotational and divergent channel
-transfers already written into `result.rotational_transfer` / `result.divergent_transfer`, fill the
-total `energy_transfer = T_rot + T_div` and all three cumulative fluxes `Π(L) = Σ_{l≤L} T(l)`.
+transfers already written into `result.rotational_transfer` / `result.divergent_transfer`, and the
+enstrophy transfer, its rotational part and its source in `result.enstrophy_transfer`,
+`result.rotational_enstrophy_transfer` and `result.enstrophy_source`, fill the total
+`energy_transfer = T_rot + T_div`, the cumulative fluxes `Π(L) = Σ_{l≤L} T(l)`, and under the split the
+divergent part `T_Z^χ = T_Z − T_Z^ψ − S_Z` and its and `T_Z^ψ`'s fluxes.
 """
 function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferResult)
     Trot = result.rotational_transfer
@@ -425,8 +436,33 @@ function divergent_transfer_finalize!(result::Types.DivergentSphericalTransferRe
     cumsum!(result.energy_flux, T)
     cumsum!(result.rotational_flux, Trot)
     cumsum!(result.divergent_flux, Tdiv)
+    cumsum!(result.enstrophy_flux, result.enstrophy_transfer)
+    _split_finalize!(result, result.divergent_enstrophy_transfer)
     return result
 end
+
+_split_finalize!(_, ::Nothing) = nothing
+function _split_finalize!(result::Types.DivergentSphericalTransferResult, TZχ::AbstractVector)
+    @. TZχ = result.enstrophy_transfer - result.rotational_enstrophy_transfer - result.enstrophy_source
+    cumsum!(result.rotational_enstrophy_flux, result.rotational_enstrophy_transfer)
+    cumsum!(result.divergent_enstrophy_flux, TZχ)
+    return nothing
+end
+
+"""
+    _divergent_result(FT, lmax, enstrophy) -> DivergentSphericalTransferResult
+
+A zeroed result over the degrees `0…lmax` in `FT`, its split fields vectors under `EnstrophySplit()` and
+`nothing` under `EnstrophyTotal()`.
+"""
+function _divergent_result(::Type{FT}, lmax::Integer, enstrophy::Types.AbstractEnstrophyOutput) where {FT}
+    z() = zeros(FT, lmax + 1)
+    s = _split_vectors(enstrophy, z)
+    return Types.DivergentSphericalTransferResult(collect(FT, 0:lmax), z(), z(), z(), z(), z(), z(), z(), z(), s...,
+                                                  nothing)
+end
+_split_vectors(::Types.EnstrophyTotal, _) = (nothing, nothing, nothing, nothing, nothing)
+_split_vectors(::Types.EnstrophySplit, z::F) where {F} = (z(), z(), z(), z(), z())
 
 Base.show(io::IO, ::DivergentSphericalTransferWorkspace) = print(io, "DivergentSphericalTransferWorkspace(…)")
 Base.show(io::IO, ::MIME"text/plain", w::DivergentSphericalTransferWorkspace) = show(io, w)

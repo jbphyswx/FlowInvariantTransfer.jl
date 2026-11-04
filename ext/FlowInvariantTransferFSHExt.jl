@@ -86,7 +86,7 @@ function FIT.Spherical.SphericalTransferWorkspace(::Type{T}, lmax::Integer; radi
     Av = Vector{Float64}(undef, nmode)
     result = FIT.Types.SphericalTransferResult(
         collect(T, 0:lmax), zeros(T, lmax + 1), zeros(T, lmax + 1),
-        zeros(T, lmax + 1), zeros(T, lmax + 1), true, 0, zero(T))
+        zeros(T, lmax + 1), zeros(T, lmax + 1), nothing)
     return FIT.Spherical.SphericalTransferWorkspace(
         Cζ, Cψ, Gψ, Gζ, J, degs, ψv, ζv, Av, _warmed_plans((lmax + 1, Nwork), nthreads), result,
         Float64(radius), Int(lmax), dealias, nthreads)
@@ -229,7 +229,8 @@ function _fsh_embed!(Cbig::AbstractMatrix, Csmall::AbstractMatrix, s::Integer, l
 end
 
 """
-    DivergentSphericalTransferWorkspace(T, lmax; radius=1.0, dealias=true, execution=AutoBackend())
+    DivergentSphericalTransferWorkspace(T, lmax; radius=1.0, dealias=true, enstrophy=EnstrophyTotal(),
+                                        execution=AutoBackend())
 
 Reusable buffers for the regular-grid `calculate_divergent_spherical_transfer!`: the work-grid
 velocity, vorticity, divergence, kinetic energy and advection fields, the two coefficient embed
@@ -237,20 +238,20 @@ targets, the velocity-potential coefficients, and the reused `DivergentSpherical
 FastSphericalHarmonics has no in-place transform API, so each `spinsph_transform`/`evaluate`/`eth`
 allocates its own output. Every work buffer is `Float64`: FSH's spin transforms are defined only on
 `Float64`/`ComplexF64`/`SVector{2,Float64}`, so the transforms run in double precision whatever the
-input element type; the result vectors are in `T`. `execution = ThreadedBackend()` runs the transforms
-on `Threads.nthreads()` threads. Requires `using FastSphericalHarmonics`.
+input element type; the result vectors are in `T`. `enstrophy` is the enstrophy outputs, as for
+`DivergentSphericalTransferMethod`. `execution = ThreadedBackend()` runs the transforms on
+`Threads.nthreads()` threads. Requires `using FastSphericalHarmonics`.
 """
 function FIT.Spherical.DivergentSphericalTransferWorkspace(::Type{T}, lmax::Integer; radius::Real = 1.0, dealias::Bool = true,
+                                                           enstrophy::FIT.Types.AbstractEnstrophyOutput = FIT.Types.EnstrophyTotal(),
                                                            execution::ComputationalBackends.AbstractExecutionBackend =
                                                                ComputationalBackends.AutoBackend()) where {T<:AbstractFloat}
     lmax ≥ 1 || throw(ArgumentError("lmax must be ≥ 1; got $lmax."))
     nthreads = _fsh_threads(execution)
     lwork = dealias ? 2 * lmax : lmax
     Nw = lwork + 1
-    z() = zeros(T, lmax + 1)
     rw() = zeros(Float64, Nw, 2Nw - 1)
-    result = FIT.Types.DivergentSphericalTransferResult(collect(T, 0:lmax), z(), z(), z(), z(), z(), z(),
-                                                        true, 0, zero(T))
+    result = FIT.Spherical._divergent_result(T, lmax, enstrophy)
     return FIT.Spherical.DivergentSphericalTransferWorkspace(
         rw(), rw(), rw(), rw(), rw(),                       # uθw, uφw, ζw, δw, K
         zeros(ComplexF64, Nw, 2Nw - 1), zeros(ComplexF64, Nw, 2Nw - 1), rw(),   # Adv, Cw1, Cw0
@@ -274,6 +275,7 @@ function FIT.calculate_divergent_spherical_transfer!(
     P = ws.plans; n = ws.nthreads
     a₊ = _transform(ComplexF64.(u_θ .+ im .* u_φ), 1, P, n)        # spin+1 velocity coefficients (lmax)
     ζin, δin = _fsh_vort_div(u_θ, u_φ, P, n)                       # vorticity/divergence fields (lmax grid)
+    ζc = _transform(ζin, 0, P, n)                                  # reused for the work grid and for T_Z
     δc = _transform(δin, 0, P, n)                                  # reused for the work grid and for χ
 
     # Evaluate velocity + ζ,δ on the (dealiased) work grid so the quadratic advection is alias-free.
@@ -281,7 +283,7 @@ function FIT.calculate_divergent_spherical_transfer!(
     if ws.dealias
         Uw = _evaluate(_fsh_embed!(ws.Cw1, a₊, 1, lmax), 1, P, n)
         @. uθw = real(Uw); @. uφw = imag(Uw)
-        ζw .= _evaluate(_fsh_embed!(ws.Cw0, _transform(ζin, 0, P, n), 0, lmax), 0, P, n)
+        ζw .= _evaluate(_fsh_embed!(ws.Cw0, ζc, 0, lmax), 0, P, n)
         δw .= _evaluate(_fsh_embed!(ws.Cw0, δc, 0, lmax), 0, P, n)
     else
         copyto!(uθw, u_θ); copyto!(uφw, u_φ); copyto!(ζw, ζin); copyto!(δw, δin)
@@ -311,7 +313,36 @@ function FIT.calculate_divergent_spherical_transfer!(
         Trot[l+1] += (tot - dv) / a
         Tdiv[l+1] += dv / a
     end
+
+    # Enstrophy: ∇·(ζu) = u·∇ζ + ζδ on the work grid (in `K`, read above), analysed and paired with ζ per degree;
+    # the unit-sphere ζ and its pairs carry a and a² (1/a³).
+    ∇ζ = _fsh_nabla(ζw, P, n)
+    @. ws.K = uθw * real(∇ζ) + uφw * imag(∇ζ) + ζw * δw
+    _paired_with_vorticity!(ws.result.enstrophy_transfer, ζc, _transform(ws.K, 0, P, n), lmax, a)
+    _enstrophy_split!(ws, ws.result.rotational_enstrophy_transfer, ∇ζ, anti, ζc)
     return FIT.Spherical.divergent_transfer_finalize!(ws.result)
+end
+
+# `out[l+1] = Σ_m ζ_lm X_lm / a³` over the real spin-0 coefficients of ζ and of `X`.
+function _paired_with_vorticity!(out, ζc, Xc, lmax, a)
+    fill!(out, 0.0)
+    @inbounds for l in 1:lmax, m in -l:l
+        i = FSH.spinsph_mode(0, l, m)
+        out[l+1] += ζc[i] * Xc[i] / a^3
+    end
+    return out
+end
+
+# The split: u_ψ·∇ζ with u_ψ = u − ∇χ, and ½ζδ, on the work grid in `K`.
+_enstrophy_split!(_, ::Nothing, _, _, _) = nothing
+function _enstrophy_split!(ws, TZψ::AbstractVector, ∇ζ, anti, ζc)
+    P = ws.plans; n = ws.nthreads; lmax = ws.lmax; a = ws.radius
+    Uχ = _evaluate(_fsh_embed!(ws.Cw1, anti, 1, lmax), 1, P, n)
+    @. ws.K = (ws.uθw - real(Uχ)) * real(∇ζ) + (ws.uφw - imag(Uχ)) * imag(∇ζ)
+    _paired_with_vorticity!(TZψ, ζc, _transform(ws.K, 0, P, n), lmax, a)
+    @. ws.K = ws.ζw * ws.δw / 2
+    _paired_with_vorticity!(ws.result.enstrophy_source, ζc, _transform(ws.K, 0, P, n), lmax, a)
+    return nothing
 end
 
 """
@@ -319,8 +350,8 @@ end
                               velocity::Tuple{<:AbstractMatrix,<:AbstractMatrix};
                               dealias=true, transform=nothing, execution=AutoBackend())
 
-Divergent horizontal-KE spectral transfer for the full (rotational + divergent) flow on a regular
-colatitude–longitude grid, from the horizontal velocity `(u_θ, u_φ)` on the FastSphericalHarmonics
+Divergent horizontal-KE and enstrophy spectral transfer for the full (rotational + divergent) flow on a
+regular colatitude–longitude grid, from the horizontal velocity `(u_θ, u_φ)` on the FastSphericalHarmonics
 grid — each `size == (lmax+1, 2lmax+1)`. Returns a [`DivergentSphericalTransferResult`](@ref) in the
 field's float type, the transforms running in `Float64`. The advection is dealiased at degree `2·lmax`
 (`dealias=false` skips it). `execution = ThreadedBackend()` runs the transforms on
@@ -342,7 +373,7 @@ function FIT.calculate_energy_transfer(
         "velocity must lie on the FastSphericalHarmonics grid of size (lmax+1, 2lmax+1); got $((Nθ, Nφ))."))
     ws = FIT.Spherical.DivergentSphericalTransferWorkspace(float(promote_type(eltype(u_θ), eltype(u_φ))), Nθ - 1;
                                                            radius = float(method.radius), dealias = dealias,
-                                                           execution = execution)
+                                                           enstrophy = method.enstrophy, execution = execution)
     return FIT.calculate_divergent_spherical_transfer!(ws, u_θ, u_φ)
 end
 

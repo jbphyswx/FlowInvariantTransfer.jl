@@ -35,9 +35,8 @@ binning = FIT.Types.LinearBinning(2π / L)
 ref = FIT.SpectralFlux.calculate_spectral_flux(û, ks; binning = binning,
         dealiasing = FIT.Types.OrszagTwoThirds(), transform = SpectralBackends.FFTSpectralBackend())
 
-axis = range(0.0; step = L / N, length = N)
-grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), axis, axis;
-    topology = (FG.Grids.Periodic(), FG.Grids.Periodic()))
+axis = FG.Axes.PeriodicUniformAxis(0.0, L, N)
+grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), axis, axis)
 split = FG.Decomposition.split_grid(grid, ComputationalBackends.MPIBackend(; comm); dims = (2,), halo = 2)
 upen = map(u -> FG.Decomposition.distribute(split, u), Uphys)
 res = FIT.pencil_spectral_flux(upen; binning = binning,

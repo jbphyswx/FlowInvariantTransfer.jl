@@ -15,6 +15,9 @@ FlowInvariantTransfer.Types.CoarseGrainingFluxMethod
 FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionMethod
 FlowInvariantTransfer.Types.SphericalTransferMethod
 FlowInvariantTransfer.Types.DivergentSphericalTransferMethod
+FlowInvariantTransfer.Types.AbstractEnstrophyOutput
+FlowInvariantTransfer.Types.EnstrophyTotal
+FlowInvariantTransfer.Types.EnstrophySplit
 ```
 
 ## Invariant Types
@@ -64,6 +67,7 @@ FlowInvariantTransfer.Types.CompressibleFluxResult
 FlowInvariantTransfer.Types.ShellToShellResult
 FlowInvariantTransfer.Types.ModeToModeTriadResult
 FlowInvariantTransfer.Types.CoarseGrainingFluxResult
+FlowInvariantTransfer.Types.StressStrain
 FlowInvariantTransfer.Types.CoarseGrainingFluxResultWithDiagnostics
 FlowInvariantTransfer.Types.TriadicOrthogonalDecompositionResult
 FlowInvariantTransfer.Types.SphericalTransferResult

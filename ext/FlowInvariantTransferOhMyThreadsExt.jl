@@ -43,8 +43,9 @@ function _partials!(buffers::AbstractVector, proto, n::Int)
     return buffers
 end
 
-# Each threaded method below chunks its loop and gives every chunk its own single-threaded workspace,
-# built serially before the parallel region unless noted; the tasks write disjoint parts of the output.
+# Each threaded method below chunks its loop and gives every chunk its own single-threaded workspace, built
+# serially before the parallel region: the spectral, shell, band and coarse-graining batches' are one workspace and
+# worker copies sharing its tables (`Workspaces._worker_copy`). The tasks write disjoint parts of the output.
 
 # ---------------------------------------------------------------------------
 # Thread-parallel shell-to-shell transfer (OhMyThreads scheduler)
@@ -173,8 +174,9 @@ end
 # ---------------------------------------------------------------------------
 # Thread-parallel spectral-flux batch (snapshots are the outer parallel axis)
 # ---------------------------------------------------------------------------
-# Overrides the core `_spectral_flux_batch_threaded!` stub. Each chunk reuses one `SpectralFluxWorkspace`
-# across its snapshots with single-threaded transforms, bit-identical to the serial batch.
+# Overrides the core `_spectral_flux_batch_threaded!` stub. One `SpectralFluxWorkspace`, and a worker copy of it per
+# further chunk sharing its plans and shell table, each reused across its chunk's snapshots with single-threaded
+# transforms, bit-identical to the serial batch.
 function FIT.SpectralFlux._spectral_flux_batch_threaded!(
     results, velocity_hats, ks, shell_idx;
     binning, dealiasing, invariant, transform, geometry, form,
@@ -183,8 +185,8 @@ function FIT.SpectralFlux._spectral_flux_batch_threaded!(
     û1 = first(velocity_hats)
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    pool = [FIT.Workspaces.SpectralFluxWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing)
-            for _ in 1:length(rngs)]
+    pool = _worker_pool(FIT.Workspaces.SpectralFluxWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing),
+                        length(rngs))
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         ws = pool[ci]
         for i in rngs[ci]
@@ -199,8 +201,9 @@ end
 # ---------------------------------------------------------------------------
 # Thread-parallel shell-to-shell batch (snapshots are the outer parallel axis)
 # ---------------------------------------------------------------------------
-# Overrides `_shell_to_shell_batch_threaded!`. Each chunk reuses one ShellToShellWorkspace across its
-# snapshots with a serial transform, bit-identical to the serial batch.
+# Overrides `_shell_to_shell_batch_threaded!`. One ShellToShellWorkspace, and a worker copy of it per further chunk
+# sharing its plans and shell table, each reused across its chunk's snapshots with a serial transform, bit-identical
+# to the serial batch.
 function FIT.ShellToShellTransfer._shell_to_shell_batch_threaded!(
     results, velocity_hats, ks, centers, edges, N_sh;
     binning, dealiasing, invariant, transform, geometry,
@@ -210,8 +213,8 @@ function FIT.ShellToShellTransfer._shell_to_shell_batch_threaded!(
     FT = real(eltype(û1))
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    pool = [FIT.Workspaces.ShellToShellWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing)
-            for _ in 1:length(rngs)]
+    pool = _worker_pool(FIT.Workspaces.ShellToShellWorkspace(û1, ks, binning; geometry = geometry, dealiasing = dealiasing),
+                        length(rngs))
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         ws = pool[ci]
         for i in rngs[ci]
@@ -229,15 +232,15 @@ end
 # ---------------------------------------------------------------------------
 # Thread-parallel partial-flux batch (snapshots are the outer parallel axis)
 # ---------------------------------------------------------------------------
-# Overrides `_partial_fluxes_batch_threaded!`. One nonlinear-term workspace per chunk, built before the
-# parallel region and reused across that chunk's snapshots with a serial inner transform.
+# Overrides `_partial_fluxes_batch_threaded!`. One spectral-flux workspace and its worker copies, built before the
+# parallel region and each reused across its chunk's snapshots with a serial inner transform.
 function FIT.SpectralFlux._partial_fluxes_batch_threaded!(velocity_hats, ks;
                                                           dealiasing, binning, geometry, kwargs...)
     n = length(velocity_hats)
     û1 = first(velocity_hats)
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    pool = [FIT.Workspaces.SpectralFluxWorkspace(û1, ks, binning; dealiasing, geometry) for _ in eachindex(rngs)]
+    pool = _worker_pool(FIT.Workspaces.SpectralFluxWorkspace(û1, ks, binning; dealiasing, geometry), length(rngs))
     chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
         [FIT.SpectralFlux.calculate_partial_fluxes!(pool[ci], velocity_hats[i], ks; dealiasing = dealiasing,
              execution = ComputationalBackends.SerialBackend(), kwargs...)
@@ -246,26 +249,33 @@ function FIT.SpectralFlux._partial_fluxes_batch_threaded!(velocity_hats, ks;
     return reduce(vcat, chunk_results)
 end
 
-# Overrides `_nufft_cg_batch_threaded!`. One NUFFT workspace (plans + buffers) per chunk, built inside
-# its task, reused across that chunk's snapshots and closed when the chunk ends. Each result is copied out because
-# `nufft_coarse_graining_flux!` wraps the workspace's own `Π`, which the chunk's next snapshot overwrites.
-function FIT._nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms;
-                                       transform, Ls, return_diagnostics::Bool = false, kwargs...)
+# The workspaces of a batch's `n` chunks: `ws` and `n − 1` worker copies sharing its tables.
+_worker_pool(ws, n::Int) = [i == 1 ? ws : FIT.Workspaces._worker_copy(ws) for i in 1:n]
+
+# Overrides `_nufft_cg_batch_threaded!`. One NUFFT workspace, and a worker copy of it per further chunk (its own
+# library plans and buffers), each reused across its chunk's snapshots and closed when the batch ends. Each result
+# is copied out because `nufft_coarse_graining_flux!` wraps the workspace's own `Π`, which the chunk's next snapshot
+# overwrites.
+function FIT._nufft_cg_batch_threaded!(batch, scatter_coords, ℓ, filter, ms; transform, Ls, kwargs...)
     n = length(batch)
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
-        ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform = transform, Ls = Ls,
-                                              return_diagnostics = return_diagnostics, kwargs...)
-        try
-            [deepcopy(FIT.nufft_coarse_graining_flux!(ws, batch[i], ℓ, filter, ms;
-                                                      return_diagnostics = return_diagnostics))
-             for i in rngs[ci]]
-        finally
-            FIT.close!(ws)
-        end
+    ws = FIT.NUFFTCoarseGrainingWorkspace(scatter_coords, ms; transform = transform, Ls = Ls, kwargs...,
+                                          execution = FIT.ComputationalBackends.SerialBackend())
+    pool = try
+        _worker_pool(ws, length(rngs))
+    catch
+        FIT.close!(ws)
+        rethrow()
     end
-    return reduce(vcat, chunk_results)
+    try
+        chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
+            [deepcopy(FIT.nufft_coarse_graining_flux!(pool[ci], batch[i], ℓ, filter, ms)) for i in rngs[ci]]
+        end
+        return reduce(vcat, chunk_results)
+    finally
+        foreach(FIT.close!, pool)
+    end
 end
 
 # Overrides `_compressible_batch_threaded!`. Each chunk reuses one CompressibleWorkspace across its
@@ -295,8 +305,9 @@ function FIT.Compressible._compressible_batch_threaded!(
     return reduce(vcat, chunk_results)
 end
 
-# Overrides `_band_to_band_batch_threaded!`. Each chunk reuses one BandTransferWorkspace across its
-# snapshots with a serial transform, bit-identical to the serial batch.
+# Overrides `_band_to_band_batch_threaded!`. One BandTransferWorkspace, and a worker copy of it per further chunk
+# sharing its plans and band weights, each reused across its chunk's snapshots with a serial transform,
+# bit-identical to the serial batch.
 function FIT.BandTransfer._band_to_band_batch_threaded!(
     results, velocity_hats, ks, bands, nb;
     dealiasing, invariant, transform, geometry,
@@ -305,8 +316,8 @@ function FIT.BandTransfer._band_to_band_batch_threaded!(
     û1 = first(velocity_hats)
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    pool = [FIT.BandTransfer.BandTransferWorkspace(û1, ks, bands; geometry = geometry, dealiasing = dealiasing)
-            for _ in 1:length(rngs)]
+    pool = _worker_pool(FIT.BandTransfer.BandTransferWorkspace(û1, ks, bands; geometry = geometry, dealiasing = dealiasing),
+                        length(rngs))
     OhMyThreads.tforeach(eachindex(rngs)) do ci
         bws = pool[ci]
         for i in rngs[ci]
@@ -324,16 +335,16 @@ end
 # ---------------------------------------------------------------------------
 # Thread-parallel coarse-graining batch (snapshots are the outer parallel axis)
 # ---------------------------------------------------------------------------
-# Overrides `_cg_flux_batch_threaded!`. Each chunk reuses one config-fixed workspace (grid + CGEF plans)
-# across its snapshots, filtering each one on `SerialBackend()`. Each result is deep-copied so it does
-# not alias the reused output buffer, and the chunks concatenate in input order.
+# Overrides `_cg_flux_batch_threaded!`. One config-fixed workspace (grid + CGEF plans), its filter's tables built on
+# the threads, and a worker copy of it per further chunk sharing its tables, each reused across its chunk's snapshots,
+# filtering each one on `SerialBackend()`. Each result is deep-copied so it does not alias the reused output buffer,
+# and the chunks concatenate in input order.
 function FIT.CoarseGrainingFlux._cg_flux_batch_threaded!(velocity_fields_batch, coords_vecs, ℓ, filter; kwargs...)
     n = length(velocity_fields_batch)
     nchunks = max(1, min(Threads.nthreads(), n))
     rngs = collect(OhMyThreads.index_chunks(1:n; n = nchunks))
-    pool = [FIT.CoarseGrainingFlux.CoarseGrainingFluxWorkspace(velocity_fields_batch[first(rng)], coords_vecs, ℓ, filter;
-                                                               kwargs..., execution = FIT.ComputationalBackends.SerialBackend())
-            for rng in rngs]
+    base = FIT.CoarseGrainingFlux._cg_batch_base(first(velocity_fields_batch), coords_vecs, ℓ, filter; kwargs...)
+    pool = _worker_pool(base, length(rngs))
     chunk_results = OhMyThreads.tmap(eachindex(rngs)) do ci
         ws = pool[ci]
         [deepcopy(FIT.CoarseGrainingFlux.calculate_coarse_graining_flux!(ws, velocity_fields_batch[i])) for i in rngs[ci]]

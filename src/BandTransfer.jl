@@ -127,6 +127,11 @@ end
 
 _band_tables(proto, W::BandWeights) = W
 
+# A batch worker's copy: the band weights shared, the nonlinear term's and the reduction's buffers its own.
+Workspaces._worker_copy(ws::BandTransferWorkspace) =
+    BandTransferWorkspace(Workspaces._worker_copy(ws.nlt), similar(ws.f_m), similar(ws.d), ws.W, ws.centers,
+                          similar(ws.Dq), similar(ws.column), empty(ws.partials))
+
 """
     calculate_band_to_band_transfer!(T, net, bws::BandTransferWorkspace, velocity_hat, ks; kwargs...)
 

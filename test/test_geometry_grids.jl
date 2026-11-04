@@ -43,15 +43,14 @@ Test.@testset "coarse-graining on a FlowGeometries grid" begin
 
     Test.@testset "3D structured" begin
         N = 24
-        x = range(0, L; length = N + 1)[1:N]; y = copy(x); z = copy(x)
+        x = FG.Axes.PeriodicUniformAxis(0.0, L, N); y = copy(x); z = copy(x)
         X = [xi for xi in x, _ in y, _ in z]; Y = [yj for _ in x, yj in y, _ in z]
         Z = [zk for _ in x, _ in y, zk in z]
         u = _gg_u(X, Y) .* cos.(Z); v = _gg_v(X, Y) .* cos.(Z); w = sin.(X) .* sin.(Z)
         ℓ = 8 * (L / N)
         # Periodic, as the fields are: on a bounded box `ZeroFill` takes the exterior as zero velocity,
         # so a uniform flow filters to one that falls off at the walls and carries strain there.
-        grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, y, z;
-                                       topology = (FG.Grids.Periodic(), FG.Grids.Periodic(), FG.Grids.Periodic()))
+        grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), x, y, z)
         r = FIT.calculate_coarse_graining_flux((u, v, w), grid, ℓ, filt)
         Test.@test maximum(abs, r.flux_field) > 1e-6
         rc = FIT.calculate_coarse_graining_flux(

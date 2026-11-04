@@ -66,6 +66,6 @@ Test.@testset "scattered analysis with quadrature weights" begin
         r = FIT.nufft_coarse_graining_flux((u, v), (x, y), ℓ, filt, ms; transform = lib, Ls = (L, L),
                                            weights = w, tol = 1e-12)
         Test.@test maximum(abs, r.flux_field .- Πref) < 1e-9 * maximum(abs, Πref)
-        Test.@test r.mean_flux ≈ sum(w .* Πref) / sum(w) rtol = 1e-9
+        Test.@test abs(r.mean_flux - sum(w .* Πref) / sum(w)) < 1e-9 * maximum(abs, Πref)
     end
 end

@@ -165,6 +165,24 @@ end
 density_buffer(ws::NonlinearTermWorkspace, ks) =
     view(ws.g_phys, map(Base.OneTo, FTB.spectral_size(ks))...)
 
+# The plan bundle of a worker copy whose padded grid is `pad`: the plans and their tables shared, the scratch the
+# transforms write the copy's own. The FFTW extension adds its bundles' methods.
+_worker_plans(::Nothing, _pad) = nothing
+
+_worker_pad(::Nothing) = nothing
+function _worker_pad(p::PaddedGrid)
+    spec = similar(p.spec)
+    return PaddedGrid(p.ks, p.maps, p.kd, similar(p.u_phys), similar(p.g_phys), similar(p.n_phys), spec,
+                      reshape(spec, size(p.spec1)), p.invM)
+end
+
+function _worker_copy(ws::NonlinearTermWorkspace)
+    pad = _worker_pad(ws.pad)
+    return _with_execution_state(NonlinearTermWorkspace(similar(ws.u_phys), similar(ws.g_phys), similar(ws.N_phys),
+                                                        similar(ws.N̂), map(similar, ws.phase), pad,
+                                                        _worker_plans(ws.plans, pad), ws.operators, nothing))
+end
+
 # ---------------------------------------------------------------------------
 # SpectralFluxWorkspace
 # ---------------------------------------------------------------------------
@@ -179,15 +197,14 @@ Preallocated buffers and shell tables for `calculate_spectral_flux!` and `calcul
 - `T_spec::V`:            Shell transfer spectrum buffer (length N_sh), in the field's array type.
 - `flux::V`:              Cumulative flux buffer (length N_sh).
 - `shell_idx`: cached mode-to-shell table in the field's memory.
-- `partials`, `processes`: retained thread and worker state, filled on first use.
+- `partials`: retained thread state, filled on first use.
 """
-struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector, SI, PV, RP, CE, ED}
+struct SpectralFluxWorkspace{NW<:NonlinearTermWorkspace, V<:AbstractVector, SI, PV, CE, ED}
     nonlinear::NW
     T_spec::V
     flux::V
     shell_idx::SI
     partials::PV
-    processes::RP
     centers::CE
     edges::ED
 end
@@ -216,14 +233,16 @@ function SpectralFluxWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
         similar(velocity_hat, FT, N_sh),     # flux
         stored,
         typeof(T_spec)[],
-        _process_slots(velocity_hat),
         collect(ShellBinning.shell_centers(binning, kmax)),
         edges,
     )
 end
 
-_process_slots(proto) = nothing
-release!(ws) = nothing
+# The workspace one more concurrent worker of a batch runs on beside `ws`: its tables shared, every buffer a call
+# writes its own. Methods where each workspace type is built.
+_worker_copy(ws::SpectralFluxWorkspace) =
+    SpectralFluxWorkspace(_worker_copy(ws.nonlinear), similar(ws.T_spec), similar(ws.flux), ws.shell_idx,
+                          empty(ws.partials), ws.centers, ws.edges)
 
 # ---------------------------------------------------------------------------
 # ShellToShellWorkspace
@@ -282,6 +301,10 @@ function ShellToShellWorkspace(velocity_hat, ks, binning::Types.AbstractShellBin
         typeof(net)[],
     )
 end
+
+_worker_copy(ws::ShellToShellWorkspace) =
+    ShellToShellWorkspace(_worker_copy(ws.nonlinear), similar(ws.û_m), similar(ws.T_mat), similar(ws.net_transfer),
+                          ws.shell_idx, empty(ws.partials))
 
 # One-line `show` for plan-owning structs: the default field-by-field show of a struct holding an FFTW
 # plan can crash in `fftw_sprint_plan` (after `close!`, or across a Distributed transfer).

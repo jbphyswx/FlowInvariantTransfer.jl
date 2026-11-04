@@ -45,9 +45,10 @@ flux Π(K) from Fourier-space velocity data.
     - `ComputationalBackends.SerialBackend()` — host scalar reduction.
     - `ComputationalBackends.ThreadedBackend()` (requires `using OhMyThreads`) — the mode→shell scatter is split into chunks
       with per-chunk partial shell sums (race-free), an `O(Nᴰ)` parallel pass.
-    - `ComputationalBackends.DistributedBackend()` (requires `using Distributed`) — the scatter is partitioned across worker
-      processes and `+`-reduced; the nonlinear-term FFTs stay on the calling process. A grid too large
-      for one node takes [`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux) (PencilFFTs).
+    - `ComputationalBackends.DistributedBackend(inner)` — a field held on the calling process is computed there
+      under `inner`; [`calculate_spectral_flux_batch`](@ref) divides snapshots among the workers. A grid too
+      large for one node takes [`pencil_spectral_flux`](@ref FlowInvariantTransfer.pencil_spectral_flux)
+      (PencilFFTs) on a field split over MPI ranks.
     - `ComputationalBackends.GPUBackend(dev)` (requires `using KernelAbstractions`) — the transfer density is written by a device
       kernel and reduced per shell on-device, so a device-resident field stays on the GPU; host fields
       are copied to `dev` once per call.
@@ -140,9 +141,10 @@ function _calculate_spectral_flux_decomposed(
     geometry::Types.AbstractShellGeometry,
     form::Types.AbstractNonlinearForm,
 )
-    # Single-field method with no threaded outer loop, so `ThreadedBackend` threads the FFTs.
+    # Single-field method with no threaded outer loop, so a threaded local backend threads the FFTs.
+    threaded  = ComputationalBackends.local_backend(execution) isa ComputationalBackends.ThreadedBackend
     ws        = Workspaces.SpectralFluxWorkspace(velocity_hat, ks, binning; geometry=geometry, dealiasing=dealiasing,
-                                       fft_nthreads = execution isa ComputationalBackends.ThreadedBackend ? Threads.nthreads() : 1)
+                                       fft_nthreads = threaded ? Threads.nthreads() : 1)
     edges     = ws.edges
     centers   = ws.centers
     shell_idx = ws.shell_idx
@@ -150,20 +152,16 @@ function _calculate_spectral_flux_decomposed(
     result    = Types.SpectralFluxResult(centers, edges, similar(centers, RT, length(centers)),
                                          similar(centers, RT, length(centers)))
 
-    try
-        if û_decomp === velocity_hat
-            calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
-                                      dealiasing=dealiasing, invariant=invariant, transform=spectral,
-                                      execution=execution, advecting_hat=advecting_hat, form=form)
-        else
-            _flux_term!(ws.nonlinear, velocity_hat, ks, form; dealiasing=dealiasing, transform=spectral,
-                        advecting_hat=advecting_hat)
-            _calculate_spectral_flux_with_N̂!(result, ws, û_decomp, ws.nonlinear.N̂, ks, shell_idx, execution; invariant=invariant)
-        end
-        return result
-    finally
-        Workspaces.release!(ws)
+    if û_decomp === velocity_hat
+        calculate_spectral_flux!(result, ws, velocity_hat, ks, shell_idx;
+                                  dealiasing=dealiasing, invariant=invariant, transform=spectral,
+                                  execution=execution, advecting_hat=advecting_hat, form=form)
+    else
+        _flux_term!(ws.nonlinear, velocity_hat, ks, form; dealiasing=dealiasing, transform=spectral,
+                    advecting_hat=advecting_hat)
+        _calculate_spectral_flux_with_N̂!(result, ws, û_decomp, ws.nonlinear.N̂, ks, shell_idx, execution; invariant=invariant)
     end
+    return result
 end
 
 function _calculate_spectral_flux_decomposed(
@@ -189,15 +187,11 @@ function _calculate_spectral_flux_decomposed(
     shell_idx = ws.shell_idx
     RT        = real(eltype(velocity_hat))
 
-    try
-        return map(decomposed) do û_comp
-            res = Types.SpectralFluxResult(centers, edges, similar(centers, RT, length(centers)),
-                                           similar(centers, RT, length(centers)))
-            _calculate_spectral_flux_with_N̂!(res, ws, û_comp, N̂, ks, shell_idx, execution; invariant=invariant)
-            return res
-        end
-    finally
-        Workspaces.release!(ws)
+    return map(decomposed) do û_comp
+        res = Types.SpectralFluxResult(centers, edges, similar(centers, RT, length(centers)),
+                                       similar(centers, RT, length(centers)))
+        _calculate_spectral_flux_with_N̂!(res, ws, û_comp, N̂, ks, shell_idx, execution; invariant=invariant)
+        return res
     end
 end
 
@@ -339,18 +333,17 @@ function _finalize_spectral_flux!(result::Types.SpectralFluxResult, ws::Workspac
 end
 
 # The parallel backends dispatch to named stubs that throw until the matching extension
-# (OhMyThreads, Distributed, KernelAbstractions) defines them.
+# (OhMyThreads, KernelAbstractions) defines them. A field on the calling process under a process backend is
+# reduced there, on its local backend.
 _calculate_spectral_flux_with_N̂!(result::Types.SpectralFluxResult, ws::Workspaces.SpectralFluxWorkspace, velocity_hat, N̂, ks, shell_idx::AbstractArray{Int}, ::ComputationalBackends.ThreadedBackend; kwargs...) =
     _spectral_flux_threaded!(result, ws, velocity_hat, N̂, ks, shell_idx; kwargs...)
-_calculate_spectral_flux_with_N̂!(result::Types.SpectralFluxResult, ws::Workspaces.SpectralFluxWorkspace, velocity_hat, N̂, ks, shell_idx::AbstractArray{Int}, ::ComputationalBackends.DistributedBackend; kwargs...) =
-    _spectral_flux_distributed!(result, ws, velocity_hat, N̂, ks, shell_idx; kwargs...)
+_calculate_spectral_flux_with_N̂!(result::Types.SpectralFluxResult, ws::Workspaces.SpectralFluxWorkspace, velocity_hat, N̂, ks, shell_idx::AbstractArray{Int}, exec::ComputationalBackends.DistributedBackend; kwargs...) =
+    _calculate_spectral_flux_with_N̂!(result, ws, velocity_hat, N̂, ks, shell_idx, ComputationalBackends.local_backend(exec); kwargs...)
 _calculate_spectral_flux_with_N̂!(result::Types.SpectralFluxResult, ws::Workspaces.SpectralFluxWorkspace, velocity_hat, N̂, ks, shell_idx::AbstractArray{Int}, gpu::ComputationalBackends.GPUBackend; kwargs...) =
     _spectral_flux_gpu!(result, ws, velocity_hat, N̂, ks, shell_idx, gpu; kwargs...)
 
 _spectral_flux_threaded!(args...; kwargs...) = throw(ArgumentError(
     "Threaded spectral flux requires OhMyThreads. Run `using OhMyThreads` to load the extension."))
-_spectral_flux_distributed!(args...; kwargs...) = throw(ArgumentError(
-    "Distributed spectral flux requires Distributed. Run `using Distributed` to load the extension."))
 _spectral_flux_gpu!(args...; kwargs...) = throw(ArgumentError(
     "GPU spectral flux requires KernelAbstractions. Run `using KernelAbstractions` to load the extension."))
 

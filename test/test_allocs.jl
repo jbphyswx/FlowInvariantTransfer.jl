@@ -228,9 +228,12 @@ Test.@testset "Allocations" begin
             φ = [mod(i * ga, 2π) for i in 0:M-1]
             uθ = [cos(θ[i]) for i in 1:M]; uφ = [sin(φ[i]) for i in 1:M]
             nu = FTB.FINUFFTBackend()
-            ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12,
-                                                                            rtol = 1e-13, nufft = nu, execution = _ALLOC_EXEC)
-            Test.@test _reuse_divergent!(ws, uθ, uφ) == 0
+            for enstrophy in (FIT.Types.EnstrophyTotal(), FIT.Types.EnstrophySplit())
+                ws = FIT.Spherical.ScatteredDivergentSphericalTransferWorkspace((θ, φ), lmax; radius = 1.0, tol = 1e-12,
+                                                                                rtol = 1e-13, nufft = nu, enstrophy,
+                                                                                execution = _ALLOC_EXEC)
+                Test.@test _reuse_divergent!(ws, uθ, uφ) == 0
+            end
         end
     end
 end

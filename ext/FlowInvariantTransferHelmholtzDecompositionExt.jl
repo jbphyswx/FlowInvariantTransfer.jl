@@ -13,8 +13,7 @@ const _HDDecomp = Union{FIT.Types.HelmholtzDecomposition, FIT.Types.RotationalDe
 # their returned cell values carry the cell-to-face-to-cell averaging.
 #
 # HD's three component-last parts are `u_rot + u_div + u_harm`. FIT folds the harmonic part into the
-# rotational component and returns component views. The solve outcome reports the least converged
-# potential solve.
+# rotational component and returns component views, with `solve`, the least converged potential solve.
 function FIT.Decomposition._decompose_field_physical(
     decomp::_HDDecomp,
     velocity_fields::Tuple,
@@ -42,29 +41,27 @@ function FIT.Decomposition._decompose_field_physical(
     return merge(parts, _solve_outcome(res))
 end
 
-# The least converged of the potential solves of `res`.
-function _solve_outcome(res::HDjl.HelmholtzResult)
-    solves = (res.χ_solve, res.rot_solve...)
-    return (; converged = all(s -> s.converged, solves),
-              iterations = maximum(s -> s.iterations, solves),
-              residual = maximum(s -> s.residual, solves))
-end
+# The least converged of the potential solves of `res` that iterate, `nothing` where each is an exact
+# transform.
+_solve_outcome(res::HDjl.HelmholtzResult) =
+    (; solve = foldl(FIT.Types.merge_outcomes, (res.χ_solve, res.rot_solve...)))
 
-# Coordinate vectors state no topology, mask or geometry, and the solver is selected from all three, so
-# the physical decomposition takes a grid. The spectral form below needs none of it.
+# Ranges are the periodic Cartesian box `to_spectral` reads them as: `N` samples `Δ` apart from `first(x)`,
+# period `L = N·Δ` (`Utils.domain_size_from_coords`), unmasked. Any other coordinate vector needs a grid
+# stating its period.
 function FIT.Decomposition._decompose_field_physical(
     decomp::_HDDecomp,
     velocity_fields::Tuple,
     coords_vecs::Tuple;
     kwargs...
 )
-    throw(ArgumentError(
-        "physical-space $(nameof(typeof(decomp))) needs a `FlowGeometries` grid: the Poisson solve is " *
-        "selected from the domain's topology, mask, axis spacing and geometry, and coordinate vectors " *
-        "carry none of them. Build the grid those axes describe — e.g. " *
-        "`FlowGeometries.Grids.StructuredGrid(FlowGeometries.Geometry.CartesianGeometry{Float64}(), x, y; " *
-        "topology = (FlowGeometries.Grids.Periodic(), FlowGeometries.Grids.Periodic()))` for a periodic box " *
-        "— and pass that."))
+    FIT.Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
+    FG = HDjl.FlowGeometries
+    FT = float(promote_type(map(eltype, coords_vecs)...))
+    axes = map((x, L) -> FG.Axes.PeriodicUniformAxis{FT}(first(x), L, length(x)), coords_vecs,
+               FIT.Utils.domain_size_from_coords(coords_vecs))
+    grid = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{FT}(), axes...)
+    return FIT.Decomposition._decompose_field_physical(decomp, velocity_fields, grid; kwargs...)
 end
 
 # 2. Spectral-space decomposition

@@ -15,11 +15,15 @@ export decompose_field, decompose_field!, helmholtz_project_spectral!
 Decompose a physical-space velocity field `fields` (e.g. `(u, v)`) with the given strategy on the
 `FlowGeometries` grid `domain`. The solver is selected from the grid's geometry, sampling, mask and
 topology: the Helmholtz family through the HelmholtzDecomposition extension, the helical and
-toroidal/poloidal splits through the FlowFieldSpectra extension.
+toroidal/poloidal splits through the FlowFieldSpectra extension. The Helmholtz family also takes a
+tuple of ranges `(x, y[, z])` as `domain`: the unmasked periodic Cartesian box of `N` samples `Δ` apart
+along each, period `N·Δ`, as [`Utils.domain_size_from_coords`](@ref FlowInvariantTransfer.Utils.domain_size_from_coords)
+reads them.
 
 Returns a `NamedTuple` of component tuples keyed by the decomposition's names (`rotational`,
 `divergent`; `positive`, `negative`; `toroidal`, `poloidal`). The Helmholtz family solves for
-potentials and adds `converged`, `iterations` and `residual`, the least converged of its solves;
+potentials and adds `solve`, the `FlowTransformBindings.SolverResult` of the least converged of its
+solves that iterate, `nothing` where each is an exact transform;
 `RotationalDecomposition`/`DivergentDecomposition` return that one component.
 `NoDecomposition` returns the components untouched and also accepts coordinate vectors.
 """

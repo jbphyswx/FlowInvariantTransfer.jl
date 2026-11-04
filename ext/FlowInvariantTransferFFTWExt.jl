@@ -129,6 +129,23 @@ _padded_scratch(velocity_hat, ks, pad::FIT.Workspaces.PaddedGrid, fft_nthreads) 
     _make_padded_scratch(velocity_hat, ks, pad, fft_nthreads)
 _padded_scratch(velocity_hat, ks, ::Nothing, fft_nthreads) = nothing
 
+# A worker copy's bundle: the plans, wavenumbers, keep factors and padding maps shared, the coefficient scratch its
+# own and the padded buffers those of its padded grid `pad`. FFTW executes one plan concurrently on distinct arrays
+# (`fftw_execute_dft` and its kin are its thread-safe routines).
+FIT.Workspaces._worker_plans(p::RealFFTPlans, pad) =
+    RealFFTPlans(p.p_rfft, p.p_brfft, similar(p.spec), p.kg, p.keep, _worker_padded(p.pad, pad))
+FIT.Workspaces._worker_plans(p::ComplexFFTPlans, pad) =
+    ComplexFFTPlans(p.p_fft, p.p_bfft, similar(p.spec), similar(p.spec2), p.kg, p.keep, _worker_padded(p.pad, pad))
+
+_worker_padded(::Nothing, _pad) = nothing
+_worker_padded(s::RealPaddedScratch, pad) = RealPaddedScratch(
+    s.p_rfft, s.p_brfft, pad.spec, pad.spec1, pad.u_phys, pad.g_phys, pad.n_phys, s.maps, s.kd, s.invM)
+function _worker_padded(s::ComplexPaddedScratch, pad)
+    out = similar(s.out)
+    return ComplexPaddedScratch(s.p_fft, s.p_bfft, pad.spec, pad.spec1, out, reshape(out, size(s.out1)),
+                                pad.u_phys, pad.g_phys, pad.n_phys, s.maps, s.kd, s.invM)
+end
+
 # The workspace's plan set; a workspace built before this extension was loaded holds `nothing`.
 _require_plans(ws) = _require_plans(ws.plans, ws)
 _require_plans(p::AnyFFTPlans, ws) = p

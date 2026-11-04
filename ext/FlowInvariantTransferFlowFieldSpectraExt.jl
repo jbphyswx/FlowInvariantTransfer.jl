@@ -1,6 +1,6 @@
 module FlowInvariantTransferFlowFieldSpectraExt
 
-using FlowFieldSpectra: FlowFieldSpectra as FFS
+using FlowFieldSpectra: FlowFieldSpectra as FFS, FlowGeometries as FG
 using FlowInvariantTransfer: FlowInvariantTransfer as FIT
 using FlowTransformBindings: FlowTransformBindings as FTB
 using SpectralBackends: SpectralBackends
@@ -17,6 +17,19 @@ const _FFSMethod = Union{FIT.Types.SpectralFluxMethod, FIT.Types.ShellToShellTra
 
 # One `Periodic()` tag per direction of `axes`.
 _all_periodic(axes::Tuple) = map(_ -> FFS.FlowGeometries.Grids.Periodic(), axes)
+
+# A range's samples closing their period at `n·Δ`, the FFT's own sampling, as a `PeriodicUniformAxis`; any other
+# axis as it is.
+_closed_axis(x::FG.Axes.PeriodicUniformAxis) = x
+_closed_axis(x::AbstractRange) = FG.Axes.PeriodicUniformAxis(first(x), length(x) * step(x), length(x))
+_closed_axis(x::AbstractVector) = x
+
+# The all-periodic Cartesian grid over `axes`: with no period given each closes at its own `n·Δ`, and with one
+# given the axes keep their samples and wrap at it.
+_periodic_grid(geom, axes::Tuple, ::Nothing) =
+    FFS.FlowGeometries.Grids.StructuredGrid(geom, map(_closed_axis, axes)...; topology = _all_periodic(axes))
+_periodic_grid(geom, axes::Tuple, period) =
+    FFS.FlowGeometries.Grids.StructuredGrid(geom, axes...; topology = _all_periodic(axes), period = period)
 
 # `FFS.calculate_spectrum` is declared on `FlowGeometries.Grids.AbstractGrid` and selects its transform
 # from the grid, so a grid passed here reaches whichever one its geometry and sampling admit. It returns
@@ -35,9 +48,9 @@ function FIT._physical_energy_transfer(
     return FIT.calculate_energy_transfer(method, coeffs, ks; execution = execution, kwargs...)
 end
 
-# Coordinate-vector convenience: an all-periodic Cartesian grid over those axes. Pass each axis as a
-# uniform range and its period is inferred (`n·Δ`); a stretched or plain-vector axis needs
-# `domain_size`, its per-direction period.
+# Coordinate-vector convenience: an all-periodic Cartesian grid over those axes. A uniform range with no
+# `domain_size` closes its period at `n·Δ`; a stretched or plain-vector axis needs `domain_size`, its
+# per-direction period.
 function FIT._physical_energy_transfer(
     spectral::SpectralBackends.AbstractSpectralBackend,
     method::_FFSMethod,
@@ -49,8 +62,7 @@ function FIT._physical_energy_transfer(
 )
     FT  = float(eltype(coords_vecs[1]))
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...;
-                                                   topology = _all_periodic(coords_vecs), period = domain_size)
+    grid = _periodic_grid(geom, coords_vecs, domain_size)
     return FIT._physical_energy_transfer(spectral, method, velocity_fields, grid, ms; kwargs...)
 end
 
@@ -152,27 +164,221 @@ function FIT._to_spectral_workspace_on_coeffs(
     FT = real(eltype(velocity_hat))
     Ls = map(a -> FT(2π) / FT(length(a) > 1 ? abs(a[2] - a[1]) : one(FT)), ks)
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    axes_ = map((L, n) -> range(zero(FT); step = L / n, length = n), Ls, ns)
-    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, axes_...; topology = _all_periodic(ks), period = Ls)
+    grid = FFS.FlowGeometries.Grids.StructuredGrid(
+        geom, map((L, n) -> FG.Axes.PeriodicUniformAxis{FT}(zero(FT), L, n), Ls, ns)...)
     # A half layout is the transform of a real field, so the plans are built for one.
     ET = _field_type(first(ks), FT)
     return _ffs_workspace(velocity_hat, grid, ns, ET, D, transform, execution)
 end
 
-# Per-axis coordinate vectors describe the uniform periodic box `L = N·Δ` of `domain_size_from_coords`;
-# the grid carries that period explicitly.
+# Per-axis coordinate vectors describe the uniform periodic box `L = N·Δ` of `domain_size_from_coords`, each
+# axis a `PeriodicUniformAxis` closing there.
 function FIT._to_spectral_workspace_on_axes(velocity_fields::Tuple, coords_vecs::Tuple; kwargs...)
     FIT.Utils.validate_velocity_input(velocity_fields, length(coords_vecs))
     FIT.Utils.validate_uniform_grid(coords_vecs)
-    Ls = FIT.Utils.domain_size_from_coords(coords_vecs)
     FT = float(real(eltype(first(velocity_fields))))
     geom = FFS.FlowGeometries.Geometry.CartesianGeometry{FT}()
-    grid = FFS.FlowGeometries.Grids.StructuredGrid(geom, coords_vecs...; topology = _all_periodic(coords_vecs), period = Ls)
-    return FIT.ToSpectralWorkspace(velocity_fields, grid; kwargs...)
+    return FIT.ToSpectralWorkspace(velocity_fields, _periodic_grid(geom, coords_vecs, nothing); kwargs...)
 end
 
 _field_type(::FTB.RFFTAxis, ::Type{T}) where {T} = T
 _field_type(::AbstractVector, ::Type{T}) where {T} = Complex{T}
+
+"""
+    ToSpectralWorkspace(fields::NTuple{M,<:FlowGeometries.Decomposition.AbstractSplitField}; transform)
+
+Build reusable analysis and synthesis of component fields held in FlowGeometries blocks.
+The returned coefficients and physical staging field retain their process distribution.
+"""
+function FIT.ToSpectralWorkspace(fields::NTuple{M,<:FG.Decomposition.AbstractSplitField};
+        transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()) where {M}
+    M > 0 || throw(ArgumentError("to_spectral needs at least one field component"))
+    split = FG.Decomposition.split_of(first(fields))
+    all(field -> FG.Decomposition.split_of(field) === split, fields) ||
+        throw(ArgumentError("field components must live on the same split grid"))
+    T = float(promote_type(map(eltype, fields)...))
+    analysis = FFS.plan_spectrum(split, T; transform, batch = (M,))
+    synthesis = FFS.plan_synthesis(analysis)
+    physical = FFS.allocate_field(synthesis)
+    coefficients = FFS.allocate_coefficients(analysis)
+    transforms = (; dft! = (out, field) -> FFS.calculate_spectrum!(out, analysis, field),
+                    idft! = (out, modes) -> FFS.synthesize!(out, synthesis, modes))
+    return FIT.ToSpectralWorkspace(transforms, physical, coefficients, FFS.wavenumbers(analysis))
+end
+
+function FIT.to_spectral!(workspace::FIT.ToSpectralWorkspace{TF,RA},
+        fields::NTuple{M,<:FG.Decomposition.AbstractSplitField}) where
+        {TF,RA<:FG.Decomposition.AbstractSplitField,M}
+    split = FG.Decomposition.split_of(workspace.field_phys)
+    FG.Decomposition.foreach_block(split, workspace.field_phys, fields...) do block, output, components...
+        size(output, ndims(output)) == M || throw(DimensionMismatch(
+            "workspace holds $(size(output, ndims(output))) components; got $M"))
+        foreach(components, ntuple(identity, Val(M))) do component, c
+            ndims(component) == length(block.interior) || throw(DimensionMismatch(
+                "each component must hold one field per grid cell"))
+            view(output, block.interior..., c) .= view(component, block.interior...)
+        end
+        return nothing
+    end
+    workspace.tf.dft!(workspace.û, workspace.field_phys)
+    return workspace.û, workspace.ks
+end
+
+FIT.to_spectral(fields::NTuple{M,<:FG.Decomposition.AbstractSplitField}; kwargs...) where {M} =
+    FIT.to_spectral!(FIT.ToSpectralWorkspace(fields; kwargs...), fields)
+
+function FIT.from_spectral!(workspace::FIT.ToSpectralWorkspace{TF,RA},
+        coefficients::FG.Decomposition.AbstractSplitField) where
+        {TF,RA<:FG.Decomposition.AbstractSplitField}
+    workspace.tf.idft!(workspace.field_phys, coefficients)
+    return workspace.field_phys
+end
+
+# ---------------------------------------------------------------------------
+# Spectral flux of a velocity split over Distributed workers, on FlowFieldSpectra's split FFT: the components
+# analysed together (`û = fft(u)/N`), the nonlinear term `N̂_i = FFT[Σ_j u_j ∂_j u_i]/N` formed from one synthesis
+# of the velocity and one of each `i k_j û`, the products taken block by block, and each coefficient block's modes
+# summed into the shells, the block sums added on the caller. The steps and the 2/3 rule are the serial
+# `calculate_spectral_flux`'s.
+# ---------------------------------------------------------------------------
+
+"""
+    calculate_energy_transfer(method::SpectralFluxMethod, fields::NTuple{D,<:FlowGeometries.Decomposition.AbstractWorkerField};
+                              dealiasing = OrszagTwoThirds(), invariant = KineticEnergy(), geometry = IsotropicShells(),
+                              transform = AutoSpectralBackend()) -> SpectralFluxResult
+
+The spectral flux of a real velocity whose `D` components live on one FlowGeometries worker split of a uniform
+periodic Cartesian grid of `D` directions, on the shells of `method.binning`, each worker transforming and multiplying
+its own blocks: equal to [`calculate_spectral_flux`](@ref) on the gathered field, to rounding. `dealiasing` is
+`OrszagTwoThirds()` or `NoDealiasing()`. Every worker needs FlowInvariantTransfer and FlowFieldSpectra loaded.
+"""
+function FIT.calculate_energy_transfer(method::FIT.Types.SpectralFluxMethod,
+        fields::NTuple{D,<:FG.Decomposition.AbstractWorkerField};
+        dealiasing::Union{FIT.Types.OrszagTwoThirds,FIT.Types.NoDealiasing} = FIT.Types.OrszagTwoThirds(),
+        invariant::FIT.Types.AbstractInvariant = FIT.Types.KineticEnergy(),
+        geometry::FIT.Types.ShellMagnitude = FIT.Types.IsotropicShells(),
+        transform::SpectralBackends.AbstractSpectralBackend = SpectralBackends.AutoSpectralBackend()) where {D}
+    split = FG.Decomposition.split_of(first(fields))
+    all(f -> FG.Decomposition.split_of(f) === split, fields) ||
+        throw(ArgumentError("velocity components must live on the same split grid"))
+    ndims(FG.Decomposition.global_grid(split)) == D ||
+        throw(DimensionMismatch("the spectral flux needs one velocity component per grid direction"))
+    T = float(promote_type(map(eltype, fields)...))
+    T <: Real || throw(ArgumentError("the split spectral flux takes a real velocity; got $T components"))
+    plan = FFS.plan_spectrum(split, T; transform, batch = (D,))
+    ks = FFS.wavenumbers(plan)
+    return _split_spectral_flux(plan, FFS.plan_synthesis(plan), fields, ks, method.binning,
+                                dealiasing isa FIT.Types.OrszagTwoThirds, invariant, geometry)
+end
+
+function _split_spectral_flux(plan, synth, fields::NTuple{D}, ks, binning, trunc::Bool, invariant, geometry) where {D}
+    FT = real(FFS.coefficient_type(plan))
+    # Per axis, each mode's derivative wavenumber, its wavenumber, and whether the 2/3 rule keeps it.
+    kd = map(a -> FT[FTB.derivative_wavenumber(a, i) for i in 1:length(a)], ks)
+    kr = map(a -> collect(FT, a), ks)
+    kept = map(a -> Bool[!trunc || abs(FTB.mode_frequency(a, i)) <= FTB.dealias_cutoff(a, 2) for i in 1:length(a)], ks)
+    u = FFS.allocate_field(synth)
+    _stage_components!(u, fields)
+    û = FFS.allocate_coefficients(plan)
+    FFS.calculate_spectrum!(û, plan, u)
+    spec = FFS.allocate_coefficients(plan)
+    _kept_coefficients!(spec, û, kept, nothing)
+    FFS.synthesize!(u, synth, spec)
+    N = FFS.allocate_field(synth)
+    g = FFS.allocate_field(synth)
+    for j in 1:D
+        _kept_coefficients!(spec, û, kept, kd[j], j)
+        FFS.synthesize!(g, synth, spec)
+        _advect!(N, u, g, j)
+    end
+    FFS.calculate_spectrum!(spec, plan, N)
+    kmax = FIT.ShellBinning.max_shell_coordinate(geometry, ks)
+    edges = FIT.ShellBinning.shell_edges(binning, kmax)
+    centers = collect(FIT.ShellBinning.shell_centers(binning, kmax))
+    dims = FIT.ShellBinning._shell_dims(geometry, Val(D))
+    fold = FT[FTB.fold_weight(first(ks), i) for i in 1:length(first(ks))]
+    sums = FG.Decomposition.map_blocks(FG.Decomposition.split_of(û), û, spec) do b, a, n
+        _block_shell_sums(b, a, n, ks, kr, kept, dims, edges, fold, invariant)
+    end
+    transfer = reduce(+, sums)
+    return FIT.Types.SpectralFluxResult(centers, edges, transfer, cumsum(transfer))
+end
+
+# The velocity's components into the batch axis of `u`, block by block.
+function _stage_components!(u, fields::NTuple{D}) where {D}
+    FG.Decomposition.foreach_block(FG.Decomposition.split_of(u), u, fields...) do b, out, components...
+        foreach(components, ntuple(identity, Val(D))) do component, c
+            view(out, b.interior..., c) .= view(component, b.interior...)
+        end
+        return nothing
+    end
+    return u
+end
+
+# `spec = û` at the modes the 2/3 rule keeps, zero elsewhere; given `kj`, the derivative wavenumbers of axis `j`,
+# `spec = i k_j û` there.
+_kept_coefficients!(spec, û, kept, ::Nothing) = _kept_coefficients!(spec, û, kept, nothing, 0)
+function _kept_coefficients!(spec, û, kept, kj, j::Int)
+    FG.Decomposition.foreach_block(FG.Decomposition.split_of(û), spec, û) do b, s, a
+        off = _mode_offset(b)
+        @inbounds for c in axes(a, ndims(a)), L in CartesianIndices(map(length, b.ranges))
+            G = L + off
+            s[L, c] = _kept(kept, G) ? _mode_factor(kj, j, G, eltype(s)) * a[L, c] : zero(eltype(s))
+        end
+        return nothing
+    end
+    return spec
+end
+
+@inline _mode_factor(::Nothing, _, _, ::Type{C}) where {C} = one(C)
+@inline _mode_factor(kj::AbstractVector, j::Int, G::CartesianIndex, ::Type{C}) where {C} = C(im * @inbounds(kj[G[j]]))
+
+@inline _kept(kept::NTuple{N,AbstractVector{Bool}}, G::CartesianIndex{N}) where {N} =
+    all(map((k, i) -> @inbounds(k[i]), kept, Tuple(G)))
+
+# A coefficient block's first mode less one, per axis: local index `L` is global mode `L + offset`.
+@inline _mode_offset(b) = CartesianIndex(map(r -> first(r) - 1, b.ranges))
+
+# `N[…, i] += u[…, j] · g[…, i]` on each block's own cells.
+function _advect!(N, u, g, j::Int)
+    FG.Decomposition.foreach_block(FG.Decomposition.split_of(N), N, u, g) do b, n, v, w
+        uj = view(v, b.interior..., j)
+        for i in axes(n, ndims(n))
+            view(n, b.interior..., i) .+= uj .* view(w, b.interior..., i)
+        end
+        return nothing
+    end
+    return N
+end
+
+# A block's local arrays read at global mode indices, the indices `Invariants._density_at` and the wavenumber axes
+# take.
+struct _AtModes{A<:AbstractArray,N}
+    a::A
+    offset::CartesianIndex{N}
+end
+Base.eltype(::Type{_AtModes{A,N}}) where {A,N} = eltype(A)
+@inline Base.getindex(m::_AtModes{A,N}, G::CartesianIndex{N}, c::Int) where {A,N} = @inbounds m.a[G - m.offset, c]
+
+# One coefficient block's shell sums of the transfer density, at the modes the 2/3 rule keeps.
+function _block_shell_sums(b, a, n, ks, kr, kept, dims, edges, fold, invariant)
+    FT = eltype(fold)
+    nshell = length(edges) - 1
+    sums = zeros(FT, nshell)
+    off = _mode_offset(b)
+    û, N̂ = _AtModes(a, off), _AtModes(n, off)
+    M = size(a, ndims(a))
+    @inbounds for L in CartesianIndices(map(length, b.ranges))
+        G = L + off
+        _kept(kept, G) || continue
+        k = sqrt(sum(d -> kr[d][G[d]]^2, dims; init = zero(FT)))
+        s = searchsortedlast(edges, k)
+        s = (1 <= s <= nshell) ? s : (s == nshell + 1 && k == edges[end]) ? nshell : 0
+        s == 0 && continue
+        sums[s] += fold[G[1]] * FIT.Invariants._density_at(invariant, û, N̂, ks, G, M)
+    end
+    return sums
+end
 
 
 # ---------------------------------------------------------------------------
